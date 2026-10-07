@@ -1,13 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+  Android 11 及以下的自动备份规则。
+
+  原则（计划 §D.2 第 6 条）：**敏感凭据不进默认备份**。
+  凭据存放在 `sharedpref/secrets.xml`（用 Android Keystore 里的密钥加密），
+  Keystore 密钥不可导出，备份过去也解不开，只会制造"恢复了但打不开"的困惑，
+  所以直接排除。数据库与设置则允许备份（用户重新装机后书库记录还在）。
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <include domain="database" path="." />
+    <include domain="sharedpref" path="settings_global.xml" />
+    <include domain="sharedpref" path="settings_jm.xml" />
+    <include domain="sharedpref" path="settings_bili.xml" />
+    <exclude domain="sharedpref" path="secrets.xml" />
+    <!-- 临时目录与崩溃日志没有备份价值 -->
+    <exclude domain="file" path="tmp" />
+    <exclude domain="file" path="export" />
+    <exclude domain="file" path="crash" />
 </full-backup-content>

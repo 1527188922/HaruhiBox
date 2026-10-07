@@ -26,3 +26,6 @@ bin-release/
 .externalNativeBuild
 .cxx
 local.properties
+
+# Room 导出的 schema 要进版本库（迁移测试依赖它）
+!app/schemas

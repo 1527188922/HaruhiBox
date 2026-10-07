@@ -1,3 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">HaruhiBox</string>
+
+    <!-- P0 占位页文案；P2 接入开屏选择后连同该界面一起删除 -->
+    <string name="p0_placeholder_hint">工程骨架已就绪，功能页面按计划阶段接入</string>
 </resources>
