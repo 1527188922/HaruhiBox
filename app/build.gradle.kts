@@ -1,9 +1,24 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
+
+// ---------------------------------------------------------------------------
+// 本地 release 签名。
+// 没有 keystore.properties 时 release 包不签名（CI 与只跑单测的场景不需要它）。
+// 详见 docs/BUILD.md。
+// ---------------------------------------------------------------------------
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
+}
+val hasReleaseSigning = keystoreProperties.getProperty("storeFile") != null
 
 android {
     namespace = "com.haruhi.haruhibox"
@@ -28,6 +43,20 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+                // 侧载自用：开启 v1+v2 以兼容旧机型
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // 调试包与正式包使用不同的私有目录，避免装了两个包时互相踩数据
@@ -35,10 +64,23 @@ android {
         }
         release {
             buildConfigField("String", "LIBRARY_DIR_NAME", "\"library\"")
-            optimization {
-                enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
             }
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // ⚠ 不要在这里配 optimization.packageScope。
+            // AGP 9 的 `optimization { packageScope = setOf("kotlin.**", ...) }` 会让 R8 把
+            // Kotlin 标准库类重打包到别的包，而 Kotlin 的 internal 类在字节码里是 public，
+            // 重打包后 R8 会把它们收窄成包私有 —— 结果任何继承它们的类（包括 R8 自己合成的类）
+            // 都会在运行期抛：
+            //   IllegalAccessError: Class kotlin.text.k extended by class v02 is inaccessible
+            // 表现为 androidx.startup.InitializationProvider 初始化失败、应用启动即闪退。
+            // 这条配置曾出现在 P0 的脚手架上，P1 加签名/混淆时被证实有害，已移除。
         }
     }
 
@@ -61,6 +103,14 @@ android {
                 "META-INF/NOTICE",
                 "META-INF/NOTICE.txt",
                 "META-INF/INDEX.LIST",
+                // ---- 体积优化（见 docs/BUILD.md）----
+                // pdfbox-android 传递引入 org.bouncycastle:bcprov-jdk15to18，
+                // 而 bcprov 体积最大的部分是**后量子密码**的查找表，纯数据文件、
+                // 不是类，R8 不会删：
+                //   lowmc.properties 3.6MB、sike/p751 1.9MB、p610 1.2MB、p503 765KB…
+                // PDFBox 只用 BouncyCastle 做标准 CMS/证书解析，完全用不到 PQC。
+                // 注意：这不是安全功能开关，被排除的只是 PQC 算法的参数表。
+                "org/bouncycastle/pqc/**",
             )
         }
     }
@@ -124,7 +174,10 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.material.icons.extended)
+    // ⚠ 不要引 material-icons-extended：它是一个包含几千个矢量图标的模块，
+    // 即使 R8 能删掉未使用的图标，也会显著拖慢构建、并且 debug 包里全量保留。
+    // 需要图标时用 material-icons-core（随 material3 传递引入）里的常用集，
+    // 或者自己画 ImageVector。
     implementation(libs.androidx.navigation.compose)
 
     // --- 数据库 ---

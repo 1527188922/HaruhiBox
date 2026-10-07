@@ -96,9 +96,25 @@ app/src/main/java/com/haruhi/haruhibox/
    详见 `docs/p0/spike2-pdf.md`。
 2. **PDF 权限对 owner 无效**：参考实现 owner 与 user 同密码，导致"不可修改/不可复制"
    对打开者不生效。是否拆分 owner/user 密码？
-3. **真机验收**：本机 `adb devices` 为空，P7 需要用户提供设备或模拟器。
-4. **JM 图片线路默认值**：参考实现硬编码 `IMAGE_DOMAIN`，App 侧作为可编辑线路列出，
+3. **JM 图片线路默认值**：参考实现硬编码 `IMAGE_DOMAIN`，App 侧作为可编辑线路列出，
    默认值沿用 `cdn-msp2.jmapiproxy2.cc`（见 `JmDefaults`）。
+4. **debug 与 release 包名相同**：签名不同，不能互相覆盖安装。
+   等有真实书库数据前需要决定：是否给 debug 的 applicationId 加 `.debug` 后缀。
+5. **release 签名 keystore 需备份**：`haruhibox-release.jks` 只在本地，丢了无法覆盖升级。
+
+## 真机验证记录
+
+设备：小米 23116PN5BC（`shennan`/`shennong`，Android 14+，1440×3200）。
+`adb` 通过无线调试连接。
+
+| 项 | 结果 |
+|---|---|
+| release APK 安装 | ✅ 4.44 MB，`adb install` 成功 |
+| 冷启动 | ✅ 无崩溃，`topResumedActivity` 为 `MainActivity` |
+| 界面渲染 | ✅ 显示占位页（截图已确认） |
+| R8 混淆后的运行期正确性 | ✅ 修掉 `packageScope` 引发的 `IllegalAccessError` 后正常 |
+
+详细排查与体积优化记录见 `docs/BUILD.md`。
 
 ## 验证命令
 
@@ -107,7 +123,7 @@ cd D:\Project\HaruhiBox
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-当前基线：**90 个单元测试全绿**，lint 0 error，debug APK 可构建。
+当前基线：**90 个单元测试全绿**，lint 0 error，debug APK 33 MB / release APK 4.4 MB 均可安装运行。
 
 ### 测试清单
 
