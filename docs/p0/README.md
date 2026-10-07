@@ -161,16 +161,38 @@ base64 则无法表达"空串 vs 缺失"且对 1 字符长度有填充歧义。
 ## 4. Spike 2：PDF 方案选型　✅ 通过（选 B1：pdfbox-android）
 
 三件套（加密 / 书签 / 页面尺寸）全部验证通过，**不需要**走 B2 手写 PDF 写入器。
-完整记录见 `docs/p0/spike2-pdf.md`，其中有两个需要用户确认的行为差异：
+完整记录见 `docs/p0/spike2-pdf.md`。用户已于 2026-10-08 就两个行为差异做出决策：
 
-1. `pdfbox-android` 的 `StandardProtectionPolicy` **没有** `setEncryptionKeyLength`，
-   参考实现那一行无法照抄；实测产物是 `V=2 / R=3 / Length=128`（RC4-128，不是 AES）。
-2. 参考实现 owner 与 user 用同一个密码，导致权限位对打开者不生效
-   （`isOwnerPermission == true`，`canModify()` 返回 true）；`P` 位本身是对的。
+1. **加密算法改为 AES-128**。
+   > 更正：本文档 2026-10-07 版本曾写「Android 端口没有 `setEncryptionKeyLength`，
+   > 参考实现产出 AES-128」——**两句都是错的**，当时读的 `javap` 输出不完整。
+   > 实测（桌面版 PDFBox 3.0.2 与 pdfbox-android 2.0.27.0 行为一致）：
+   > 单独设 `encryptionKeyLength` **被忽略**，参考实现实际产出 **40 位 RC4**；
+   > 只有同时设 `preferAES = true` 才得到 AES-128。
+   > 所以本 App 的 AES-128 是**有意的安全强化**，不是与参考实现对齐。
+2. **访问控制只看「能否打开」**：owner 与 user 同密码，权限位因此对打开者不生效
+   （实测 `isOwnerPermission == true`）。用户明确接受。
 
-两项都只影响 `PdfWriter.applyProtection` 一处，不阻塞 P4 开工。
+两项都只影响 `PdfWriter.applyProtection` 一处。
 
-测试：`app/src/test/java/com/haruhi/haruhibox/core/codec/PdfWriterSpikeTest.kt`
+### 加密用例为什么跑在真机上
+
+Robolectric 沙箱里 Conscrypt 排在 JCE provider 首位，JDK 初始化 `JarVerifier` 时
+用它验签 provider 的 JAR 会失败：
+
+```
+AES via SunJCE = ok        AES via BC = FAIL: NoClassDefFoundError: javax.crypto.JarVerifier
+```
+
+PDFBox 的 AES 走 BouncyCastle，因此**任何 AES 路径在 Robolectric 下都跑不了**
+（与 D-6 同源）。所以：
+
+- `PdfWriterSpikeTest`（开发机 / Robolectric）覆盖页面、书签、`PageMode`、不加密；
+- `PdfEncryptionInstrumentedTest`（**设备**）覆盖 AES-128、错误密码、权限位事实。
+
+```powershell
+.\gradlew.bat :app:connectedDebugAndroidTest
+```
 
 ## 5. Spike 3：Android 解扰　✅ 通过
 

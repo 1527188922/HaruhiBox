@@ -31,8 +31,14 @@ class AppContainer(private val appContext: Context) {
 
     // ---------------- 存储 ----------------
 
+    /**
+     * 本地目录规划。
+     *
+     * debug 与 release 的 `applicationId` 不同（`.debug` 后缀），所以两者的 `filesDir`
+     * 天然隔离，这里不需要再靠目录名区分（原先的 `LIBRARY_DIR_NAME` 因此已移除）。
+     */
     val libraryDirs: LibraryDirs = LibraryDirs(
-        File(appContext.filesDir, BuildConfig.LIBRARY_DIR_NAME),
+        File(appContext.filesDir, LIBRARY_DIR_NAME),
     ).ensureAll()
 
     val database: HaruhiBoxDatabase by lazy { HaruhiBoxDatabase.create(appContext) }
@@ -135,5 +141,13 @@ class AppContainer(private val appContext: Context) {
         const val BILI_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0"
+
+        /**
+         * 私有库目录名。
+         *
+         * debug 与 release 的 `applicationId` 不同（`.debug` 后缀），各自的 `filesDir`
+         * 本来就隔离，所以这里两种构建用同一个名字即可。
+         */
+        const val LIBRARY_DIR_NAME = "library"
     }
 }

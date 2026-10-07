@@ -3,12 +3,8 @@ package com.haruhi.haruhibox.core.codec
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
 import com.google.common.truth.Truth.assertThat
-import com.tom_roush.pdfbox.cos.COSNumber
 import com.tom_roush.pdfbox.pdmodel.PDDocument
-import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
-import com.tom_roush.pdfbox.pdmodel.encryption.InvalidPasswordException
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -20,13 +16,16 @@ import java.io.File
 /**
  * P0 spike 2：用 `com.tom-roush:pdfbox-android` 生成 PDF 的可行性验证。
  *
- * 需要验证的三件事（计划 §7 的 B1 方案）：
- * 1. **加密**：`StandardProtectionPolicy` 在 Android 端口上可用，且错误密码打不开；
- * 2. **书签**：章节目录（outline）能写入并被重新解析出来；
- * 3. **页面**：每张图一页、页面尺寸 = 图片像素尺寸。
+ * 这里覆盖**不涉及密码学**的部分（Robolectric 可以跑）：
+ * 页面数、页面尺寸 = 图片像素尺寸、章节目签、`PageMode`、"不设密码"确实不加密。
  *
- * 这里用 Robolectric 跑，因为 PDFBox 依赖 `android.graphics.Bitmap`；
- * 真机验证是 P4 的验收项，P0 只确认"能力存在且行为正确"。
+ * **加密相关的用例在 `app/src/androidTest/.../PdfEncryptionInstrumentedTest.kt`**，
+ * 原因：PDFBox 的 AES 走 BouncyCastle，而 Robolectric 沙箱里
+ * `javax.crypto.Cipher.getInstance` 会去验签 BC 的 JAR，Conscrypt 排在 provider
+ * 首位导致 `JarVerifier` 初始化失败：
+ *   AES via SunJCE = ok    AES via BC = FAIL: NoClassDefFoundError: javax.crypto.JarVerifier
+ * 这是 JDK 侧类加载与 JAR 验签的产物，真机上不存在（APK 里的 BC 类无需 JAR 验签）。
+ * 详见 `docs/p0/spike2-pdf.md`。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -90,79 +89,6 @@ class PdfWriterSpikeTest {
             assertThat(chapterTitles).containsExactly("第1话", "第2话", "第10话").inOrder()
         }
     }
-
-    @Test
-    fun `password protected album cannot be opened with a wrong password`() {
-        val albumDir = buildAlbum("第1话" to listOf("00001" to (20 to 20)))
-        val out = File(temp.root, "protected.pdf")
-
-        val result = writer.albumToPdf(albumDir, out, password = "1234")
-        assertThat(result.encrypted).isTrue()
-
-        // 正确密码 + 空 owner 密码都能打开
-        PDDocument.load(out, "1234").use { doc ->
-            assertThat(doc.isEncrypted).isTrue()
-            assertThat(doc.numberOfPages).isEqualTo(1)
-        }
-
-        // 错误密码必须失败
-        var wrongPasswordRejected = false
-        try {
-            PDDocument.load(out, "9999").close()
-        } catch (_: InvalidPasswordException) {
-            wrongPasswordRejected = true
-        }
-        assertThat(wrongPasswordRejected).isTrue()
-    }
-
-    @Test
-    fun `protection sets the read only permission bits`() {
-        val albumDir = buildAlbum("第1话" to listOf("00001" to (20 to 20)))
-        val out = File(temp.root, "permissions.pdf")
-
-        writer.albumToPdf(albumDir, out, password = "1234")
-
-        PDDocument.load(out, "1234").use { doc ->
-            val encryption = doc.encryption ?: error("文档没有加密字典")
-
-            // ------------------------------------------------------------------
-            // P0 spike 2 的两个重要发现（详见 docs/p0/spike2-pdf.md）：
-            //
-            // 1. pdfbox-android 2.0.27.0 的 `StandardProtectionPolicy` **没有**
-            //    `setEncryptionKeyLength`。参考实现调的 `policy.setEncryptionKeyLength(128)`
-            //    在 Android 端口上根本不存在，实际生效的是 StandardSecurityHandler 默认值。
-            //    → 这里读实际加密字典作为 P4 的验收基线。
-            //
-            // 2. **权限位只对 user 密码生效**。参考实现把 owner/user 密码都设成同一个值
-            //    （`new StandardProtectionPolicy(password, password, permission)`），
-            //    于是打开文档时用的是 owner 身份，PDFBox 的 `canModify()` 一律返回 true，
-            //    "不可修改/不可复制"在阅读器里等于没生效（P 位本身是对的）。
-            //    → 真要限制阅读者，必须区分 owner/user 两个密码；这属于**行为差异**，
-            //      需要用户确认后再改，P0 先照抄参考实现并把事实记录下来。
-            // ------------------------------------------------------------------
-            assertThat(readEncryptionKeyLength(encryption)).isEqualTo(128)
-
-            val pValue = (encryption.getCOSObject().getItem("P") as COSNumber).intValue()
-            val permission = AccessPermission(pValue)
-
-            // P 位本身与参考实现一致：只关了"修改/复制/无障碍提取"三项，
-            // 其余权限沿用 PDFBox 的默认值（加注、填表、打印仍然允许）。
-            assertThat(permission.canModify()).isFalse()
-            assertThat(permission.canExtractContent()).isFalse()
-            assertThat(permission.canExtractForAccessibility()).isFalse()
-            assertThat(permission.canPrint()).isTrue()
-
-            // 用 owner 身份打开时 PDFBox 一律放行——这正是上面第 2 点的表现
-            assertThat(doc.currentAccessPermission.isOwnerPermission).isTrue()
-        }
-    }
-
-    private fun readEncryptionKeyLength(encryption: com.tom_roush.pdfbox.pdmodel.encryption.PDEncryption): Int =
-        try {
-            encryption.javaClass.getMethod("getLength").invoke(encryption) as Int
-        } catch (_: NoSuchMethodException) {
-            error("PDEncryption 上没有可用的长度 getter；请更新本测试以匹配 pdfbox-android 版本")
-        }
 
     @Test
     fun `empty password means no protection at all`() {

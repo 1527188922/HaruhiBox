@@ -17,6 +17,9 @@ cd D:\Project\HaruhiBox
 
 # 直接安装 release 包
 adb install -r app\build\outputs\apk\release\app-release.apk
+
+# PDF 加密等必须在设备上跑的用例（先确认 adb devices 有设备）
+.\gradlew.bat :app:connectedDebugAndroidTest
 ```
 
 ## 构建环境（P0 固定，见 `docs/p0/README.md`）
@@ -30,24 +33,21 @@ adb install -r app\build\outputs\apk\release\app-release.apk
 > `gradle.properties` 里的 `org.gradle.java.home` 是本机绝对路径。
 > CI 上由 workflow 里的 `sed` 删掉这一行，改用 `JAVA_HOME`。
 
-## 两种包的区别
+## 两种包可以同时安装
 
 | | debug | release |
 |---|---|---|
+| applicationId | `com.haruhi.haruhibox.debug` | `com.haruhi.haruhibox` |
 | 体积 | ~33 MB | ~4.4 MB |
 | 混淆/裁剪 | 关闭 | R8 minify + resource shrink |
-| 私有目录 | `files/library-debug` | `files/library` |
+| 私有目录 | 各自的 `filesDir`（applicationId 不同，天然隔离） | 同左 |
 | 签名 | Android 调试密钥 | `haruhibox-release.jks`（本地） |
 
-**两者包名相同**（`com.haruhi.haruhibox`），签名不同，所以**不能互相覆盖安装**。
-互相切换时必须先卸载：
+因为 applicationId 不同，**两个包可以同时装在一台设备上、互不覆盖**，
+不需要每次切换都卸载。代价是桌面出现两个图标、数据不互通。
 
-```powershell
-adb uninstall com.haruhi.haruhibox
-```
-
-（卸载会清掉 App 数据。目前书库还是空的，代价可以接受；等有真实数据后
-建议统一只用一个包，或把 debug 的 applicationId 加 `.debug` 后缀。）
+> 历史：`applicationIdSuffix = ".debug"` 是 2026-10-08 加的。
+> 在那之前两者同名，切换构建类型必须 `adb uninstall`，会清掉 App 数据。
 
 ## release 签名
 

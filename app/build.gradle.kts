@@ -59,11 +59,13 @@ android {
 
     buildTypes {
         debug {
-            // 调试包与正式包使用不同的私有目录，避免装了两个包时互相踩数据
-            buildConfigField("String", "LIBRARY_DIR_NAME", "\"library-debug\"")
+            // debug 与 release 用不同的 applicationId，才能同时安装、互不覆盖。
+            // 否则每次切换构建类型都要先卸载（会清掉 App 数据），
+            // 等 P2 有真实书库之后代价太大。
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
         }
         release {
-            buildConfigField("String", "LIBRARY_DIR_NAME", "\"library\"")
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -81,6 +83,7 @@ android {
             //   IllegalAccessError: Class kotlin.text.k extended by class v02 is inaccessible
             // 表现为 androidx.startup.InitializationProvider 初始化失败、应用启动即闪退。
             // 这条配置曾出现在 P0 的脚手架上，P1 加签名/混淆时被证实有害，已移除。
+            // 详见 docs/BUILD.md。
         }
     }
 

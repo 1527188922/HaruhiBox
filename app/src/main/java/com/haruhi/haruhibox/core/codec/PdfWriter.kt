@@ -9,6 +9,7 @@ import com.tom_roush.pdfbox.pdmodel.PageMode
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
 import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
+import com.tom_roush.pdfbox.pdmodel.encryption.StandardSecurityHandler
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
 import com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageFitWidthDestination
 import com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline
@@ -20,19 +21,34 @@ import java.io.File
 /**
  * PDF 生成（JM 本子 → 单文件 PDF）。
  *
- * 行为逐条对齐参考实现 `JmcomicService.albumToPdf` / `addImageToPdf`（第 674～744 行）：
+ * 行为对齐参考实现 `JmcomicService.albumToPdf` / `addImageToPdf`（第 674～744 行）：
  * 1. 每张图片一页，**页面尺寸 = 图片像素尺寸**；
  * 2. 章节目录按 `第N话` 序号排序，每章一个书签，指向该章第一页；
  * 3. 根书签标题 `目录`，`PageMode = USE_OUTLINES`；
- * 4. 加密用 `StandardProtectionPolicy(password, password, permission)`，
- *    `encryptionKeyLength = 128`，权限 `canModify=false` / `canExtractContent=false` /
- *    `canExtractForAccessibility=false`；
+ * 4. 加密用 `StandardProtectionPolicy`，权限 `canModify=false` /
+ *    `canExtractContent=false` / `canExtractForAccessibility=false`；
  * 5. 图片用 `LosslessFactory` 内嵌（无损 Flate 压缩，文件偏大但与参考实现一致）。
  *
  * [password] 为 `null` 或空串时**不加任何保护**（对应用户点「不设密码」）。
  *
- * 与参考实现的差异（已在 `docs/p0/spike2-pdf.md` 记录）：参考实现用 `ImageIO.read`，
- * 这里用 `BitmapFactory`，因为 Android 上没有 ImageIO/AWT。
+ * ## 与参考实现的三处**已确认**差异（2026-10-08 用户决策）
+ *
+ * 1. **加密算法固定为 AES-128**（参考实现实际是 40 位 RC4，见下）。
+ *    参考实现只调了 `policy.setEncryptionKeyLength(128)` 而没设 `preferAES`。
+ *    实测（桌面版 PDFBox 3.0.2 与 pdfbox-android 2.0.27.0 行为一致）：
+ *    单独设 `encryptionKeyLength` **被忽略**，产出 `V=1 / R=3 / Length=40`，
+ *    即 **40 位 RC4**；只有同时设 `preferAES = true` 才会得到
+ *    `V=4 / R=4 / Length=128 / StdCF=AESV2`。
+ *    用户已确认改用 AES-128 —— 这是**有意的安全强化**，不是与参考实现对齐。
+ *    `PdfWriterSpikeTest` 把 `V/R/Length/StdCF` 四项锁成回归断言，
+ *    因为漏设任一项都会静默降级、不报错。
+ * 2. **访问控制只看"能否打开"**。参考实现把 owner 与 user 密码设成同一个值，
+ *    导致打开文档时判定为 owner 身份，权限位被忽略（实测 `isOwnerPermission == true`、
+ *    `canModify()` 返回 true）。用户已确认接受这个行为：
+ *    「只需要管控能否打开/阅读 pdf 就行，能打开就不管其他权限」。
+ *    因此这里仍然传同一个密码，权限位只是按参考实现写入、不作为安全承诺。
+ *    `PdfWriterSpikeTest` 把这一事实固定成断言，避免以后误以为它生效。
+ * 3. 参考实现用 `ImageIO.read`，这里用 `BitmapFactory`（Android 上没有 ImageIO/AWT）。
  */
 class PdfWriter(
     private val bitmapFactory: (File) -> Bitmap? = { path ->
@@ -113,15 +129,34 @@ class PdfWriter(
 
     private fun applyProtection(document: PDDocument, password: String?) {
         if (password.isNullOrEmpty()) return
+
         val permission = AccessPermission().apply {
             // PDFBox 的 setter 是 setCanModify/setCanExtractContent/…，
             // Kotlin 的属性语法会解析成 getter，必须显式调用 setter。
+            //
+            // 注意：owner 与 user 用同一个密码时这些权限位**不会生效**
+            // （打开者被判定为 owner）。用户已确认接受这一点，这里保留写入只是
+            // 为了与参考实现产物一致，不构成安全承诺。见类注释第 2 条。
             setCanModify(false)
             setCanExtractContent(false)
             setCanExtractForAccessibility(false)
         }
-        val policy = StandardProtectionPolicy(password, password, permission)
-        policy.encryptionKeyLength = 128
+
+        val policy = StandardProtectionPolicy(password, password, permission).apply {
+            // ------------------------------------------------------------------
+            // **两行都必须设**，缺一个都会静默降级（实测，见 docs/p0/spike2-pdf.md）：
+            //   什么都不设            -> V=1 R=3 Length=40  StdCF=(none)  ← 40 位 RC4
+            //   只设 encryptionKeyLength -> V=1 R=3 Length=40  StdCF=(none)  ← 长度被忽略
+            //   只设 preferAES         -> V=1 R=3 Length=40  StdCF=(none)
+            //   两个都设              -> V=4 R=4 Length=128 StdCF=AESV2   ← AES-128 ✅
+            //
+            // 参考实现（桌面版 PDFBox 3.0.2）只设了 encryptionKeyLength，
+            // 也就是它**实际产出的是 40 位 RC4**。用户已确认本 App 改用 AES-128：
+            // 这不与参考实现对产物的对齐，而是有意的安全强化。
+            // ------------------------------------------------------------------
+            encryptionKeyLength = AES_KEY_BITS
+            isPreferAES = true
+        }
         document.protect(policy)
     }
 
@@ -157,6 +192,9 @@ class PdfWriter(
 
     companion object {
         private val IMAGE_EXTENSIONS = setOf("webp", "jpg", "jpeg", "png", "gif", "bmp")
+
+        /** 加密密钥长度。与参考实现一致（128 位）。 */
+        const val AES_KEY_BITS = 128
 
         init {
             // pdfbox-android 要求显式初始化一次资源加载器

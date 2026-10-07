@@ -89,23 +89,32 @@ app/src/main/java/com/haruhi/haruhibox/
 | 恢复后按磁盘现状重算（不回退、不重复累加） | ✅ | `recomputeChapterProgress`；0 字节残file 不计入 |
 | WorkManager 约束调度（仅 Wi-Fi 时自动延后） | ⬜ | `DownloadGate` 已就绪，缺 Worker 接线 |
 
-## 已知问题 / 待用户确认
+## 已确认的决策（2026-10-08）
 
-1. **PDF 加密强度**：参考实现想设 128 位密钥并暗示 AES，但 `pdfbox-android`
-   没有 `setEncryptionKeyLength`，实测产物是 `R=3 / RC4-128`。保持对齐还是改 AES-128？
-   详见 `docs/p0/spike2-pdf.md`。
-2. **PDF 权限对 owner 无效**：参考实现 owner 与 user 同密码，导致"不可修改/不可复制"
-   对打开者不生效。是否拆分 owner/user 密码？
-3. **JM 图片线路默认值**：参考实现硬编码 `IMAGE_DOMAIN`，App 侧作为可编辑线路列出，
-   默认值沿用 `cdn-msp2.jmapiproxy2.cc`（见 `JmDefaults`）。
-4. **debug 与 release 包名相同**：签名不同，不能互相覆盖安装。
-   等有真实书库数据前需要决定：是否给 debug 的 applicationId 加 `.debug` 后缀。
-5. **release 签名 keystore 需备份**：`haruhibox-release.jks` 只在本地，丢了无法覆盖升级。
+| 项 | 决策 | 落地位置 |
+|---|---|---|
+| PDF 加密算法 | **改为 AES-128** | `PdfWriter.applyProtection` 同时设 `encryptionKeyLength=128` + `isPreferAES=true` |
+| PDF 权限 | **只看「能否打开」**：owner 与 user 同密码，权限位不作为安全承诺 | `PdfWriter.applyProtection`；事实由 `PdfEncryptionInstrumentedTest` 断言固定 |
+| debug 包共存 | **debug 加 `.debug` 后缀**，可与 release 同时安装 | `app/build.gradle.kts` 的 `applicationIdSuffix` |
+
+> **一处更正**：先前 `docs/p0/spike2-pdf.md` 写「参考实现产出 AES-128、Android 只能 RC4-128」，
+> 这是错的（当时 `javap` 输出不完整，漏看了 `setPreferenceAES`/`setEncryptionKeyLength`）。
+> 实测：**只设 `encryptionKeyLength` 会被忽略，参考实现实际产出 40 位 RC4**；
+> 只有同时设 `preferAES=true` 才得到 AES-128。所以本 App 的 AES-128 是安全强化，不是对齐。
+> 详见 `docs/p0/spike2-pdf.md` 第 2 节。
+
+## 剩余待确认 / 待处理
+
+1. **release 签名 keystore 需备份**：`haruhibox-release.jks` 只在本地，丢了无法覆盖升级。
+   （运维事项，不是代码问题。）
+2. **JM 图片线路默认值**：参考实现硬编码 `IMAGE_DOMAIN`，App 侧作为可编辑线路列出，
+   默认值沿用 `cdn-msp2.jmapiproxy2.cc`（见 `JmDefaults`）。这条只是记录，不是待确认项。
+3. **PDF 单页尺寸上限**：参考实现不处理 14400×14400 上限，JM 长图可能超。
+   P4 需要加校验并给出明确错误——届时应按"行为差异"再次确认处理方式（拒绝导出 / 按高度切片）。
 
 ## 真机验证记录
 
-设备：小米 23116PN5BC（`shennan`/`shennong`，Android 14+，1440×3200）。
-`adb` 通过无线调试连接。
+设备：小米 23116PN5BC（`shennong`，1440×3200），通过无线调试连接（会掉线，需重连）。
 
 | 项 | 结果 |
 |---|---|
@@ -113,6 +122,7 @@ app/src/main/java/com/haruhi/haruhibox/
 | 冷启动 | ✅ 无崩溃，`topResumedActivity` 为 `MainActivity` |
 | 界面渲染 | ✅ 显示占位页（截图已确认） |
 | R8 混淆后的运行期正确性 | ✅ 修掉 `packageScope` 引发的 `IllegalAccessError` 后正常 |
+| PDF AES-128 真机验证 | ⏳ **待跑**：设备掉线，`connectedDebugAndroidTest` 未执行 |
 
 详细排查与体积优化记录见 `docs/BUILD.md`。
 
@@ -120,10 +130,15 @@ app/src/main/java/com/haruhi/haruhibox/
 
 ```powershell
 cd D:\Project\HaruhiBox
+
+# 开发机（90 个单元测试 + lint + 构建）
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+# 设备（PDF 加密用例；需先确认 adb devices 有设备）
+.\gradlew.bat :app:connectedDebugAndroidTest
 ```
 
-当前基线：**90 个单元测试全绿**，lint 0 error，debug APK 33 MB / release APK 4.4 MB 均可安装运行。
+当前基线：**90 个单元测试全绿**，lint 0 error，debug 33 MB / release 4.4 MB 均可安装运行。
 
 ### 测试清单
 
