@@ -55,10 +55,11 @@ app/src/main/java/com/haruhi/haruhibox/
 | DI 容器 + Application + 权限声明 | ✅ | `core/di/AppContainer.kt`、`HaruhiBoxApp`、Manifest |
 | **下载引擎（Range 续传 + 并发 + 取消）** | ✅ | `core/download/FileDownloader.kt`，测试 `FileDownloaderTest`（12 个用例） |
 | 图片解扰落盘（`blockNum==0` 直接落原图） | ✅ | `core/codec/ImageCodec.kt`、`ImageDownloadTransform` |
-| **前台服务 + 常驻通知** | ⬜ | 下一步 |
-| **WorkManager 接入与进程重启恢复编排** | ⬜ | 依赖前台服务 |
+| **任务仓库 + 进程重启恢复编排** | ✅ | `core/download/DownloadTaskRepository.kt`，测试 `DownloadTaskRepositoryTest` |
+| **前台服务 + 常驻通知** | ✅ | `core/download/DownloadForegroundService.kt`、`core/notification/*` |
+| WorkManager 约束调度（仅 Wi-Fi 等） | ⬜ | 服务与恢复已就绪，缺 Worker 与 Constraints |
 | 设置层单元测试（作用域隔离 / 继承 / 恢复默认） | ⬜ | |
-| 设置校验工具（写入前校验，拒绝非法代理等） | ⬜ | |
+| 设置校验工具（写入前校验，拒绝非法代理等） | ⬜ | `ResolvedNetworkConfig.validate()` 已就绪，缺 UI 对接 |
 
 ### 下载引擎已覆盖的语义（计划点名项）
 
@@ -78,11 +79,15 @@ app/src/main/java/com/haruhi/haruhibox/
 > 能下载一个任意大文件到私有目录，断网/杀进程后能续传，通知显示进度；
 > **杀掉进程再启动，任务列表和进度能从数据库恢复（RUNNING 任务按磁盘现状重算进度后继续）**。
 
-当前状态：
-- 「下载任意大文件到私有目录 + 断点续传 + 不完整文件不发布」✅ 已实现并有测试；
-- 「杀进程后任务表恢复」的数据层语义 ✅（`requeueInterrupted` + 章节计数幂等）；
-- **还差执行层**：前台服务/通知、WorkManager 编排、以及"启动时按磁盘重算进度"的仓库层胶水。
-  所以 P1 验收仍不能整体打勾。
+| 验收点 | 状态 | 证据 |
+|---|---|---|
+| 下载任意大文件到私有目录 | ✅ | `FileDownloaderTest`；落盘在 `filesDir/library`，导出走 SAF |
+| 断点续传（Range） | ✅ | `resumes from the existing part file`；不支持 Range 时整文件重下 |
+| 不完整文件不发布 | ✅ | `publishAfterValidation` + 断流用例 |
+| 通知显示进度 | ✅ | `DownloadForegroundService` 订阅活跃任务渲染通知（真机观感待 P7） |
+| 杀进程后任务与进度从数据库恢复 | ✅ | `recoverInterrupted` + `DownloadTaskRepositoryTest` 的 4 个恢复用例 |
+| 恢复后按磁盘现状重算（不回退、不重复累加） | ✅ | `recomputeChapterProgress`；0 字节残file 不计入 |
+| WorkManager 约束调度（仅 Wi-Fi 时自动延后） | ⬜ | `DownloadGate` 已就绪，缺 Worker 接线 |
 
 ## 已知问题 / 待用户确认
 
@@ -102,7 +107,7 @@ cd D:\Project\HaruhiBox
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-当前基线：**79 个单元测试全绿**，lint 0 error，debug APK 可构建。
+当前基线：**90 个单元测试全绿**，lint 0 error，debug APK 可构建。
 
 ### 测试清单
 
@@ -113,6 +118,7 @@ cd D:\Project\HaruhiBox
 | `core.database.JmDaoTest` | 12 | 书库分页排序筛选 / 章节分组 / 收藏唯一索引与删除语义 |
 | `core.database.DownloadTaskDaoTest` | 12 | 任务去重 / 恢复 / 章节计数幂等 / 历史裁剪 |
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
+| `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
 | `core.codec.PdfWriterSpikeTest` | 6 | PDF 页面 / 书签 / 加密 / 权限位 / 不加密 |
 | `core.jm.CryptoProbeTest` | 2 | 环境回归：JCE 可用性 |

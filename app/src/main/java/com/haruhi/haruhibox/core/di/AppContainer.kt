@@ -41,6 +41,36 @@ class AppContainer(private val appContext: Context) {
 
     val secrets: SecretStore by lazy { SecretStore(appContext) }
 
+    // ---------------- 下载 ----------------
+
+    /**
+     * 下载引擎。**每次取用都会按当前网络设置新建**：
+     * 计划 §9.2 要求"线程数、超时、线路等对新任务或下次重试生效"，
+     * 所以引擎不缓存客户端，而是持有 [jmHttpClient] / [biliHttpClient] 的引用。
+     */
+    val fileDownloader: com.haruhi.haruhibox.core.download.FileDownloader by lazy {
+        com.haruhi.haruhibox.core.download.FileDownloader(
+            client = jmHttpClient,
+            dirs = libraryDirs,
+        )
+    }
+
+    /** 带 B站请求头的下载器（B站 CDN 对 Referer 有校验）。 */
+    val biliFileDownloader: com.haruhi.haruhibox.core.download.FileDownloader by lazy {
+        com.haruhi.haruhibox.core.download.FileDownloader(
+            client = biliHttpClient,
+            dirs = libraryDirs,
+        )
+    }
+
+    /** 持久化下载任务仓库。 */
+    val downloadTasks: com.haruhi.haruhibox.core.download.DownloadTaskRepository by lazy {
+        com.haruhi.haruhibox.core.download.DownloadTaskRepository(
+            dao = database.downloadTaskDao(),
+            dirs = libraryDirs,
+        )
+    }
+
     // ---------------- 网络 ----------------
 
     @Volatile

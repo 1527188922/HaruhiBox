@@ -55,6 +55,17 @@
                 <data android:scheme="https" android:host="b23.tv" />
             </intent-filter>
         </activity>
+
+        <!--
+          下载前台服务：长下载的常驻通知与进度（计划 §8）。
+          exported=false：只由应用内部拉起，不接受外部 Intent。
+          foregroundServiceType=dataSync：manifest 里显式声明，Android 14+ 必需
+          （对应 FOREGROUND_SERVICE_DATA_SYNC 权限）。
+        -->
+        <service
+            android:name=".core.download.DownloadForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

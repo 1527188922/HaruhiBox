@@ -1,0 +1,351 @@
+package com.haruhi.haruhibox.core.download
+
+import com.haruhi.haruhibox.core.database.DownloadTaskDao
+import com.haruhi.haruhibox.core.database.entity.DownloadStatus
+import com.haruhi.haruhibox.core.database.entity.DownloadTaskChapterEntity
+import com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity
+import com.haruhi.haruhibox.core.database.entity.DownloadType
+import com.haruhi.haruhibox.core.storage.LibraryDirs
+import kotlinx.coroutines.flow.Flow
+import timber.log.Timber
+import java.io.File
+
+/**
+ * 持久化下载任务的仓库。
+ *
+ * 计划 §4.5 / §3.3 的核心约束都在这里落地：
+ * 1. **同一 `(type, bizKey)` 只允许一个活跃任务**（照抄参考实现的去重规则）；
+ * 2. 进程被杀后重启：`RUNNING`/`WAITING_NETWORK` 任务打回 `QUEUED`，
+ *    并且**按磁盘现状重算进度**（§D.1）；`PAUSED` 保持、`CANCELLED` 不复活；
+ * 3. "是否已下载"**始终以磁盘文件是否存在为准**，不以任务状态为准
+ *    （§3.3，B站下载的既定语义）；
+ * 4. 完成历史保留最近 N 条（B站 20 条）。
+ *
+ * 这一层不做实际传输，只负责"任务事实"的读写与恢复编排；
+ * 执行由 [DownloadTaskExecutor] 驱动。
+ */
+class DownloadTaskRepository(
+    private val dao: DownloadTaskDao,
+    private val dirs: LibraryDirs,
+) {
+
+    // ------------------------------------------------------------------
+    // 查询
+    // ------------------------------------------------------------------
+
+    fun observeActive(): Flow<List<DownloadTaskEntity>> = dao.observeActive()
+
+    fun observeFinished(limit: Int = FINISHED_HISTORY_LIMIT): Flow<List<DownloadTaskEntity>> =
+        dao.observeFinished(limit)
+
+    fun observeById(id: Long): Flow<DownloadTaskEntity?> = dao.observeById(id)
+
+    fun observeChapters(taskId: Long) = dao.observeChapters(taskId)
+
+    fun observeBadgeCount(): Flow<Int> = dao.observeBadgeCount()
+
+    fun observeFailedCount(): Flow<Int> = dao.observeFailedCount()
+
+    suspend fun findById(id: Long): DownloadTaskEntity? = dao.findById(id)
+
+    suspend fun activeTask(type: DownloadType, bizKey: String): DownloadTaskEntity? =
+        dao.activeTask(type, bizKey)
+
+    // ------------------------------------------------------------------
+    // 提交（含去重）
+    // ------------------------------------------------------------------
+
+    /** 提交结果。重复提交**不是错误**，UI 只需要提示"已有任务"。 */
+    sealed interface SubmitResult {
+        data class Created(val taskId: Long) : SubmitResult
+
+        /** 已有同 bizKey 的活跃任务，直接复用。 */
+        data class AlreadyRunning(val taskId: Long, val status: DownloadStatus) : SubmitResult
+    }
+
+    /**
+     * 提交一个下载任务；同一 `(type, bizKey)` 已有活跃任务时**复用而不是新建**
+     * （§9 第 7 条「重复提交显示已有任务」）。
+     */
+    suspend fun submit(
+        type: DownloadType,
+        bizKey: String,
+        displayName: String?,
+        payload: String?,
+        totalChapters: Int = 0,
+    ): SubmitResult {
+        dao.activeTask(type, bizKey)?.let { existing ->
+            Timber.tag("task").d("已有活跃任务，复用：%s %s", type, bizKey)
+            return SubmitResult.AlreadyRunning(existing.id, existing.status)
+        }
+        val id = dao.insert(
+            DownloadTaskEntity(
+                type = type,
+                bizKey = bizKey,
+                status = DownloadStatus.QUEUED,
+                displayName = displayName,
+                payload = payload,
+                totalChapters = totalChapters,
+            ),
+        )
+        return SubmitResult.Created(id)
+    }
+
+    // ------------------------------------------------------------------
+    // 状态迁移
+    // ------------------------------------------------------------------
+
+    suspend fun markRunning(id: Long) {
+        val now = System.currentTimeMillis()
+        val task = dao.findById(id) ?: return
+        dao.update(task.copy(status = DownloadStatus.RUNNING, startTime = task.startTime ?: now, updateTime = now))
+    }
+
+    suspend fun updateProgress(
+        id: Long,
+        stageText: String? = null,
+        doneChapters: Int? = null,
+        totalChapters: Int? = null,
+        doneImages: Int? = null,
+        totalImages: Int? = null,
+        downloadedBytes: Long? = null,
+        totalBytes: Long? = null,
+    ) {
+        val task = dao.findById(id) ?: return
+        dao.update(
+            task.copy(
+                stageText = stageText ?: task.stageText,
+                doneChapters = doneChapters ?: task.doneChapters,
+                totalChapters = totalChapters ?: task.totalChapters,
+                doneImages = doneImages ?: task.doneImages,
+                totalImages = totalImages ?: task.totalImages,
+                downloadedBytes = downloadedBytes ?: task.downloadedBytes,
+                totalBytes = totalBytes ?: task.totalBytes,
+                updateTime = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    suspend fun markPaused(id: Long) = dao.updateStatus(id, DownloadStatus.PAUSED, System.currentTimeMillis())
+
+    /** 等待网络：不算失败，也不算"正在运行"（§9 第 9 条）。 */
+    suspend fun markWaitingNetwork(id: Long, reason: String?) {
+        val task = dao.findById(id) ?: return
+        dao.update(
+            task.copy(
+                status = DownloadStatus.WAITING_NETWORK,
+                message = reason,
+                stageText = STAGE_WAITING_NETWORK,
+                updateTime = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    suspend fun markQueued(id: Long) = dao.updateStatus(id, DownloadStatus.QUEUED, System.currentTimeMillis())
+
+    suspend fun markSuccess(id: Long) {
+        dao.finish(id, DownloadStatus.SUCCESS, null, System.currentTimeMillis())
+        dao.trimFinished(FINISHED_HISTORY_LIMIT)
+    }
+
+    suspend fun markFailed(id: Long, message: String) {
+        dao.finish(id, DownloadStatus.FAIL, message, System.currentTimeMillis())
+        dao.trimFinished(FINISHED_HISTORY_LIMIT)
+    }
+
+    /** 取消：**不自动复活**（§D.3）。已经写下的 `.part` 由调用方决定是否清理。 */
+    suspend fun markCancelled(id: Long) {
+        dao.finish(id, DownloadStatus.CANCELLED, null, System.currentTimeMillis())
+        dao.trimFinished(FINISHED_HISTORY_LIMIT)
+    }
+
+    /** 清空完成历史（§9 第 9 条「完成区可清空历史」）。 */
+    suspend fun clearFinished(): Int = dao.clearFinished()
+
+    suspend fun delete(id: Long) {
+        dao.deleteChapters(id)
+        dao.deleteById(id)
+    }
+
+    // ------------------------------------------------------------------
+    // 章节明细
+    // ------------------------------------------------------------------
+
+    suspend fun upsertChapters(taskId: Long, chapters: List<ChapterSpec>) {
+        dao.upsertChapters(chapters.map { it.toEntity(taskId) })
+    }
+
+    /**
+     * 更新某章的图片进度。
+     *
+     * **【关键】进度只允许前进**：新的 done 小于已记录的 done 时忽略（除非显式
+     * `allowRegression = true`）。这样"恢复时按磁盘重算"不会让进度回退，
+     * 也不会因为重复回调而重复累加（§4.5）。
+     *
+     * 但 §D.1 也指出"文件被删或损坏时进度应允许纠正，不能绝对要求不回退"——
+     * 所以提供了重算入口 [recomputeChapterProgress]，它显式传 `allowRegression = true`。
+     */
+    suspend fun updateChapterProgress(
+        taskId: Long,
+        chapterId: Long,
+        doneImages: Int,
+        status: DownloadStatus,
+        message: String? = null,
+        allowRegression: Boolean = false,
+    ) {
+        val current = dao.chapters(taskId).firstOrNull { it.chapterId == chapterId } ?: return
+        val effectiveDone = when {
+            allowRegression -> doneImages
+            doneImages > current.doneImages -> doneImages
+            else -> current.doneImages
+        }
+        // 状态也一样：已经 SUCCESS 的章节不被 RUNNING 覆盖（除非在重算）
+        val effectiveStatus = when {
+            allowRegression -> status
+            current.status == DownloadStatus.SUCCESS && status != DownloadStatus.SUCCESS -> current.status
+            else -> status
+        }
+        dao.updateChapterProgress(
+            taskId = taskId,
+            chapterId = chapterId,
+            doneImages = effectiveDone,
+            status = effectiveStatus,
+            message = message,
+            now = System.currentTimeMillis(),
+        )
+    }
+
+    /**
+     * 按磁盘现状重算某章的进度（恢复时调用）。
+     *
+     * "磁盘现状"= `chapterDir` 下**存在且非空**的图片数除以该章应有的图片数。
+     * 与参考实现 `downloadChapter` 里 `images.size - downloadParams.size` 的算法等价，
+     * 但更稳：它是按文件名逐个核对，而不是靠"待下载数量差"。
+     */
+    suspend fun recomputeChapterProgress(
+        taskId: Long,
+        chapterId: Long,
+        chapterDir: File,
+        imageFiles: List<String>,
+    ): Int {
+        val done = imageFiles.count { name ->
+            val file = File(chapterDir, name)
+            file.isFile && file.length() > 0
+        }
+        val status = when {
+            imageFiles.isEmpty() -> DownloadStatus.SUCCESS
+            done >= imageFiles.size -> DownloadStatus.SUCCESS
+            done > 0 -> DownloadStatus.PAUSED
+            else -> DownloadStatus.QUEUED
+        }
+        dao.updateChapterProgress(
+            taskId = taskId,
+            chapterId = chapterId,
+            doneImages = done,
+            status = status,
+            message = null,
+            now = System.currentTimeMillis(),
+        )
+        return done
+    }
+
+    // ------------------------------------------------------------------
+    // 进程重启恢复
+    // ------------------------------------------------------------------
+
+    /**
+     * 启动时恢复：把被中断的任务打回队列，并**按磁盘现状重算进度**。
+     *
+     * 返回被打回的任务，调用方可据此决定是否立即开始执行。
+     *
+     * 边界（计划 §D.3）：
+     * - 只有 `RUNNING` / `WAITING_NETWORK` 会被恢复；设置页里"强行停止"之后
+     *   以**用户再次打开 App**为恢复边界，不承诺立即自动恢复；
+     * - `CANCELLED` 不复活；`PAUSED` 保持暂停等用户操作。
+     */
+    suspend fun recoverInterrupted(
+        chapterResolver: suspend (DownloadTaskEntity) -> List<ChapterRediscovery>,
+    ): List<DownloadTaskEntity> {
+        val interrupted = dao.activeTasks().filter {
+            it.status == DownloadStatus.RUNNING || it.status == DownloadStatus.WAITING_NETWORK
+        }
+        if (interrupted.isEmpty()) return emptyList()
+
+        for (task in interrupted) {
+            runCatching {
+                val discovered = chapterResolver(task)
+                for (chapter in discovered) {
+                    recomputeChapterProgress(
+                        taskId = task.id,
+                        chapterId = chapter.chapterId,
+                        chapterDir = chapter.chapterDir,
+                        imageFiles = chapter.imageFiles,
+                    )
+                }
+                val doneChapters = discovered.count { it.isCompleteOnDisk }
+                val doneImages = discovered.sumOf { chapter ->
+                    chapter.imageFiles.count { name ->
+                        val file = File(chapter.chapterDir, name)
+                        file.isFile && file.length() > 0
+                    }
+                }
+                dao.update(
+                    task.copy(
+                        status = DownloadStatus.QUEUED,
+                        doneChapters = doneChapters,
+                        totalChapters = if (discovered.isNotEmpty()) discovered.size else task.totalChapters,
+                        doneImages = doneImages,
+                        totalImages = if (discovered.isNotEmpty()) {
+                            discovered.sumOf { it.imageFiles.size }
+                        } else {
+                            task.totalImages
+                        },
+                        message = null,
+                        stageText = STAGE_RECOVERED,
+                        updateTime = System.currentTimeMillis(),
+                    ),
+                )
+            }.onFailure { Timber.tag("task").w(it, "恢复任务失败：%d", task.id) }
+        }
+
+        // 兜底：只要还有 RUNNING/WAITING_NETWORK 没被上面处理掉（例如 chapterResolver 抛错），
+        // 也统一打回队列，保证不存在"永远显示在运行中"的僵尸任务。
+        dao.requeueInterrupted(System.currentTimeMillis())
+
+        return interrupted.mapNotNull { dao.findById(it.id) }
+    }
+
+    /** 恢复时需要的章节信息。 */
+    data class ChapterRediscovery(
+        val chapterId: Long,
+        val chapterDir: File,
+        val imageFiles: List<String>,
+    ) {
+        val isCompleteOnDisk: Boolean
+            get() = imageFiles.isNotEmpty() && imageFiles.all { File(chapterDir, it).isFile }
+    }
+
+    /** 提交任务时的章节规格。 */
+    data class ChapterSpec(
+        val chapterId: Long,
+        val chapterTitle: String?,
+        val sort: Int,
+        val totalImages: Int,
+    ) {
+        fun toEntity(taskId: Long) = DownloadTaskChapterEntity(
+            taskId = taskId,
+            chapterId = chapterId,
+            chapterTitle = chapterTitle,
+            sort = sort,
+            totalImages = totalImages,
+        )
+    }
+
+    companion object {
+        /** B站下载的完成历史保留条数（参考实现 §3.3）。 */
+        const val FINISHED_HISTORY_LIMIT = 20
+
+        const val STAGE_RECOVERED = "重新排队"
+        const val STAGE_WAITING_NETWORK = "等待网络"
+    }
+}
