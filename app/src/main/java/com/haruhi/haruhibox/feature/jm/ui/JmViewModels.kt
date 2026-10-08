@@ -7,11 +7,16 @@ import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
+import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.core.network.NetworkError
 import com.haruhi.haruhibox.core.network.toUserMessage
+import com.haruhi.haruhibox.core.settings.SecretStore
+import com.haruhi.haruhibox.core.settings.SettingKeys
 import com.haruhi.haruhibox.feature.jm.data.FavoriteWriteResult
 import com.haruhi.haruhibox.feature.jm.data.JmDownloadManager
+import com.haruhi.haruhibox.feature.jm.data.JmExportFormat
+import com.haruhi.haruhibox.feature.jm.data.JmExportManager
 import com.haruhi.haruhibox.feature.jm.data.JmReadingRepository
 import com.haruhi.haruhibox.feature.jm.data.JmRepository
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchItem
@@ -798,6 +803,15 @@ data class AlbumDetailUiState(
      * ——"已经在队列里"本身就是不让重复提交的理由，与它跑到哪一步无关。
      */
     val queuedChapterIds: Set<Long> = emptySet(),
+
+    // ---------------- 导出（P4） ----------------
+
+    /** 用户点了哪个导出（决定密码框的标题与默认密码）。 */
+    val exportFormat: JmExportFormat? = null,
+    /** 该格式的默认密码（来自设置/凭据存储），密码框预填它。 */
+    val exportDefaultPassword: String = "",
+    /** 缺图预检结果；非 null 时展示"缺图"对话框而不是密码框。 */
+    val exportPrecheck: JmExportManager.Precheck? = null,
 ) {
     /**
      * 下载面板的默认勾选：**没下完、也不在队列里**的章节。
@@ -833,7 +847,9 @@ data class AlbumDetailUiState(
 class JmAlbumDetailViewModel(
     private val repo: JmRepository,
     private val downloads: JmDownloadManager,
+    private val exports: JmExportManager,
     private val tasks: DownloadTaskRepository,
+    private val secrets: SecretStore,
     private val albumId: Long,
 ) : ViewModel() {
 
@@ -1190,6 +1206,95 @@ class JmAlbumDetailViewModel(
     }
 
     fun consumeMessage() = _state.update { it.copy(message = null) }
+
+    // ------------------------------------------------------------------
+    // 导出（P4）
+    // ------------------------------------------------------------------
+
+    /**
+     * 用户点了「导出 ZIP / PDF」。
+     *
+     * 先做**缺图预检**：缺图时不静默导出残缺内容（计划 §9 第 7 条），
+     * 而是列出缺哪些话、缺多少张，让用户先去补下载。
+     */
+    fun startExport(format: JmExportFormat) {
+        viewModelScope.launch {
+            val album = _state.value.album ?: return@launch
+            val precheck = runCatching { exports.precheck(album) }
+                .getOrElse { e ->
+                    _state.update { it.copy(message = e.toUserMessage()) }
+                    return@launch
+                }
+            if (!precheck.isComplete) {
+                _state.update { it.copy(exportPrecheck = precheck) }
+                return@launch
+            }
+            _state.update {
+                it.copy(
+                    exportFormat = format,
+                    exportDefaultPassword = defaultPasswordFor(format),
+                )
+            }
+        }
+    }
+
+    /** 缺图对话框里点「先补下载」：把缺图的那些话排进下载队列。 */
+    fun downloadMissingChapters() {
+        val album = _state.value.album ?: return
+        val missing = _state.value.exportPrecheck?.missingChapters?.map { it.title }.orEmpty()
+        _state.update { it.copy(exportPrecheck = null) }
+        viewModelScope.launch {
+            val chapters = runCatching { repo.chaptersOf(album) }
+                .getOrDefault(emptyList())
+                .filter { it.title in missing }
+            if (chapters.isEmpty()) return@launch
+            runCatching {
+                val library = ensureInLibrary()
+                downloads.submit(library, chapters)
+            }.onSuccess {
+                _state.update { it.copy(message = "已把缺图的 ${chapters.size} 话加入下载队列") }
+                refreshLocalStats()
+            }.onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
+        }
+    }
+
+    fun dismissExportPrecheck() = _state.update { it.copy(exportPrecheck = null) }
+
+    /** 密码框里点「确认」（密码留空等同「不设密码」）。 */
+    fun confirmExport(password: String) {
+        val format = _state.value.exportFormat ?: return
+        _state.update { it.copy(exportFormat = null) }
+        viewModelScope.launch {
+            runCatching {
+                val library = ensureInLibrary()
+                exports.submit(library, format, password.trim().ifEmpty { null })
+            }.onSuccess { result ->
+                val text = when (result) {
+                    is DownloadTaskRepository.SubmitResult.Created ->
+                        "已开始导出 ${format.label}，可在「任务」里看进度"
+
+                    is DownloadTaskRepository.SubmitResult.AlreadyRunning ->
+                        "这本漫画已经有一个在跑的 ${format.label} 导出"
+                }
+                _state.update { it.copy(message = text) }
+                refreshLocalStats()
+            }.onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
+        }
+    }
+
+    /** 密码框里点「不设密码」。 */
+    fun exportWithoutPassword() = confirmExport("")
+
+    fun cancelExport() = _state.update { it.copy(exportFormat = null) }
+
+    /** 默认密码来自凭据存储；没设过就用参考实现的默认值。 */
+    private fun defaultPasswordFor(format: JmExportFormat): String {
+        val key = when (format) {
+            JmExportFormat.ZIP -> SettingKeys.SECRET_JM_ZIP_PASSWORD
+            JmExportFormat.PDF -> SettingKeys.SECRET_JM_PDF_PASSWORD
+        }
+        return secrets.get(key)?.takeIf { it.isNotEmpty() } ?: JmDefaults.DEFAULT_EXPORT_PASSWORD
+    }
 
     fun deleteAlbumFiles() {
         viewModelScope.launch {

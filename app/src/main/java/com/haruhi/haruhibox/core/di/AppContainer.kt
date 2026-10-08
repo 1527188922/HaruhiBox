@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okio.Path.Companion.toOkioPath
+import timber.log.Timber
 import java.io.File
 
 /**
@@ -36,6 +37,14 @@ import java.io.File
  * 所以改设置后调 [invalidateNetworkClients] 重建客户端，已在跑的任务继续用旧实例。
  */
 class AppContainer(private val appContext: Context) {
+
+    init {
+        // pdfbox-android 需要在生成 PDF 之前用真实 Context 初始化一次资源加载器
+        // （字体/ICC 等从 APK 资源里读）。放在容器构造时做，保证早于任何导出。
+        runCatching {
+            com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(appContext)
+        }.onFailure { Timber.tag("pdf").w(it, "PDFBoxResourceLoader 初始化失败") }
+    }
 
     /**
      * 应用级协程作用域（进程存活期）。
@@ -228,6 +237,39 @@ class AppContainer(private val appContext: Context) {
             downloader = fileDownloader,
             dirs = libraryDirs,
             environment = jmDownloadEnvironment,
+        )
+    }
+
+    // ---------------- 导出（P4） ----------------
+
+    /** ZIP 打包器（zip4j，支持 AES 或不加密）。 */
+    val archiveWriter: com.haruhi.haruhibox.core.codec.ArchiveWriter by lazy {
+        com.haruhi.haruhibox.core.codec.ArchiveWriter()
+    }
+
+    /** PDF 生成器（pdfbox-android；超长图按高度切片）。 */
+    val pdfWriter: com.haruhi.haruhibox.core.codec.PdfWriter by lazy {
+        com.haruhi.haruhibox.core.codec.PdfWriter()
+    }
+
+    /** 成品交付：API 29+ 走 MediaStore 的下载目录，老系统退到应用外部私有目录。 */
+    val exportPublisher: com.haruhi.haruhibox.core.storage.ExportPublisher by lazy {
+        com.haruhi.haruhibox.core.storage.AndroidExportPublisher(appContext)
+    }
+
+    /** 导出编排（复用下载任务表，进度进任务页）。 */
+    val jmExports: com.haruhi.haruhibox.feature.jm.data.JmExportManager by lazy {
+        com.haruhi.haruhibox.feature.jm.data.JmExportManager(
+            repo = jmRepository,
+            tasks = downloadTasks,
+            dirs = libraryDirs,
+            archiveWriter = archiveWriter,
+            pdfWriter = pdfWriter,
+            publisher = exportPublisher,
+            scope = appScope,
+            onTaskStarted = {
+                com.haruhi.haruhibox.core.download.DownloadForegroundService.ensureRunning(appContext)
+            },
         )
     }
 

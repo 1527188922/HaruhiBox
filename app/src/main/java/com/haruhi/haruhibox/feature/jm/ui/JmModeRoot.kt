@@ -374,6 +374,12 @@ fun JmModeRoot(
                         onDownloadChapters = vm::downloadChapters,
                         onDeleteChapterFiles = vm::deleteChapterFiles,
                         onDeleteAlbumFiles = vm::deleteAlbumFiles,
+                        onExport = vm::startExport,
+                        onDownloadMissing = vm::downloadMissingChapters,
+                        onDismissExportPrecheck = vm::dismissExportPrecheck,
+                        onConfirmExport = vm::confirmExport,
+                        onExportWithoutPassword = vm::exportWithoutPassword,
+                        onCancelExport = vm::cancelExport,
                         // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）
                         onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
                         onDeleteAlbumRecord = {
@@ -479,7 +485,7 @@ class JmViewModelFactory(
             JmFavoritesViewModel(container.jmRepository) as T
 
         modelClass.isAssignableFrom(JmTaskViewModel::class.java) ->
-            JmTaskViewModel(container.downloadTasks, container.jmDownloads) as T
+            JmTaskViewModel(container.downloadTasks, container.jmDownloads, container.jmExports) as T
 
         modelClass.isAssignableFrom(JmReaderViewModel::class.java) ->
             JmReaderViewModel(
@@ -494,10 +500,12 @@ class JmViewModelFactory(
 
         modelClass.isAssignableFrom(JmAlbumDetailViewModel::class.java) ->
             JmAlbumDetailViewModel(
-                container.jmRepository,
-                container.jmDownloads,
-                container.downloadTasks,
-                albumId ?: error("详情页必须传 albumId"),
+                repo = container.jmRepository,
+                downloads = container.jmDownloads,
+                exports = container.jmExports,
+                tasks = container.downloadTasks,
+                secrets = container.secrets,
+                albumId = albumId ?: error("详情页必须传 albumId"),
             ) as T
 
         else -> error("未知的 ViewModel：${modelClass.name}")

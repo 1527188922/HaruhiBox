@@ -8,6 +8,7 @@ import com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity
 import com.haruhi.haruhibox.core.database.entity.DownloadType
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
 import com.haruhi.haruhibox.feature.jm.data.JmDownloadManager
+import com.haruhi.haruhibox.feature.jm.data.JmExportManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -34,14 +35,20 @@ data class TaskRow(
     val albumId: Long?
         get() = if (task.type == DownloadType.JM_ALBUM) task.bizKey.toLongOrNull() else null
 
+    /** 导出任务：**不能续做**，只能取消后重新生成（计划 §9 第 9 条），所以不给「重试」与「暂停」。 */
+    val isExport: Boolean
+        get() = task.type == DownloadType.JM_EXPORT_ZIP || task.type == DownloadType.JM_EXPORT_PDF
+
     val statusText: String get() = taskStatusLabel(task)
     val progressText: String get() = taskProgressText(task)
     val detailText: String? get() = taskDetailText(task)
 
-    val canPause: Boolean get() = task.status == DownloadStatus.RUNNING || task.status == DownloadStatus.QUEUED
-    val canResume: Boolean get() = task.status == DownloadStatus.PAUSED
+    val canPause: Boolean
+        get() = !isExport && (task.status == DownloadStatus.RUNNING || task.status == DownloadStatus.QUEUED)
+    val canResume: Boolean get() = !isExport && task.status == DownloadStatus.PAUSED
     val canCancel: Boolean get() = task.status.isActive
-    val canRetry: Boolean get() = task.status == DownloadStatus.FAIL || task.status == DownloadStatus.CANCELLED
+    val canRetry: Boolean
+        get() = !isExport && (task.status == DownloadStatus.FAIL || task.status == DownloadStatus.CANCELLED)
 }
 
 /**
@@ -70,6 +77,7 @@ data class JmTaskUiState(
 class JmTaskViewModel(
     private val tasks: DownloadTaskRepository,
     private val downloads: JmDownloadManager,
+    private val exports: JmExportManager,
 ) : ViewModel() {
 
     private val expanded = MutableStateFlow<Long?>(null)
@@ -139,8 +147,18 @@ class JmTaskViewModel(
     }
 
     fun cancel(taskId: Long) {
-        downloads.cancel(taskId)
-        message.value = "已取消（已下载的图片保留）"
+        // 导出任务由导出管理器负责取消：两边各有一份"正在跑的 Job"，
+        // 只标记状态而不取消协程的话，打包/生成还会继续跑下去。
+        val isExport = state.value.let { current ->
+            (current.active + current.finished).firstOrNull { it.task.id == taskId }?.isExport == true
+        }
+        if (isExport) {
+            exports.cancel(taskId)
+            message.value = "已取消导出（未完成的输出已清理）"
+        } else {
+            downloads.cancel(taskId)
+            message.value = "已取消（已下载的图片保留）"
+        }
     }
 
     fun retry(taskId: Long) {

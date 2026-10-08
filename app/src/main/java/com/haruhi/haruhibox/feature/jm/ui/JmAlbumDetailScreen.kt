@@ -56,10 +56,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.storage.FileNaming
+import com.haruhi.haruhibox.feature.jm.data.JmExportFormat
 
 /** 简介收起时显示的行数。 */
 private const val DESCRIPTION_COLLAPSED_LINES = 3
@@ -103,6 +106,15 @@ fun JmAlbumDetailScreen(
     onDeleteAlbumFiles: () -> Unit,
     onDeleteAlbumRecord: () -> Unit,
     onConsumeMessage: () -> Unit,
+    /** 点「导出 ZIP / PDF」：上层先做缺图预检，再决定弹缺图框还是密码框。 */
+    onExport: (JmExportFormat) -> Unit,
+    /** 缺图对话框里点「先补下载」。 */
+    onDownloadMissing: () -> Unit,
+    onDismissExportPrecheck: () -> Unit,
+    /** 密码框：确认（留空等同不设密码）/ 不设密码 / 取消。 */
+    onConfirmExport: (String) -> Unit,
+    onExportWithoutPassword: () -> Unit,
+    onCancelExport: () -> Unit,
     /**
      * 提示文案的**上层**回调。
      *
@@ -160,14 +172,14 @@ fun JmAlbumDetailScreen(
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                         DropdownMenuItem(
-                            text = { Text("导出 ZIP（P4 接入）") },
-                            enabled = false,
-                            onClick = { menuExpanded = false },
+                            text = { Text("导出 ZIP") },
+                            enabled = state.chapters.isNotEmpty(),
+                            onClick = { menuExpanded = false; onExport(JmExportFormat.ZIP) },
                         )
                         DropdownMenuItem(
-                            text = { Text("导出 PDF（P4 接入）") },
-                            enabled = false,
-                            onClick = { menuExpanded = false },
+                            text = { Text("导出 PDF") },
+                            enabled = state.chapters.isNotEmpty(),
+                            onClick = { menuExpanded = false; onExport(JmExportFormat.PDF) },
                         )
                         HorizontalDivider()
                         DropdownMenuItem(
@@ -284,6 +296,112 @@ fun JmAlbumDetailScreen(
             onDismiss = { showDeleteRecordDialog = false },
         )
     }
+
+    // 缺图：先列明缺哪些话、缺多少张，提供补下载后再导出（计划 §9 第 7 条）
+    state.exportPrecheck?.let { precheck ->
+        AlertDialog(
+            onDismissRequest = onDismissExportPrecheck,
+            title = { Text("还有图片没下载完") },
+            text = {
+                Column {
+                    Text(
+                        text = "共缺 ${precheck.missingImages} 张，" +
+                            "涉及 ${precheck.missingChapters.size} 话。" +
+                            "导出前请先补下载，否则成品会缺页。",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                        items(precheck.missingChapters, key = { it.title }) { row ->
+                            Text(
+                                text = "${row.title}　缺 ${row.missing}/${row.total} 张",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = 2.dp),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = onDownloadMissing) { Text("先补下载") }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissExportPrecheck) { Text("取消") }
+            },
+        )
+    }
+
+    // 导出密码框：默认预填配置里的密码，支持显示/隐藏，保留 [确认] / [不设密码]
+    state.exportFormat?.let { format ->
+        ExportPasswordDialog(
+            format = format,
+            defaultPassword = state.exportDefaultPassword,
+            onConfirm = onConfirmExport,
+            onWithoutPassword = onExportWithoutPassword,
+            onDismiss = onCancelExport,
+        )
+    }
+}
+
+/**
+ * 导出密码框（计划 §9 第 7 条）。
+ *
+ * - 默认**预填**该格式的密码（来自凭据存储，没设过就用参考实现的默认值）；
+ * - 有显示/隐藏切换；
+ * - 底部是 **[确认] / [不设密码]**，留空等同不加密；
+ * - 取消/返回不创建任务。
+ */
+@Composable
+private fun ExportPasswordDialog(
+    format: JmExportFormat,
+    defaultPassword: String,
+    onConfirm: (String) -> Unit,
+    onWithoutPassword: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var password by remember(format) { mutableStateOf(defaultPassword) }
+    var visible by remember(format) { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("导出 ${format.label}") },
+        text = {
+            Column {
+                Text(
+                    text = "给导出的 ${format.label} 设置打开密码；" +
+                        "选「不设密码」或留空则不加密，任何人都能打开。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    singleLine = true,
+                    label = { Text("打开密码") },
+                    visualTransformation = if (visible) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        TextButton(onClick = { visible = !visible }) {
+                            Text(if (visible) "隐藏" else "显示")
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(password) }) { Text("确认") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onWithoutPassword) { Text("不设密码") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
+    )
 }
 
 @Composable

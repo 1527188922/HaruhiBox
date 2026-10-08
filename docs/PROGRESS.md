@@ -36,7 +36,7 @@ app/src/main/java/com/haruhi/haruhibox/
 | **P1 基础设施** | ✅ 完成 | 见下表；验收项全部达成 |
 | **P2 JM 数据与浏览** | 🚧 代码完成，**界面待人工确认** | 见下方 P2 明细 |
 | **P3 JM 下载与阅读闭环** | 🚧 代码完成，**界面待人工确认** | 见下方 P3 明细 |
-| P4 JM 导出 zip / pdf | ⬜ 未开始 | PDF 能力已在 P0 spike 验证 |
+| **P4 JM 导出 zip / pdf** | 🚧 代码完成，**真机观感待确认** | 见下方 P4 明细 |
 | P5 B站 | ⬜ 未开始 | |
 | P6 壳与体验 | ⬜ 未开始 | |
 | P7 验收与真机 | ⬜ 未开始 | |
@@ -126,7 +126,7 @@ app/src/main/java/com/haruhi/haruhibox/
 
 ### P3 待验证（需要你在设备上确认）
 
-自动验证过的部分：**208 个单元测试 + 6 个真机测试**全绿，lint 0 error，debug/release 均可构建。
+自动验证过的部分：**228 个单元测试 + 11 个设备测试**全绿，lint 0 error，debug/release 均可构建。
 （真机 6 个用例是上一轮跑的：迁移 2 + PDF 加密 4；本轮没有改数据库结构，所以没有重跑。）
 
 | # | 请确认 | 期望 |
@@ -272,7 +272,6 @@ app/src/main/java/com/haruhi/haruhibox/
 > 的代码都在主线程上跑**。现在的约定是——凡是碰文件、解码、遍历目录的，一律先切 IO。
 
 ### 第六轮反馈修复（2026-10-09）
-
 | # | 反馈 | 落地方式 | 验证 |
 |---|---|---|---|
 | F1 | 收藏夹要有封面（夹内最近收藏的那本），空夹给占位 | 汇总查询加两个相关子查询：`lastAddedTime`（`MAX(create_time)`）与 `latestAlbumId`（按 `create_time DESC, id DESC` 取第一条）。列表左侧复用 `JmCover`（应用级 Coil + `files/covers` 磁盘缓存，看过的封面优先读本地）；空夹在同一位置画等大的占位方块，避免列表高度跳动 | `FavoriteSortTest`；模拟器截图：默认收藏夹显示封面、三个空夹显示 ☆ 占位 |
@@ -281,6 +280,41 @@ app/src/main/java/com/haruhi/haruhibox/
 
 > F2 的两条隐藏规则也写进了 `sortFavorites()` 并有用例锁定：
 > **默认收藏夹永远置顶**（换排序也不动它），以及同值时按 id 兜底（顺序不抖）。
+
+## P4 明细（JM 导出 zip / pdf）
+
+| 项 | 状态 | 产出 |
+|---|---|---|
+| ZIP 打包（AES 密码 / 不加密、UTF-8 名、不套本子目录） | ✅ | `core/codec/ArchiveWriter.kt` |
+| PDF 生成（每图一页、章节目录、权限、AES-128） | ✅ | `core/codec/PdfWriter.kt`（P0 spike 起就有，本轮补切片与取消） |
+| **超长图按高度切片**（PDF 单页上限 14400） | ✅ | `core/codec/PdfPagePlan.kt` + `PdfPagePlanTest` |
+| 导出编排（复用任务表、进度进任务页、取消、去重） | ✅ | `feature/jm/data/JmExportManager.kt` |
+| 密码不进数据库 | ✅ | 密码只存在内存的 `passwords` 表里；payload 只有 albumId/folderName/format |
+| 成品交付到系统目录 | ✅ | `core/storage/ExportPublisher.kt`（API 29+ 走 MediaStore 下载目录） |
+| 导出前的密码框（预填 + 显示/隐藏 + [确认]/[不设密码]） | ✅ 代码 | `ExportPasswordDialog` |
+| **缺图预检**（列明缺哪几话、缺多少张，先补下载） | ✅ | `JmExportManager.precheck` + 详情页对话框 |
+| 导出不支持续做：只给取消，不给重试 | ✅ | `TaskRow.isExport` 关掉暂停/继续/重试 |
+
+### 关于 PDF 单页上限（计划 §7 点名要确认的"行为差异"）
+
+计划里写着"参考实现不处理 14400 上限，如需优化（按高度切片）属于行为差异，要单独确认"。
+本轮的处理是**按高度均匀切片**，原因是它不会失败、阅读体验也正常（拒绝导出会让用户
+拿不到文件）。没超限的图仍然是一页一张、页面尺寸等于像素尺寸，与参考实现一致；
+宽度超限（更罕见）则整体等比缩小。切片规则由 `PdfPagePlanTest` 的 8 个用例锁住。
+
+### P4 的模拟器实测（2026-10-09）
+
+| 步骤 | 结果 |
+|---|---|
+| 已下载的本子 → ⋮ → 「导出 ZIP」 | ✅ 弹出密码框，**预填默认密码**、有显示/隐藏、[不设密码]/[取消]/[确认] |
+| 点「确认」 | ✅ 提示"已开始导出 ZIP"，任务页出现导出任务 |
+| ZIP 结果 | ✅ 日志 `zip 完成：12 个条目，加密=true`；`/sdcard/Download/HaruHiBox/<本子名>_JM377531.zip`（12.4 MB） |
+| 点「导出 PDF」→「不设密码」 | ✅ 日志 `pdf 完成：12 页 / 1 话（切片 0 张），加密=false`；同目录下 20.8 MB 的 PDF |
+| 任务页 | ✅ 导出任务显示文件名与 `已完成 · 12/12 张`，且**没有「重试」**（导出不能续做） |
+| 设备测试（`:app:runDeviceTests`） | ✅ **11 个用例全过**：zip AES/错密码/不加密、PDF 长图切片、PDF 加密、数据库迁移 |
+
+> 真机还需要确认的是"用系统文件管理器打开导出的文件"这类观感项——
+> 模拟器上已经能在 `/sdcard/Download/HaruHiBox/` 看到两个成品。
 
 ### 真机验证发现的一个严重 bug（已修）
 
@@ -429,6 +463,23 @@ OK (4 tests)
 | `emptyPasswordMeansNoEncryption` | 「不设密码」确实不加密 |
 | `permissionBitsAreWrittenButOwnerIdentityBypassesThem` | P 位写对，但 owner 身份使其不生效（有意固定该事实） |
 
+### 设备测试（instrumented）
+
+| 测试类 | 用例数 | 覆盖内容 |
+|---|---|---|
+| `core.codec.ExportInstrumentedTest` | 5 | zip AES / 错密码打不开 / 不设密码可直接读；**PDF 长图切片**；普通图一页一张 |
+| `core.codec.PdfEncryptionInstrumentedTest` | 4 | PDF AES-128 / 错误密码 / 权限位事实 |
+| `core.database.MigrationsTest` | 2 | v1→v2 迁移建表并保留数据 / 当前 schema 一致 |
+
+当前结果（模拟器 `emulator-5554`）：
+
+```
+com.haruhi.haruhibox.core.codec.ExportInstrumentedTest:.....
+com.haruhi.haruhibox.core.codec.PdfEncryptionInstrumentedTest:....
+com.haruhi.haruhibox.core.database.MigrationsTest:..
+OK (11 tests)
+```
+
 ### 设备测试的运行方式
 
 **不要用 `connectedAndroidTest`**：AGP 给测试 APK 硬编码加 `-g`，MIUI/HyperOS
@@ -451,22 +502,22 @@ OK (4 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：208 个单元测试 + lint + 两种构建
+# 开发机：228 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
-# 设备：instrumented test（迁移 + PDF 加密）
+# 设备：instrumented test（迁移 + PDF/zip 加密 + 长图切片）
+$env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**208 个单元测试 + 6 个真机用例全绿**，lint 0 error（27 条 warning 均为既有项），
-debug / release APK 均可构建（4.4 MB → 5.6 MB，新增阅读器与任务页）。
+当前基线：**228 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
+debug / release APK 均可构建（release 5.6 MB）。
 
 ### 测试清单（单元测试）
 
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
-| `feature.jm.data.JmRepositoryTest` | 22 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底与标题归一化）/ 标签 OR / 删除语义 |
-| `feature.jm.ui.JmReaderAndTaskLogicTest` | 22 | 任务状态与进度文案 / 下载面板默认勾选与"已在队列" / **底栏切换方向** / 阅读器进度条与"待取 vs 失败" / 阅读偏好编解码 |
+| `feature.jm.data.JmRepositoryTest` | 22 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底与标题归一化）/ 标签 OR / 删除语义 || `feature.jm.ui.JmReaderAndTaskLogicTest` | 22 | 任务状态与进度文案 / 下载面板默认勾选与"已在队列" / **底栏切换方向** / 阅读器进度条与"待取 vs 失败" / 阅读偏好编解码 |
 | `feature.jm.data.JmRecentAndFavoriteTest` | 19 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / **骨架行不算本地数据** / 收藏夹数量与封面来源 Flow |
 | `core.jm.JmCryptoGoldenTest` | 14 | 签名 / AES-256 解密 / 块数，与参考实现逐值一致 |
 | `core.storage.FileNamingGoldenTest` | 14 | 文件名清洗 / 本子目录名 / 章节与图片排序 |
@@ -476,8 +527,11 @@ debug / release APK 均可构建（4.4 MB → 5.6 MB，新增阅读器与任务�
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
 | `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
 | `feature.jm.ui.JmDisplayLogicTest` | 8 | 书库状态文案 / 章节状态 / 体积格式 / 空态与错误文案 |
+| `core.codec.PdfPagePlanTest` | 8 | **PDF 切片**：未超限仍是一页 / 超限切片连续无重叠 / 宽度超限等比缩小 / 切片数上限 |
 | `feature.jm.data.JmImageStoreTest` | 7 | **本地优先取图**：命中不发请求 / 取回来就缓存 / 删掉后重新取 / 块数 0 原样保留 |
 | `feature.jm.ui.FavoriteSortTest` | 7 | **收藏页排序**：默认夹置顶 / 三种方式都是降序 / 空夹排最后 / 同值按 id 稳定 |
+| `feature.jm.data.JmExportManagerTest` | 7 | **导出编排**：缺图预检 / zip 与 pdf 跑通并交付 / 重复提交复用 / 无图时给出可读失败原因 |
+| `core.codec.ArchiveWriterTest` | 5 | zip 结构（不套本子目录）/ 顺序 / 进度 / 不加密码 / 重新生成覆盖 |
 | `feature.jm.data.JmReadingRepositoryTest` | 6 | 阅读位置读写与钳位 / "继续阅读"取最近一本 / 章节目录名规则 |
 | `feature.jm.ui.SearchRevealStateTest` | 6 | 搜索增量展示的推进与边界 |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
