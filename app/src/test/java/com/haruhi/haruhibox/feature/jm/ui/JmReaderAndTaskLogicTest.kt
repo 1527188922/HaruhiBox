@@ -87,31 +87,7 @@ class JmReaderAndTaskLogicTest {
         assertThat(TaskRow(task(displayName = "测试本子")).displayName).isEqualTo("测试本子")
     }
 
-    // ---------------- 详情页主按钮与下载面板 ----------------
-
-    @Test
-    fun `primary action continues reading when something is readable`() {
-        val state = AlbumDetailUiState(
-            album = album(),
-            chapters = listOf(chapter(1, downloaded = 10, total = 10), chapter(2, downloaded = 0, total = 10)),
-        )
-        assertThat(state.primaryAction).isEqualTo(PrimaryAction.ContinueReading)
-    }
-
-    @Test
-    fun `primary action falls back to downloading the first chapter`() {
-        val state = AlbumDetailUiState(
-            album = album(),
-            chapters = listOf(chapter(1, downloaded = 0, total = 10), chapter(2, downloaded = 0, total = 10)),
-        )
-        assertThat(state.primaryAction).isEqualTo(PrimaryAction.DownloadFirstChapter)
-        assertThat(state.primaryAction.label).isEqualTo("下载首章")
-    }
-
-    @Test
-    fun `primary action is empty without chapters`() {
-        assertThat(AlbumDetailUiState(album = album()).primaryAction).isEqualTo(PrimaryAction.None)
-    }
+    // ---------------- 详情页的下载面板 ----------------
 
     @Test
     fun `download sheet preselects only the unfinished chapters`() {
@@ -124,6 +100,46 @@ class JmReaderAndTaskLogicTest {
             ),
         )
         assertThat(state.defaultDownloadSelection).containsExactly(2L, 3L)
+    }
+
+    /**
+     * 用户要求第 3 点：**已经在下载队列里的章节**不再默认勾选，
+     * 面板里也要用另一种颜色标出来、点不动。
+     */
+    @Test
+    fun `chapters already in the queue are not preselected`() {
+        val state = AlbumDetailUiState(
+            album = album(),
+            chapters = listOf(
+                chapter(1, downloaded = 0, total = 10),
+                chapter(2, downloaded = 0, total = 10),
+                chapter(3, downloaded = 0, total = 10),
+            ),
+            queuedChapterIds = setOf(1L, 3L),
+        )
+        assertThat(state.defaultDownloadSelection).containsExactly(2L)
+    }
+
+    // ---------------- 底栏切换方向（用户要求第 1 点） ----------------
+
+    @Test
+    fun `switching to a tab on the right slides in from the right`() {
+        assertThat(tabShift("jm/library", "jm/recent")).isEqualTo(1)
+        assertThat(tabShift("jm/library", "jm/tasks")).isEqualTo(4)
+        assertThat(tabShift("jm/discover", "jm/favorites")).isEqualTo(1)
+    }
+
+    @Test
+    fun `switching to a tab on the left slides in from the left`() {
+        assertThat(tabShift("jm/tasks", "jm/favorites")).isEqualTo(-1)
+        assertThat(tabShift("jm/favorites", "jm/library")).isEqualTo(-3)
+    }
+
+    @Test
+    fun `entering a detail page keeps the push direction`() {
+        // 有一端不是底栏 tab（详情页/阅读器）时按正数处理，也就是"从右侧进入"
+        assertThat(tabShift("jm/library", "jm/album/{albumId}")).isEqualTo(1)
+        assertThat(tabShift("jm/album/{albumId}", "jm/library")).isEqualTo(1)
     }
 
     // ---------------- 阅读器 ----------------

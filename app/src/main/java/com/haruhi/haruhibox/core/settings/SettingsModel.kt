@@ -11,10 +11,17 @@ enum class AppTheme { FOLLOW_SYSTEM, LIGHT, DARK }
 /** 打开应用时的行为。 */
 enum class StartMode { ASK, LAST_USED, JM, BILI }
 
-/** 下载网络策略。 */
+/** 下载网络策略。序号与 `SettingDefaults.DOWNLOAD_NETWORK_*` 的存储值一一对应。 */
 enum class DownloadNetwork(val label: String) {
     WIFI_ONLY("仅 Wi-Fi"),
     ANY("允许移动网络"),
+    ;
+
+    companion object {
+        /** 未知取值（例如旧版本写下的别的数字）按"允许移动网络"处理，不悄悄掐掉下载。 */
+        fun ofOrdinal(ordinal: Int): DownloadNetwork =
+            entries.getOrElse(ordinal) { ANY }
+    }
 }
 
 /**
@@ -81,8 +88,7 @@ data class ResolvedNetworkConfig(
         fun proxyTypeOf(ordinal: Int): ProxyType =
             ProxyType.entries.getOrElse(ordinal) { ProxyType.NONE }
 
-        fun downloadNetworkOf(ordinal: Int): DownloadNetwork =
-            DownloadNetwork.entries.getOrElse(ordinal) { DownloadNetwork.WIFI_ONLY }
+        fun downloadNetworkOf(ordinal: Int): DownloadNetwork = DownloadNetwork.ofOrdinal(ordinal)
 
         fun normalizedHost(raw: String): String = raw.trim().lowercase(Locale.ROOT)
     }

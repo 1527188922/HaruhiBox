@@ -532,7 +532,11 @@ fun JmOnlineSearchScreen(
             )
             else -> {
                 val listState = rememberLazyListState()
-                val visibleItems = remember(state.visibleCount, result.items.size) {
+                // key 必须带上 `result.items` 本身：加入书库后 item 的 `existsLocal` 会变，
+                // 而"已显示条数"和"总条数"都不变——只按这两个 key 缓存的话，
+                // 拿到的永远是加库之前那一份列表，表现为"点了加入书库，按钮不变，
+                // 切走再回来才对"（用户反馈第 5 点）。
+                val visibleItems = remember(state.visibleCount, result.items) {
                     result.items.take(state.visibleCount)
                 }
 

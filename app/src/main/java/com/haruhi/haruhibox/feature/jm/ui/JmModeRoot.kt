@@ -9,9 +9,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -47,23 +47,18 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 
 /**
- * 任务 tab 的图标。
+ * 任务 tab 的图标（含角标）。
  *
  * 计划 §9 第 9 条：**角标只统计排队/执行任务**，失败另用提示点。
  * 所以"有失败但没有排队任务"时画一个空角标当提示点，不把失败数加进数字里。
- *
- * 图标用 `KeyboardArrowDown` 而不是"下载"图标：`material-icons-core` 里没有 Download，
- * 而本工程**不引入 `material-icons-extended`**（体积代价，见 `libs.versions.toml`）。
  */
 @Composable
-private fun TaskTabIcon(badgeCount: Int, hasFailure: Boolean) {
-    val icon: @Composable () -> Unit = {
-        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "任务")
-    }
+private fun TaskTabIcon(badgeCount: Int, hasFailure: Boolean, icon: ImageVector) {
+    val content: @Composable () -> Unit = { Icon(icon, contentDescription = "任务") }
     when {
-        badgeCount > 0 -> BadgedBox(badge = { Badge { Text(badgeCount.toString()) } }) { icon() }
-        hasFailure -> BadgedBox(badge = { Badge {} }) { icon() }
-        else -> icon()
+        badgeCount > 0 -> BadgedBox(badge = { Badge { Text(badgeCount.toString()) } }) { content() }
+        hasFailure -> BadgedBox(badge = { Badge {} }) { content() }
+        else -> content()
     }
 }
 
@@ -82,16 +77,35 @@ object JmRoutes {
 
     fun detail(albumId: Long) = "jm/album/$albumId"
 
-    /** 阅读器。`chapterId <= 0` 表示"接着上次读的位置"。 */
+    /**
+     * 阅读器。
+     *
+     * `chapterId <= 0` 表示"接着上次读的位置"；给了具体章节就**从那一话的第一页开始**。
+     */
     fun reader(albumId: Long, chapterId: Long = 0L) = "jm/read/$albumId?chapterId=$chapterId"
 }
 
+/**
+ * 底部导航的五个 tab。
+ *
+ * **声明顺序就是底栏顺序**，也是页面切换动画方向的依据（见 [JmTab.indexOfRoute]）。
+ *
+ * 图标只能用 `material-icons-core` 里有的：本工程**不引入 `material-icons-extended`**
+ * （体积代价，见 `libs.versions.toml`）。所以"最近"用日历（`DateRange`，
+ * 表达"按时间翻过的记录"），"任务"用清单（`List`，表达"一批待办的事"）。
+ */
 private enum class JmTab(val route: String, val label: String, val icon: ImageVector) {
     LIBRARY(JmRoutes.LIBRARY, "书库", Icons.Default.Home),
-    RECENT(JmRoutes.RECENT, "最近", Icons.AutoMirrored.Filled.List),
+    RECENT(JmRoutes.RECENT, "最近", Icons.Default.DateRange),
     DISCOVER(JmRoutes.DISCOVER, "发现", Icons.Default.Search),
     FAVORITES(JmRoutes.FAVORITES, "收藏", Icons.Default.Favorite),
-    TASKS(JmRoutes.TASKS, "任务", Icons.Default.KeyboardArrowDown),
+    TASKS(JmRoutes.TASKS, "任务", Icons.AutoMirrored.Filled.List),
+    ;
+
+    companion object {
+        /** 底栏里的位置；不是 tab（详情页/阅读器）时返回 -1。 */
+        fun indexOfRoute(route: String?): Int = entries.indexOfFirst { it.route == route }
+    }
 }
 
 /** 页面切换动画时长（毫秒）。 */
@@ -153,6 +167,7 @@ fun JmModeRoot(
                                         TaskTabIcon(
                                             badgeCount = taskState.badgeCount,
                                             hasFailure = taskState.failedCount > 0,
+                                            icon = tab.icon,
                                         )
                                     } else {
                                         Icon(tab.icon, contentDescription = tab.label)
@@ -169,17 +184,24 @@ fun JmModeRoot(
                 navController = navController,
                 startDestination = JmRoutes.LIBRARY,
                 modifier = Modifier.padding(padding),
-                // 页面切换改成"新页面从右侧划入"（用户反馈：默认淡入淡出太弱）。
-                // 返回时反向滑出。底部 tab 之间共用这套动画，方向一致、不突兀。
+                // 页面切换动画。三种情形分开处理：
+                // 1. **底栏 tab 之间**：按目标 tab 在底栏里的位置决定方向——
+                //    往右边的 tab 切就从右侧滑入、往左边切就从左侧滑入，
+                //    与"底栏本身是一条从左到右的轴"一致，手指和视线都不用重新找方向；
+                // 2. **进入详情页/阅读器**（push）：新页面从右侧滑入，返回时反向；
+                // 3. 其余情况（例如从详情页返回底栏）走同一套反向动画。
                 enterTransition = {
+                    val shift = tabShift(initialState.destination.route, targetState.destination.route)
                     slideInHorizontally(
-                        initialOffsetX = { fullWidth -> fullWidth },
+                        initialOffsetX = { fullWidth -> if (shift < 0) -fullWidth else fullWidth },
                         animationSpec = tween(PAGE_TRANSITION_MS),
                     ) + fadeIn(animationSpec = tween(PAGE_TRANSITION_MS))
                 },
                 exitTransition = {
+                    val shift = tabShift(initialState.destination.route, targetState.destination.route)
                     slideOutHorizontally(
-                        targetOffsetX = { fullWidth -> -fullWidth / 4 },
+                        // 旧页面往反方向退，两页像一条传送带
+                        targetOffsetX = { fullWidth -> if (shift < 0) fullWidth / 4 else -fullWidth / 4 },
                         animationSpec = tween(PAGE_TRANSITION_MS),
                     ) + fadeOut(animationSpec = tween(PAGE_TRANSITION_MS))
                 },
@@ -342,11 +364,13 @@ fun JmModeRoot(
                         onReadChapter = { chapterId ->
                             navController.navigate(JmRoutes.reader(albumId, chapterId))
                         },
-                        onContinueReading = { navController.navigate(JmRoutes.reader(albumId)) },
+                        // 「阅读」= 从第一章开始读（用户要求第 4 点）
+                        onReadFromStart = {
+                            val first = state.chapters.firstOrNull()
+                            if (first != null) navController.navigate(JmRoutes.reader(albumId, first.chapterId))
+                        },
                         onDownloadChapters = vm::downloadChapters,
-                        onDismissDownloadSheet = vm::dismissDownloadSheet,
                         onDeleteChapterFiles = vm::deleteChapterFiles,
-                        onFetchChapterImages = vm::ensureChapterImages,
                         onDeleteAlbumFiles = vm::deleteAlbumFiles,
                         onOpenTaskPage = { navController.navigate(JmRoutes.TASKS) },
                         // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）
@@ -411,6 +435,19 @@ fun JmModeRoot(
 }
 
 /**
+ * 两个底栏 tab 之间的"移动方向"：正数表示往右切（目标在右边），负数表示往左切。
+ *
+ * 有一端不是底栏 tab（进详情页/阅读器、从它们返回）时返回正数，
+ * 于是走的还是原来那套"新页面从右侧滑入"。
+ */
+internal fun tabShift(fromRoute: String?, toRoute: String?): Int {
+    val from = JmTab.indexOfRoute(fromRoute)
+    val to = JmTab.indexOfRoute(toRoute)
+    if (from < 0 || to < 0) return 1
+    return to - from
+}
+
+/**
  * 手写 ViewModel 工厂（P0 决策 D-3：不用 Hilt）。
  *
  * `albumId` / `chapterId` 只有详情页与阅读器需要，所以做成可选参数。
@@ -452,6 +489,7 @@ class JmViewModelFactory(
             JmAlbumDetailViewModel(
                 container.jmRepository,
                 container.jmDownloads,
+                container.downloadTasks,
                 albumId ?: error("详情页必须传 albumId"),
             ) as T
 

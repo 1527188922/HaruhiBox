@@ -18,8 +18,18 @@ object SettingDefaults {
     /** [计划 §9.5] 打开应用时：每次选择。 */
     const val START_MODE_ASK = 0
 
-    /** [计划 §9.5] 下载网络默认值：**仅 Wi-Fi**（Android 侧比参考实现更保守）。 */
+    /** [计划 §9.5] 下载网络：仅 Wi-Fi（存储值 0，与 `DownloadNetwork` 的序号一致）。 */
     const val DOWNLOAD_NETWORK_WIFI_ONLY = 0
+
+    /**
+     * 下载网络：允许移动网络（存储值 1）。
+     *
+     * **[计划 §9.5 原定默认"仅 Wi-Fi"，2026-10-09 按用户要求把默认值改成这一项]**
+     * 理由：设置模块（P6）还没做，界面上改不了；默认"仅 Wi-Fi"会让移动网络下的下载
+     * **看起来没反应**（任务静默停在"等待网络"）。P6 做出全局 / JM / B站三个开关后
+     * 用户可自行收紧——判定逻辑（`DownloadGate`）与"等待网络"状态机已就绪，不需要改。
+     */
+    const val DOWNLOAD_NETWORK_ANY = 1
 
     /** [计划 §9.5] 请求超时：30 秒。 */
     const val REQUEST_TIMEOUT_SECONDS = 30

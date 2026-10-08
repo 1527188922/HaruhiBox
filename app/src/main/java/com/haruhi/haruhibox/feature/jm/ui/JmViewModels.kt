@@ -6,6 +6,7 @@ import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
+import com.haruhi.haruhibox.core.download.DownloadTaskRepository
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.core.network.NetworkError
 import com.haruhi.haruhibox.core.network.toUserMessage
@@ -700,31 +701,24 @@ data class AlbumDetailUiState(
     val reversed: Boolean = false,
     val descriptionExpanded: Boolean = false,
     val allFavorites: List<JmFavoriteEntity> = emptyList(),
-    /** 下载面板是否展开（默认勾选未完成章节）。 */
-    val showDownloadSheet: Boolean = false,
+    /**
+     * **已经在下载队列里**的章节 id（用户要求第 3 点）。
+     *
+     * 取这个本子当前活跃任务的章节明细：排队、下载中、暂停、等待网络、失败的都算
+     * ——"已经在队列里"本身就是不让重复提交的理由，与它跑到哪一步无关。
+     */
+    val queuedChapterIds: Set<Long> = emptySet(),
 ) {
-    /** 下载面板的默认勾选：**所有未下完的章节**（§9 第 7 条）。 */
+    /**
+     * 下载面板的默认勾选：**没下完、也不在队列里**的章节。
+     *
+     * 已下载的与已在队列里的都不默认勾选，避免用户点一下就把重复的活又排一遍。
+     */
     val defaultDownloadSelection: Set<Long>
-        get() = chapters.filter { !it.isDownloaded }.map { it.chapterId }.toSet()
-
-    /** 主按钮要做什么："继续阅读 / 开始阅读 / 下载首章"（§9 第 7 条）。 */
-    val primaryAction: PrimaryAction
-        get() = when {
-            chapters.isEmpty() -> PrimaryAction.None
-            chapters.any { it.isDownloaded || it.isPartial } -> PrimaryAction.ContinueReading
-            else -> PrimaryAction.DownloadFirstChapter
-        }
-}
-
-/** 详情页主按钮的语义。 */
-enum class PrimaryAction(val label: String) {
-    None(""),
-
-    /** 有可读的章节：直接进阅读器。 */
-    ContinueReading("继续阅读"),
-
-    /** 一张图都没有：主按钮变成"下载首章"。 */
-    DownloadFirstChapter("下载首章"),
+        get() = chapters
+            .filter { !it.isDownloaded && it.chapterId !in queuedChapterIds }
+            .map { it.chapterId }
+            .toSet()
 }
 
 /**
@@ -749,6 +743,7 @@ enum class PrimaryAction(val label: String) {
 class JmAlbumDetailViewModel(
     private val repo: JmRepository,
     private val downloads: JmDownloadManager,
+    private val tasks: DownloadTaskRepository,
     private val albumId: Long,
 ) : ViewModel() {
 
@@ -780,6 +775,16 @@ class JmAlbumDetailViewModel(
             repo.observeFavorites().collect { favorites ->
                 _state.update { it.copy(allFavorites = favorites) }
             }
+        }
+
+        // 3) 盯着这个本子的活跃任务：面板里要把"已在队列"的章节标出来且不可选，
+        //    下载完成后也要立刻把状态清掉（用户要求第 3 点）
+        viewModelScope.launch {
+            tasks.observeQueuedChapters(albumId)
+                .catch { e -> Timber.tag("jm").w(e, "观察下载队列失败") }
+                .collect { queued ->
+                    _state.update { it.copy(queuedChapterIds = queued) }
+                }
         }
     }
 
@@ -997,25 +1002,14 @@ class JmAlbumDetailViewModel(
         }
     }
 
-    /** 入库章节图片清单（供阅读器判断缺图）。 */
-    fun ensureChapterImages(chapterId: Long) {
-        viewModelScope.launch {
-            runCatching { repo.fetchAndSaveChapter(albumId, chapterId) }
-                .onSuccess { count ->
-                    _state.update { it.copy(message = "已获取章节图片清单（$count 张）") }
-                    refreshLocalStats()
-                }
-                .onFailure { e ->
-                    _state.update { it.copy(message = e.toUserMessage()) }
-                }
-        }
-    }
-
     /**
-     * 下载选中的章节（计划 §9 第 7 条「下载面板默认勾选未完成章节」）。
+     * 下载选中的章节（计划 §9 第 7 条）。
      *
      * 下载的前置是"本子有书库记录"——目录名由书库记录决定，所以这里先确保入库，
      * 用户不必先点一次「加入书库」再回来下载。
+     *
+     * 已在队列里的章节会被过滤掉：面板里已经不让选，这里再兜一次，
+     * 避免别处（例如阅读器的"补下缺图"）误传进来。
      */
     fun downloadChapters(chapterIds: List<Long>) {
         if (chapterIds.isEmpty()) {
@@ -1024,11 +1018,15 @@ class JmAlbumDetailViewModel(
         }
         viewModelScope.launch {
             val current = _state.value
-            val selected = current.chapters.filter { it.chapterId in chapterIds }
-            if (selected.isEmpty()) return@launch
+            val usable = chapterIds.filterNot { it in current.queuedChapterIds }
+            val selected = current.chapters.filter { it.chapterId in usable }
+            if (selected.isEmpty()) {
+                _state.update { it.copy(message = "选中的章节都已经在下载队列里了") }
+                return@launch
+            }
             runCatching {
                 val album = ensureInLibrary()
-                val summaries = repo.chaptersOf(album).filter { it.chapterId in chapterIds }
+                val summaries = repo.chaptersOf(album).filter { it.chapterId in usable }
                 downloads.submit(album, summaries)
             }.onSuccess { result ->
                 val text = when (result) {
@@ -1038,7 +1036,7 @@ class JmAlbumDetailViewModel(
                     is com.haruhi.haruhibox.core.download.DownloadTaskRepository.SubmitResult.AlreadyRunning ->
                         "这本漫画已有下载任务，已把选中的 ${selected.size} 话加进去"
                 }
-                _state.update { it.copy(message = text, showDownloadSheet = false) }
+                _state.update { it.copy(message = text) }
                 refreshLocalStats()
             }.onFailure { e ->
                 _state.update { it.copy(message = e.toUserMessage()) }
@@ -1061,10 +1059,6 @@ class JmAlbumDetailViewModel(
                 .onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
         }
     }
-
-    fun showDownloadSheet() = _state.update { it.copy(showDownloadSheet = true) }
-
-    fun dismissDownloadSheet() = _state.update { it.copy(showDownloadSheet = false) }
 
     fun consumeMessage() = _state.update { it.copy(message = null) }
 

@@ -513,6 +513,21 @@ interface DownloadTaskDao {
     )
     suspend fun activeTask(type: DownloadType, bizKey: String): DownloadTaskEntity?
 
+    /**
+     * 观察某个业务对象的**活跃任务**（详情页靠它判断"哪些章节已经在队列里"）。
+     *
+     * 去重规则保证同一 `(type, bizKey)` 最多一个活跃任务，所以取一行就够。
+     */
+    @Query(
+        """
+        SELECT * FROM t_download_task
+        WHERE type = :type AND bizKey = :bizKey
+          AND status IN ('QUEUED', 'RUNNING', 'PAUSED', 'WAITING_NETWORK')
+        ORDER BY id DESC LIMIT 1
+        """,
+    )
+    fun observeActiveTask(type: DownloadType, bizKey: String): Flow<DownloadTaskEntity?>
+
     @Query(
         """
         SELECT * FROM t_download_task

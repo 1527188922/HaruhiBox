@@ -7,6 +7,9 @@ import com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity
 import com.haruhi.haruhibox.core.database.entity.DownloadType
 import com.haruhi.haruhibox.core.storage.LibraryDirs
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import timber.log.Timber
 import java.io.File
 
@@ -50,6 +53,23 @@ class DownloadTaskRepository(
 
     suspend fun activeTask(type: DownloadType, bizKey: String): DownloadTaskEntity? =
         dao.activeTask(type, bizKey)
+
+    /**
+     * 某个本子当前活跃任务里**所有章节的 id**。
+     *
+     * 详情页靠它把"已经在下载队列里"的章节标成另一种颜色并且不允许再选
+     * （用户要求第 3 点）。没有活跃任务时发空集合，调用方不必区分
+     * "没有任务"和"任务里没有章节"。
+     */
+    fun observeQueuedChapters(albumId: Long): Flow<Set<Long>> =
+        dao.observeActiveTask(DownloadType.JM_ALBUM, albumId.toString())
+            .flatMapLatest { task ->
+                if (task == null) {
+                    flowOf(emptySet())
+                } else {
+                    dao.observeChapters(task.id).map { rows -> rows.map { it.chapterId }.toSet() }
+                }
+            }
 
     // ------------------------------------------------------------------
     // 提交（含去重）

@@ -155,7 +155,8 @@ class SettingsRepository(
         val globalProxyUser = globalString(SettingKeys.G_PROXY_USERNAME).first()
         val globalDownloadNetwork = globalInt(
             SettingKeys.G_DOWNLOAD_NETWORK,
-            SettingDefaults.DOWNLOAD_NETWORK_WIFI_ONLY,
+            // 默认允许移动网络（2026-10-09 按用户要求放开，见 SettingDefaults 的说明）
+            SettingDefaults.DOWNLOAD_NETWORK_ANY,
         ).first()
 
         val timeout = if (followGlobal) globalTimeout else scopeTimeout
