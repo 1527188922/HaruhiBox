@@ -77,6 +77,10 @@ class JmReadingRepository(
 
     /** 某一话的章节文件夹名。章节清单为空时返回 null（还没拉过清单）。 */
     suspend fun chapterFolderName(albumId: Long, chapterId: Long): String? {
+        // 单话本子：章节 id 就是本子 id，目录名固定「第1话」。
+        // 这条规则与 JmRepository.chaptersOf 一致——否则"下载写到哪个目录"和
+        // "阅读器去哪个目录找图"会对不上。
+        if (chapterId == albumId) return JmRepository.SINGLE_CHAPTER_TITLE
         val first = chapterDao.images(albumId, chapterId).firstOrNull() ?: return null
         return first.chapterTitle?.takeIf { it.isNotBlank() }
             ?: first.chapterName?.takeIf { it.isNotBlank() }

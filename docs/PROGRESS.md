@@ -93,14 +93,15 @@ app/src/main/java/com/haruhi/haruhibox/
    但"我勾了第 5 话却没开始下载"是更糟的体验；去重规则（同一 `(type, bizKey)` 一个活跃任务）
    仍然成立，只是在追加时会唤醒暂停中的任务。
 
-#### 模拟器实测发现并修掉的两个 bug（2026-10-09）
+#### 模拟器实测发现并修掉的三个 bug（2026-10-09）
 
-这两个都是**只有真的把 App 跑起来点一遍才会暴露**的问题，单测覆盖不到：
+这三个都是**只有真的把 App 跑起来点一遍才会暴露**的问题，单测覆盖不到：
 
 | # | 现象 | 根因 | 修复 |
 |---|---|---|---|
 | E1 | 从搜索结果点进一本**没入库**的漫画，详情页只有一个 JM 号与"共 0 话"，**永远不联网** | 进详情页时会先 `touchRecent` 建一条**只有 id 的骨架行**；`localAlbumDetail` 把它当成"本地已有数据"，于是详情页走了"本地优先"分支、再也不请求 `/album` | `localAlbumDetail` 只认**已经有过在线数据**的最近浏览记录（`name` 非空）；骨架行返回 null，详情页照常联网。用例 `the touch placeholder does not count as local data` |
 | E2 | 单话本子显示"共 0 话"，**无法下载**（JM 上这类本子很常见） | `/album` 对单话本子不返回 `series`，本地章节表也是空的，于是章节列表为空 | 按参考实现 `downloadAlbumWithoutLock` 第 866～872 行的兜底：**章节 id = 本子 id**，标题"第1话"。用例 `a single chapter album falls back to using the album id as the chapter id` |
+| E3 | 图片已经下到磁盘，界面却一直显示 **0/1 已下载**（点阅读器也是"图片缺失"） | 章节目录名来自 `chapterTitle`：下载时用的是合成的"第1话"，入库时却写成了接口给的 `chapter.name`（**就是本子标题**）。两边对不上，计数器去一个不存在的目录里找图 | 单话本子的章节标题**固定「第1话」**（入库时合成、读取时归一化），阅读器查目录也走同一条规则。用例 `a single chapter album stores the synthetic title so it matches the folder name`、`a single chapter album normalizes the stored title to the folder name` |
 
 顺带调整：底部「任务」角标把 `WAITING_NETWORK` 也算进去（它不是失败，但用户点完下载
 回到浏览页后，没有角标就完全没有线索——实测就是这样）。
@@ -115,13 +116,16 @@ app/src/main/java/com/haruhi/haruhibox/
 | 任务页 | ✅ **等待网络 · 0/1 话** + "当前网络不允许下载，已暂停传输"（模拟器走 5G，默认策略是仅 Wi-Fi） |
 | 切到 Wi-Fi | ✅ 任务自动继续：`下载图片 · 0/1 话 · 0/11 张`，磁盘上出现 `第1话/0000N.webp.part` |
 | 杀进程再启动 | ✅ 日志 `恢复 1 个被中断的下载任务`，恢复后继续跑 |
+| 下载中的失败与重试 | ✅ 读超时 → 章节标记未完成、任务判失败并给出"1 话没有下完（0/11 张），可点重试补下"；点「重试」后只补缺口，已发布的图片不再请求 |
+| 部分下载后的详情页 | ✅ `部分下载 4/11`，占用从 1.1 MB 涨到 5.1 MB，主按钮变「继续阅读」 |
+| 阅读器 | ✅ 顶栏「第1话 · 11 页 · 缺 7 页」，缺图页显示「第 N 页 · 图片缺失 + 重试」，底栏「补下缺图（7 页）」；已下载的页**正常显示解扰后的画面**，纵向滚动可用 |
 
-图片传输在模拟器上很慢（单张封面要 40 秒），所以没等它跑完整本；
-"落盘 → 解扰 → 原子发布 → 进度"这一段由 `JmDownloadManagerTest`（真实 HTTP 服务 + 逐字节校验）覆盖。
+模拟器到 JM 图片 CDN 的链路很慢（单张封面 40 秒、图片经常读超时），所以没等它跑完整本；
+"落盘 → 解扰 → 原子发布 → 进度"由 `JmDownloadManagerTest`（真实 HTTP 服务 + 逐字节校验）覆盖。
 
 ### P3 待验证（需要你在设备上确认）
 
-自动验证过的部分：**182 个单元测试 + 6 个真机测试**全绿，lint 0 error，debug/release 均可构建。
+自动验证过的部分：**185 个单元测试 + 6 个真机测试**全绿，lint 0 error，debug/release 均可构建。
 （真机 6 个用例是上一轮跑的：迁移 2 + PDF 加密 4；本轮没有改数据库结构，所以没有重跑。）
 
 | # | 请确认 | 期望 |
@@ -135,8 +139,8 @@ app/src/main/java/com/haruhi/haruhibox/
 | 7 | 下载到一半杀进程再打开 | 从断点继续，已下载的图片不重下 |
 | 8 | 设置里把下载网络改成"仅 Wi-Fi"后用移动网络下载 | 任务显示"等待网络"而不是失败；切回 Wi-Fi 自动继续 |
 
-> 第 7、8 两条的**状态机**已有单测锁定（拦截、恢复、只补缺口），但"在真实设备上杀进程/切网络"
-> 的观感需要你确认一次。
+> 第 7、8 两条已在模拟器上走过一遍（见上表），但**真机上的观感**（通知、息屏继续、
+> 弱网重试）还是需要你在设备上确认一次。
 
 ### 用户提出的 8 点改动（2026-10-08 完成）
 
@@ -344,21 +348,21 @@ OK (4 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：182 个单元测试 + lint + 两种构建
+# 开发机：185 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF 加密）
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**182 个单元测试 + 6 个真机用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**185 个单元测试 + 6 个真机用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（4.4 MB → 5.6 MB，新增阅读器与任务页）。
 
 ### 测试清单（单元测试）
 
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
-| `feature.jm.data.JmRepositoryTest` | 19 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底）/ 标签 OR / 删除语义 |
+| `feature.jm.data.JmRepositoryTest` | 22 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底与标题归一化）/ 标签 OR / 删除语义 |
 | `feature.jm.ui.JmReaderAndTaskLogicTest` | 18 | 任务状态与进度文案 / 详情页主按钮三态 / 下载面板默认勾选 / 阅读器导航与缺图 / 阅读偏好编解码 |
 | `feature.jm.data.JmRecentAndFavoriteTest` | 17 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / **骨架行不算本地数据** / 收藏夹数量 Flow |
 | `core.jm.JmCryptoGoldenTest` | 14 | 签名 / AES-256 解密 / 块数，与参考实现逐值一致 |

@@ -180,6 +180,72 @@ class JmRepositoryTest {
     }
 
     /**
+     * 单话本子的章节标题必须与磁盘目录名一致。
+     *
+     * 模拟器实测踩到的坑：接口返回的 `chapter.name` 往往是**本子标题**，
+     * 如果把它当成 `chapterTitle`，下载用的目录名（合成的"第1话"）就和它对不上，
+     * 于是图片下好了、界面却一直显示 0/1 已下载。
+     */
+    @Test
+    fun `a single chapter album stores the synthetic title so it matches the folder name`() = runTest {
+        val album = repo.saveAlbum(albumFixture().copy(series = null))
+        val chapter = JmChapterDto(
+            id = 480854,
+            images = listOf("00001.webp", "00002.webp"),
+            // 接口给的名字就是本子标题
+            name = "敏的秘密办公室恋情",
+        )
+
+        repo.saveChapterImages(480854, chapter)
+
+        val images = repo.imagesOf(480854, 480854)
+        assertThat(images).hasSize(2)
+        assertThat(images[0].chapterTitle).isEqualTo("第1话")
+        // 章节列表里的标题与章节目录名一致，界面才能正确判定"已下载"
+        val summary = repo.chaptersOf(album).single()
+        assertThat(summary.title).isEqualTo("第1话")
+        assertThat(repo.chapterFolderName(summary)).isEqualTo("第1话")
+    }
+
+    @Test
+    fun `multi chapter albums keep the api chapter name`() = runTest {
+        repo.saveAlbum(albumFixture())
+        val chapter = JmChapterDto(id = 500009, images = listOf("00001.webp"), name = "单行本第9话")
+
+        // 本子有 series 但这一话不在里面 -> 不合成，用接口给的 name
+        repo.saveChapterImages(480854, chapter)
+
+        assertThat(repo.imagesOf(480854, 500009)[0].chapterTitle).isEqualTo("单行本第9话")
+    }
+
+    /**
+     * 历史数据自愈：单话本子的章节行里可能存着接口给的 `chapter.name`（= 本子标题），
+     * 与磁盘目录名「第1话」对不上。列表与目录名都按"单话本子固定第1话"归一化。
+     */
+    @Test
+    fun `a single chapter album normalizes the stored title to the folder name`() = runTest {
+        val album = repo.saveAlbum(albumFixture().copy(series = null))
+        // 直接写入"坏"数据，模拟被旧逻辑写坏的库
+        db.jmChapterDao().insertAll(
+            listOf(
+                JmChapterImageEntity(
+                    albumId = 480854,
+                    chapterId = 480854,
+                    chapterSort = "1",
+                    chapterTitle = "敏的秘密办公室恋情",
+                    chapterName = "敏的秘密办公室恋情",
+                    imageFile = "00001.webp",
+                    imageSort = 1,
+                ),
+            ),
+        )
+
+        val summary = repo.chaptersOf(album).single()
+        assertThat(summary.title).isEqualTo("第1话")
+        assertThat(repo.chapterFolderName(summary)).isEqualTo("第1话")
+    }
+
+    /**
      * 单话本子：`/album` 不返回 `series` 时，JM 的约定是"章节 id 就是本子 id"。
      *
      * 参考实现 `downloadAlbumWithoutLock` 第 866～872 行就是这么兜底的。
@@ -201,8 +267,7 @@ class JmRepositoryTest {
     }
 
     @Test
-    fun `chapter images are replaced as a whole and sorted with image sort starting at one`() = runTest {
-        repo.saveAlbum(albumFixture())
+    fun `chapter images are replaced as a whole and sorted with image sort starting at one`() = runTest {        repo.saveAlbum(albumFixture())
         val chapter = JmChapterDto(
             id = 500001,
             // 故意乱序：入库前必须排序（对齐参考实现的 sortImageFiles）

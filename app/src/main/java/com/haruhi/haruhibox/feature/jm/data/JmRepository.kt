@@ -419,16 +419,19 @@ class JmRepository(
             Timber.tag("jm").d("章节无图片，跳过入库 chapterId=%d", chapter.id)
             return
         }
+        // 单话本子没有 series，但**标题必须与磁盘目录名一致**，否则会出现
+        // "图片下好了却一直显示未下载"（详见 singleChapterSeries 的注释）
+        val effectiveSeries = series ?: singleChapterSeries(albumId, chapter.id)
         val sorted = FileNaming.sortImageFiles(rawImages)
-        val title = chapterTitleOf(series, chapter)
+        val title = chapterTitleOf(effectiveSeries, chapter)
         val entities = sorted.mapIndexed { index, image ->
             JmChapterImageEntity(
                 albumId = albumId,
                 chapterId = chapter.id,
-                chapterSort = series?.sort,
+                chapterSort = effectiveSeries?.sort,
                 chapterTitle = title,
                 // 参考实现：有 series 时用 series.name，否则用 chapter.name
-                chapterName = if (series != null) series.name else chapter.name,
+                chapterName = if (effectiveSeries != null) effectiveSeries.name else chapter.name,
                 chapterAddTime = chapter.addTime,
                 seriesId = chapter.seriesId,
                 liked = chapter.liked,
@@ -438,6 +441,23 @@ class JmRepository(
             )
         }
         chapterDao.replaceChapter(albumId, chapter.id, entities)
+    }
+
+    /**
+     * 单话本子合成的 series 条目；不是单话本子时返回 null。
+     *
+     * 为什么必须有它：章节目录名由 `chapterTitle` 决定（`chapterFolderName` 的规则）。
+     * 单话本子没有 series，`chapterTitle` 会退化成接口给的 `chapter.name`
+     * ——那往往就是**本子标题**，而下载时用的目录名是合成的「第1话」。
+     * 两边对不上，已经下好的图片会被 `downloadedImageCount` 判成"未下载"，
+     * 界面上永远显示 0/1 已下载（模拟器实测踩到）。
+     * 参考实现 `downloadAlbumWithoutLock` 第 866～872 行也是先合成 `Series` 再入库。
+     */
+    private suspend fun singleChapterSeries(albumId: Long, chapterId: Long): JmSeriesDto? {
+        val album = albumDao.findById(albumId) ?: return null
+        val hasSeries = !album.series.isNullOrBlank() && album.series != "[]"
+        if (hasSeries || chapterId != album.id) return null
+        return JmSeriesDto(id = chapterId.toString(), sort = "1", title = "第1话", name = album.name)
     }
 
     /** 章节展示名：`series.title` → `第{sort}话` → `chapter.name` → chapterId。 */
@@ -485,9 +505,7 @@ class JmRepository(
                 chapterId = row.chapterId,
                 sort = row.chapterSort,
                 name = row.chapterName,
-                title = row.chapterTitle?.takeIf { it.isNotBlank() }
-                    ?: row.chapterName?.takeIf { it.isNotBlank() }
-                    ?: row.chapterId.toString(),
+                title = chapterTitleOfRow(row.chapterId, row.chapterTitle, row.chapterName, album.id),
             )
         }
         if (local.isNotEmpty()) return local
@@ -498,6 +516,27 @@ class JmRepository(
         // 不补这一条的话，单话本子在 App 里会显示"共 0 话"，永远下不动。
         return listOf(SINGLE_CHAPTER)
             .map { it.copy(chapterId = album.id, name = album.name) }
+    }
+
+    /**
+     * 章节标题的统一规则：**单话本子（章节 id = 本子 id）固定叫「第1话」**，
+     * 其余用 `title → name → id`。
+     *
+     * 为什么单话本子不看存下来的 `chapterTitle`：接口给的 `chapter.name` 往往就是
+     * **本子标题**，而下载用的目录名是"第1话"。历史数据里存了前者的话，
+     * 已经下好的图片会因为目录名对不上而被判成"未下载"（模拟器实测踩到）。
+     * 把它固定下来，目录名 / 任务里的章节名 / 界面上的章节名三者才永远一致。
+     */
+    private fun chapterTitleOfRow(
+        chapterId: Long,
+        chapterTitle: String?,
+        chapterName: String?,
+        albumId: Long,
+    ): String {
+        if (chapterId == albumId) return SINGLE_CHAPTER.title
+        return chapterTitle?.takeIf { it.isNotBlank() }
+            ?: chapterName?.takeIf { it.isNotBlank() }
+            ?: chapterId.toString()
     }
 
     /** 某章的图片清单（本地已入库的）。 */
@@ -766,16 +805,21 @@ class JmRepository(
         const val DEFAULT_FAVORITE_NAME = "默认收藏夹"
 
         /**
-         * 单话本子的兜底章节（章节 id 随后被替换成本子 id）。
+         * 单话本子的章节标题（同时也是章节目录名）。
          *
          * 与参考实现 `downloadAlbumWithoutLock` 的兜底完全一致：
          * `sort = "1"`、`title = "第1话"`、`id = aid`。
+         */
+        const val SINGLE_CHAPTER_TITLE = "第1话"
+
+        /**
+         * 单话本子的兜底章节（章节 id 随后被替换成本子 id）。
          */
         private val SINGLE_CHAPTER = ChapterSummary(
             chapterId = 0L,
             sort = "1",
             name = null,
-            title = "第1话",
+            title = SINGLE_CHAPTER_TITLE,
         )
 
         private val TEXT_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
