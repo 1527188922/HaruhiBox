@@ -350,15 +350,25 @@ fun JmCover(
     contentDescription: String?,
     modifier: Modifier = Modifier,
 ) {
-    val imageLoader = LocalImageLoader.current
+    val imageLoader = currentImageLoader()
     val model = remember(albumId) { JmDefaults.buildCoverUrl(albumId) }
-    AsyncImage(
-        model = model,
-        contentDescription = contentDescription,
-        contentScale = ContentScale.Crop,
-        imageLoader = imageLoader,
-        modifier = modifier,
-    )
+    // imageLoader 为 null（Preview / 测试未安装）时交给 Coil 的单例加载器
+    if (imageLoader != null) {
+        AsyncImage(
+            model = model,
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Crop,
+            imageLoader = imageLoader,
+            modifier = modifier,
+        )
+    } else {
+        AsyncImage(
+            model = model,
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+    }
 }
 
 /**

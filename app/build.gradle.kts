@@ -97,6 +97,13 @@ android {
         buildConfig = true
     }
 
+    // Room 的 MigrationTestHelper 从**测试 assets** 里读导出的 schema JSON
+    // （`app/schemas/<DatabaseClass>/<version>.json`），必须显式挂进去，
+    // 否则迁移测试会报 "Cannot find the schema file in the assets folder"。
+    sourceSets {
+        getByName("androidTest").assets.srcDir("$projectDir/schemas")
+    }
+
     packaging {
         resources {
             excludes += setOf(
@@ -301,6 +308,9 @@ dependencies {
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.truth)
+    // Room 迁移测试：MigrationTestHelper 需要 room-testing + sqlite-framework
+    androidTestImplementation(libs.androidx.room.testing)
+    androidTestImplementation(libs.androidx.sqlite.framework)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

@@ -79,16 +79,53 @@ app/src/main/java/com/haruhi/haruhibox/
 > 目前只清 `tmp` / `export`，**没算上 `covers`**。封面缓存有 256MB 上限、
 > 由 Coil 按 LRU 自行淘汰，所以不紧急；做"清理缓存"设置项时要把它纳入（P6）。
 
-### P2 待验证（需要你确认）
+### 真机验证发现的一个严重 bug（已修）
 
-代码已编译、可安装，**逻辑层有 130 个单元测试覆盖**，
-但**界面观感我无法在这台设备上自动验证**：设备处于休眠
-（`mWakefulness=Dozing`），`adb shell input keyevent POWER/WAKEUP` 都唤不醒；
-Compose UI 测试在熄屏时会**永久阻塞**（框架要等窗口获得焦点），
-所以那类测试没有留在仓库里，不留无法验证的"绿色"测试。
+**改动数据库表结构却忘记升 `@Database(version)`**，导致**应用一启动就崩**：
 
-需要你做的：解锁手机后我用 `:app:runDeviceTests` 跑界面回归，
-或你自己打开 App 看这几个交互（重点是第 5 点的滚动追加、第 8 点的封面缓存）。
+```
+java.lang.IllegalStateException: Room cannot verify the data integrity.
+Looks like you've changed schema but forgot to update the version number.
+Expected identity hash: 7ecd5cfc..., found: 31e452937...
+```
+
+触发条件是**覆盖安装**——全新安装不会有这个问题，所以"删掉重装"这种调试习惯
+永远发现不了它。P2 加 `t_jm_recent_album` 时就这样漏了。
+
+修复：
+
+- `@Database(version = 1 → 2)`；
+- `Migrations.MIGRATION_1_2` 建新表（**不使用 destructive migration**，否则用户数据全丢）；
+- 新增 `MigrationsTest`（真机）：从 v1 建库 → 跑迁移 → 校验 schema → 断言旧数据还在，
+  并断言新表可写。这类错误从今往后会被测试拦住；
+- `app/schemas/` 挂进 `androidTest` 的 assets（`MigrationTestHelper` 要从那里读 schema），
+  并且**历史版本的 schema JSON 必须一起进版本库**——我一度删掉了 `1.json`，
+  迁移测试立刻失败。
+
+**教训**：`@Database(entities)` 一改就必须同时升 version + 补迁移 + 保留历史 schema。
+
+### P2 待验证（需要你在设备上确认）
+
+我能自动验证的部分都过了：**130 个单元测试 + 6 个真机测试**
+（迁移 2 + PDF 加密 4）全绿，lint 0 error，应用启动无崩溃。
+
+**但交互与观感我无法自己验证**，因为这台设备同时封掉了两条路：
+
+| 手段 | 结果 |
+|---|---|
+| Compose UI 测试 | ❌ 永久阻塞：测试 Activity 拿不到焦点（`topResumedActivity` 始终是 launcher） |
+| `adb shell input tap/swipe` | ❌ `SecurityException: ... INJECT_EVENTS permission` |
+| 截图 | ✅ 可用（只读） |
+
+所以请你在设备上确认这几项（都是这次改动的重点）：
+
+1. **发现页搜索**：首屏是否只出 10 条、下滑是否自动追加、全部展示完才出现「加载下一页」；
+2. **封面缓存**：第二次进同一页是否明显更快（缓存落在 `files/covers`）；
+3. **点详情不入库**：从搜索点进详情后返回，书库是否没多出这本；
+4. **最近浏览**：进过详情的本子是否出现在「最近」tab，且按浏览时间倒序；
+5. **收藏数量**：收藏一本后进收藏页，数量是否立即更新；
+6. **收藏夹编辑**：详情页「收藏夹」面板的加入 / 移出 / 移动到 / 新建；
+7. **夹内页面**：标题是否显示收藏夹名、是否只剩「已下载 / 未下载」。
 
 ### P1 明细
 

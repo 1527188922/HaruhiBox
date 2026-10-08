@@ -30,9 +30,12 @@ import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
  * - `t_jm_search_history`（在线搜索历史，§2.4 第 1 条）
  * - `t_jm_recent_album`（最近浏览：点进过详情页的本子，按浏览时间倒序）
  *
- * 迁移策略：**唯一权威是 `@Database(version)` + 手写 `Migration`**，
+ * 迁移策略：**唯一权威是 `@Database(version)` + 手写 `Migration`**（见 [Migrations]），
  * 不使用 `fallbackToDestructiveMigration`——用户的下载记录与漫画库是真实资产，
  * 一次 destructive 迁移就是数据全丢。
+ *
+ * ⚠ **加表/加列时必须同时升 version 并补迁移**，否则应用启动即崩
+ * （Room 会比对 identity hash）。详见 [Migrations] 的注释。
  */
 @Database(
     entities = [
@@ -47,7 +50,7 @@ import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
         PlaybackPositionEntity::class,
         JmSearchHistoryEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 @TypeConverters(DatabaseConverters::class)
@@ -97,9 +100,4 @@ class DatabaseConverters {
     @TypeConverter
     fun stringToList(value: String?): List<String>? =
         value?.takeIf { it.isNotEmpty() }?.split("\n")
-}
-
-/** 迁移集合。v1 是初始版本，暂时为空；每次加字段/表都在这里补一条。 */
-object Migrations {
-    val ALL: Array<androidx.room.migration.Migration> = emptyArray()
 }

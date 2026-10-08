@@ -20,6 +20,7 @@ activityCompose = "1.11.0"
 composeBom = "2026.09.00"
 navigation = "2.9.6"
 room = "2.8.5"
+sqlite = "2.6.1"
 work = "2.11.2"
 datastore = "1.1.7"
 media3 = "1.11.1"
@@ -72,6 +73,7 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 androidx-room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
+androidx-sqlite-framework = { group = "androidx.sqlite", name = "sqlite-framework", version.ref = "sqlite" }
 
 # --- 后台任务 / 存储 ---
 androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }

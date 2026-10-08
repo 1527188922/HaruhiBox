@@ -126,35 +126,14 @@ java.lang.RuntimeException: Unable to get provider androidx.startup.Initializati
 与 PDF 加密（RC4/AES + 标准安全字典）无关。
 排掉的是**数据文件**，不是把某个安全功能关掉。
 
-## 小米机型上跑设备测试
+## 设备测试的运行方式
 
-`connectedAndroidTest` 在 MIUI / HyperOS 上**永远失败在安装阶段**。用 `--info` 能看到
-AGP 实际执行的命令：
+**不要用 `connectedAndroidTest`**：AGP 给测试 APK 硬编码加 `-g`，MIUI/HyperOS
+拒绝该 flag（`SecurityException: ...INSTALL_GRANT_RUNTIME_PERMISSIONS...`），
+安装阶段就失败。`-g` 是 AGP 测试引擎内部的默认值、不是 DSL 的 `installOptions`，
+所以改不到它（已实测确认，`app/build.gradle.kts` 里那段配置留作记录）。
 
-```
-Installing with command: adb install --bypass-low-target-sdk-block -t              --user 0 app-debug.apk
-Installing with command: adb install --bypass-low-target-sdk-block -t -g --user 0  app-debug-androidTest.apk
-```
-
-**测试 APK 那一条多了 `-g`**（一次性授予全部运行时权限）。MIUI 拒绝它：
-
-```
-java.lang.SecurityException: You need the android.permission.INSTALL_GRANT_RUNTIME_PERMISSIONS
-  permission to use the PackageManager.INSTALL_GRANT_ALL_REQUESTED_PERMISSIONS flag
-  at com.android.server.pm.PackageInstallerService.createSessionInternal
-```
-
-原因：MIUI 要求调用方持有 `INSTALL_GRANT_RUNTIME_PERMISSIONS` 才允许带该 flag，
-而普通 shell 只有 `INSTALL_PACKAGES`。AOSP / Pixel 没有这个限制，
-所以同一份配置在别的机器上 `connectedAndroidTest` 是正常的。
-
-`-g` 是 AGP 测试引擎内部的默认值，不是 DSL 的 `installOptions`，
-所以 `testOptions.installation { installOptions.removeAll { it == "-g" } }` **改不到它**
-（已实测确认），`app/build.gradle.kts` 里那段配置留作记录。
-
-### 替代方案：`:app:runDeviceTests`
-
-本工程自带一个任务，自己 `adb install`（不带 `-g`）再 `am instrument`：
+用本工程自带的任务（自己 `adb install` 不带 `-g`，再 `am instrument`）：
 
 ```powershell
 .\gradlew.bat :app:runDeviceTests
@@ -162,13 +141,44 @@ java.lang.SecurityException: You need the android.permission.INSTALL_GRANT_RUNTI
 ```
 
 实现：`app/build.gradle.kts` 的 `runDeviceTests` + `tools/device-tests/run-instrumented-tests.ps1`。
+**`am instrument` 有用例失败时退出码仍是 0**，所以脚本从输出里找
+`FAILURES!!!` / `INSTRUMENTATION_FAILED` / `OK (N tests)` 来判断成败。
 
-两个实现细节：
+### 排查卡住：用 `run-one.ps1`（带硬超时）
 
-- **`am instrument` 有用例失败时退出码仍是 0**，所以脚本从输出里找
-  `FAILURES!!!` / `INSTRUMENTATION_FAILED` / `OK (N tests)` 来判断成败；
-- 脚本文件**必须带 UTF-8 BOM**：Windows PowerShell 5.1 会把无 BOM 的 UTF-8
-  按 ANSI 读，中文注释会乱码并直接导致语法解析失败。
+`:app:runDeviceTests` **没有超时保护**——某个用例挂住就会一直等，
+而 Gradle 输出是缓冲的，看起来像"完全没反应"（CPU 也不会高）。
+排查时用这个脚本，它直接调 adb、超时后杀掉并打印部分输出：
+
+```powershell
+powershell -File tools\device-tests\run-one.ps1 `
+  -Class com.haruhi.haruhibox.core.database.MigrationsTest -TimeoutSec 90
+# 退出码：0 通过 / 1 失败 / 2 超时（卡住）/ 3 结果未知
+```
+
+> `run-one.ps1` 与 `run-instrumented-tests.ps1` 都刻意写成**纯 ASCII**：
+> Windows PowerShell 5.1 会把无 BOM 的 UTF-8 当 ANSI 读，中文注释会直接
+> 导致语法解析失败（踩过两次）。
+
+### ⚠ 这台小米设备上 Compose UI 测试跑不起来
+
+已实测确认（不是猜测）：
+
+- `createAndroidComposeRule<ComponentActivity>()` 启动的测试 Activity
+  **拿不到焦点**——`dumpsys activity` 显示 `topResumedActivity` 始终是 launcher，
+  Compose 测试框架于是在首次同步处**永久阻塞**（90 秒零进度，不是慢）；
+- `adb shell input tap/swipe` 被拒：
+  `SecurityException: Injecting input events requires ... INJECT_EVENTS permission`，
+  所以也没法用脚本点界面做端到端验证。
+
+因此**仓库里不保留 Compose UI 测试**：留一个跑不了的测试比没有更糟，
+它会让人以为界面有回归保护。界面验证改为：
+
+1. 界面背后的**展示逻辑**用不依赖屏幕的单测覆盖（`JmDisplayLogicTest`：
+   状态文案、章节状态判定、体积格式、错误文案）；
+2. 交互观感由人工在设备上确认。
+
+要在 CI 上跑 Compose UI 测试，需要标准 AOSP 镜像的模拟器（AVD），不能用这台 MIUI 真机。
 
 ## 安装失败排查
 
