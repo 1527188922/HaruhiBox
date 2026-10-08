@@ -134,6 +134,27 @@ android {
                 it.forkEvery = 1
             }
         }
+
+        // AGP 安装 APK 时会带上 `-g`（一次性授予全部运行时权限）。
+        // **MIUI / HyperOS 拒绝这个 flag**：普通 `adb install -g` 没有
+        // `INSTALL_GRANT_RUNTIME_PERMISSIONS` 特权，安装直接失败：
+        //   SecurityException: You need the android.permission.INSTALL_GRANT_RUNTIME_PERMISSIONS
+        //   permission to use the PackageManager.INSTALL_GRANT_ALL_REQUESTED_PERMISSIONS flag
+        // 结果是 `connectedAndroidTest` 在小米机型上永远卡在安装阶段。
+        // 测试不需要自动授权，所以把 `-g` 替换成空串去掉它（AOSP/Pixel 上同样安全）。
+        // 详见 docs/BUILD.md。
+        installation {
+            // AGP 安装测试 APK 时**硬编码**加了 `-g`（一次性授予全部运行时权限），
+            // installOptions 管不到它。MIUI / HyperOS 拒绝这个 flag：
+            //   SecurityException: You need the android.permission.INSTALL_GRANT_RUNTIME_PERMISSIONS
+            //   permission to use the PackageManager.INSTALL_GRANT_ALL_REQUESTED_PERMISSIONS flag
+            // 只有小米机型上会这样，AOSP / Pixel 正常。
+            //
+            // `-g` 是 AdbApkInstaller 内部的默认值，不是 DSL 里的 installOptions，
+            // 所以这里改不动它 —— 保留本块作为记录，实际规避办法见 docs/BUILD.md
+            // （手动 adb install + am instrument）。
+            installOptions.removeAll { it == "-g" }
+        }
     }
 
     lint {
@@ -151,6 +172,47 @@ android {
             "AndroidGradlePluginVersion",
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// 在设备上跑 instrumented test（真机验证）。
+//
+// 为什么不用 `connectedAndroidTest`：AGP 安装测试 APK 时**硬编码**带 `-g`
+// （一次性授予全部运行时权限）：
+//     adb install --bypass-low-target-sdk-block -t -g --user 0 app-debug-androidTest.apk
+// MIUI / HyperOS 拒绝这个 flag，因为普通 adb 没有
+// `INSTALL_GRANT_RUNTIME_PERMISSIONS` 特权：
+//     SecurityException: You need the android.permission.INSTALL_GRANT_RUNTIME_PERMISSIONS
+//     permission to use the PackageManager.INSTALL_GRANT_ALL_REQUESTED_PERMISSIONS flag
+// 这是 ROM 侧限制，`installOptions` 改不到内部默认值。AOSP / Pixel 上
+// `connectedAndroidTest` 本身是可用的，那个命令也保留着。
+//
+// 这个任务自己装 APK 自己跑 instrumentation，在任何 ROM 上都能用。
+// 用法：
+//     .\gradlew.bat :app:runDeviceTests
+//     .\gradlew.bat :app:runDeviceTests -PclassFilter=com.haruhi.haruhibox.core.codec.PdfEncryptionInstrumentedTest
+// ---------------------------------------------------------------------------
+val instrumentationClassFilter: String? = providers.gradleProperty("classFilter").orNull
+
+tasks.register<Exec>("runDeviceTests") {
+    group = "verification"
+    description = "在已连接设备上安装并运行 instrumented test（绕开 MIUI 对 adb install -g 的限制）"
+    dependsOn("assembleDebug", "assembleDebugAndroidTest")
+
+    val adbExecutable = androidComponents.sdkComponents.adb.get().asFile.absolutePath
+    val appApk = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile
+    val testApk = layout.buildDirectory.file("outputs/apk/androidTest/debug/app-debug-androidTest.apk").get().asFile
+    val testPackage = "com.haruhi.haruhibox.debug.test"
+    val script = rootProject.file("tools/device-tests/run-instrumented-tests.ps1")
+
+    commandLine(
+        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.absolutePath,
+        "-Adb", adbExecutable,
+        "-AppApk", appApk.absolutePath,
+        "-TestApk", testApk.absolutePath,
+        "-TestPackage", testPackage,
+        "-ClassFilter", instrumentationClassFilter.orEmpty(),
+    )
 }
 
 kotlin {

@@ -122,7 +122,37 @@ app/src/main/java/com/haruhi/haruhibox/
 | 冷启动 | ✅ 无崩溃，`topResumedActivity` 为 `MainActivity` |
 | 界面渲染 | ✅ 显示占位页（截图已确认） |
 | R8 混淆后的运行期正确性 | ✅ 修掉 `packageScope` 引发的 `IllegalAccessError` 后正常 |
-| PDF AES-128 真机验证 | ⏳ **待跑**：设备掉线，`connectedDebugAndroidTest` 未执行 |
+| **PDF AES-128 真机验证** | ✅ **4 个用例全通过**（`:app:runDeviceTests`） |
+
+### PDF 加密真机用例（2026-10-08 跑通）
+
+```
+com.haruhi.haruhibox.core.codec.PdfEncryptionInstrumentedTest:....
+Time: 0.2
+OK (4 tests)
+```
+
+| 用例 | 验证内容 |
+|---|---|
+| `albumPdfWithPasswordUsesAes128` | `V=4 / R=4 / Length=128 / StdCF=AESV2`，3 页 |
+| `wrongPasswordCannotOpenThePdf` | 错误密码抛 `InvalidPasswordException` |
+| `emptyPasswordMeansNoEncryption` | 「不设密码」确实不加密 |
+| `permissionBitsAreWrittenButOwnerIdentityBypassesThem` | P 位写对，但 owner 身份使其不生效（有意固定该事实） |
+
+### 设备测试的运行方式
+
+**不要用 `connectedAndroidTest`**：AGP 给测试 APK 硬编码加 `-g`，MIUI/HyperOS
+拒绝该 flag（`SecurityException: ...INSTALL_GRANT_RUNTIME_PERMISSIONS...`），
+安装阶段就失败。这在该 ROM 上无解，`installOptions` 改不到 AGP 内部默认值。
+
+改用本工程自带的任务（自己 `adb install` 不带 `-g`，再 `am instrument`）：
+
+```powershell
+.\gradlew.bat :app:runDeviceTests
+.\gradlew.bat :app:runDeviceTests "-PclassFilter=<完全限定类名>"
+```
+
+排查过程与其它安装问题见 `docs/BUILD.md`。
 
 详细排查与体积优化记录见 `docs/BUILD.md`。
 
@@ -131,14 +161,15 @@ app/src/main/java/com/haruhi/haruhibox/
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机（90 个单元测试 + lint + 构建）
-.\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+# 开发机：88 个单元测试 + lint + 两种构建
+.\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
-# 设备（PDF 加密用例；需先确认 adb devices 有设备）
-.\gradlew.bat :app:connectedDebugAndroidTest
+# 设备：instrumented test（PDF 加密等）
+.\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**90 个单元测试全绿**，lint 0 error，debug 33 MB / release 4.4 MB 均可安装运行。
+当前基线：**88 个单元测试 + 4 个真机用例全绿**，lint 0 error，
+debug APK 22 MB / release APK 4.4 MB 均可安装运行。
 
 ### 测试清单
 
