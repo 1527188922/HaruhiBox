@@ -126,7 +126,7 @@ app/src/main/java/com/haruhi/haruhibox/
 
 ### P3 待验证（需要你在设备上确认）
 
-自动验证过的部分：**199 个单元测试 + 6 个真机测试**全绿，lint 0 error，debug/release 均可构建。
+自动验证过的部分：**208 个单元测试 + 6 个真机测试**全绿，lint 0 error，debug/release 均可构建。
 （真机 6 个用例是上一轮跑的：迁移 2 + PDF 加密 4；本轮没有改数据库结构，所以没有重跑。）
 
 | # | 请确认 | 期望 |
@@ -169,6 +169,15 @@ app/src/main/java/com/haruhi/haruhibox/
 | 书库列表 | ✅ 最近加入的排在最前 |
 | 收藏夹删除 | ✅ 弹出「删除「X」？……漫画仍然留在书库，已下载的图片也不会被删掉」 |
 | 改名撞车 | ✅ 提示「已经有同名的收藏夹了，换个名字」（之前是"默认收藏夹不支持重命名"） |
+
+### 第六轮反馈的模拟器实测记录（2026-10-09）
+
+| 步骤 | 结果 |
+|---|---|
+| 收藏页 | ✅ 默认收藏夹左侧显示夹内最近加入那本的封面；三个空夹在同一位置显示 ☆ 占位，行高一致 |
+| 点「排序：创建时间 ⌄」 | ✅ 弹出三选一菜单，当前项打勾并高亮 |
+| 切到「最近加入」 | ✅ 标签变成「排序：最近加入」，顺序随之变化，**默认收藏夹仍在最上** |
+| 详情页「三点」 | ✅ 只剩 导出 ZIP / 导出 PDF（都标着 P4 接入）/ 删除本地文件 / 从书库移除，「下载管理」已移除 |
 
 ### 用户提出的 8 点改动（2026-10-08 完成）
 
@@ -261,6 +270,17 @@ app/src/main/java/com/haruhi/haruhibox/
 
 > E8/E9 是同一类错误的三个出口。判断方法很简单：**`viewModelScope` 里没有 `withContext`
 > 的代码都在主线程上跑**。现在的约定是——凡是碰文件、解码、遍历目录的，一律先切 IO。
+
+### 第六轮反馈修复（2026-10-09）
+
+| # | 反馈 | 落地方式 | 验证 |
+|---|---|---|---|
+| F1 | 收藏夹要有封面（夹内最近收藏的那本），空夹给占位 | 汇总查询加两个相关子查询：`lastAddedTime`（`MAX(create_time)`）与 `latestAlbumId`（按 `create_time DESC, id DESC` 取第一条）。列表左侧复用 `JmCover`（应用级 Coil + `files/covers` 磁盘缓存，看过的封面优先读本地）；空夹在同一位置画等大的占位方块，避免列表高度跳动 | `FavoriteSortTest`；模拟器截图：默认收藏夹显示封面、三个空夹显示 ☆ 占位 |
+| F2 | 收藏页要有排序机制（数量 / 创建时间 / 最近加入，都降序，默认创建时间） | 右上角「排序：xxx ⌄」按钮打开三选一菜单（当前项打勾并高亮）。排序是**纯界面行为**，由 `sortFavorites()` 在展示层完成，不写库 | `FavoriteSortTest` 的 7 个用例；模拟器实测切换后顺序变化 |
+| F3 | 详情页「三点」菜单去掉「下载管理」 | 直接删掉该项；任务页仍可从底栏「任务」进入 | 模拟器截图 |
+
+> F2 的两条隐藏规则也写进了 `sortFavorites()` 并有用例锁定：
+> **默认收藏夹永远置顶**（换排序也不动它），以及同值时按 id 兜底（顺序不抖）。
 
 ### 真机验证发现的一个严重 bug（已修）
 
@@ -431,14 +451,14 @@ OK (4 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：199 个单元测试 + lint + 两种构建
+# 开发机：208 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF 加密）
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**199 个单元测试 + 6 个真机用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**208 个单元测试 + 6 个真机用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（4.4 MB → 5.6 MB，新增阅读器与任务页）。
 
 ### 测试清单（单元测试）
@@ -447,16 +467,17 @@ debug / release APK 均可构建（4.4 MB → 5.6 MB，新增阅读器与任务�
 |---|---|---|
 | `feature.jm.data.JmRepositoryTest` | 22 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底与标题归一化）/ 标签 OR / 删除语义 |
 | `feature.jm.ui.JmReaderAndTaskLogicTest` | 22 | 任务状态与进度文案 / 下载面板默认勾选与"已在队列" / **底栏切换方向** / 阅读器进度条与"待取 vs 失败" / 阅读偏好编解码 |
-| `feature.jm.data.JmRecentAndFavoriteTest` | 17 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / **骨架行不算本地数据** / 收藏夹数量 Flow |
+| `feature.jm.data.JmRecentAndFavoriteTest` | 19 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / **骨架行不算本地数据** / 收藏夹数量与封面来源 Flow |
 | `core.jm.JmCryptoGoldenTest` | 14 | 签名 / AES-256 解密 / 块数，与参考实现逐值一致 |
 | `core.storage.FileNamingGoldenTest` | 14 | 文件名清洗 / 本子目录名 / 章节与图片排序 |
 | `feature.jm.data.JmDownloadManagerTest` | 13 | **下载编排**：逐字节一致（块数 0 不重编码）/ 跳过已存在 / 断点只补缺口 / 等待网络 / 取消 / 追加章节 / 重试 |
-| `core.database.JmDaoTest` | 13 | 书库分页排序筛选 / 标签 OR / 章节分组 / 收藏唯一索引 |
+| `core.database.JmDaoTest` | 13 | 书库分页排序（入库时间倒序）/ 标签 OR / 章节分组 / 收藏唯一索引 |
 | `core.database.DownloadTaskDaoTest` | 12 | 任务去重 / 恢复 / 章节计数幂等 / 历史裁剪 |
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
 | `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
 | `feature.jm.ui.JmDisplayLogicTest` | 8 | 书库状态文案 / 章节状态 / 体积格式 / 空态与错误文案 |
 | `feature.jm.data.JmImageStoreTest` | 7 | **本地优先取图**：命中不发请求 / 取回来就缓存 / 删掉后重新取 / 块数 0 原样保留 |
+| `feature.jm.ui.FavoriteSortTest` | 7 | **收藏页排序**：默认夹置顶 / 三种方式都是降序 / 空夹排最后 / 同值按 id 稳定 |
 | `feature.jm.data.JmReadingRepositoryTest` | 6 | 阅读位置读写与钳位 / "继续阅读"取最近一本 / 章节目录名规则 |
 | `feature.jm.ui.SearchRevealStateTest` | 6 | 搜索增量展示的推进与边界 |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |

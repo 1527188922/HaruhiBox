@@ -325,11 +325,14 @@ interface JmFavoriteDao {
     @Query(
         """
         SELECT f.id AS id, f.name AS name, f.sort_order AS sortOrder,
-               COUNT(fa.album_id) AS albumCount,
-               f.create_time AS createTime, f.modify_time AS modifyTime
+               (SELECT COUNT(*) FROM t_jm_favorite_album fa WHERE fa.favorite_id = f.id) AS albumCount,
+               f.create_time AS createTime, f.modify_time AS modifyTime,
+               (SELECT MAX(fa.create_time) FROM t_jm_favorite_album fa
+                WHERE fa.favorite_id = f.id) AS lastAddedTime,
+               (SELECT fa.album_id FROM t_jm_favorite_album fa
+                WHERE fa.favorite_id = f.id
+                ORDER BY COALESCE(fa.create_time, '') DESC, fa.id DESC LIMIT 1) AS latestAlbumId
         FROM t_jm_favorite f
-        LEFT JOIN t_jm_favorite_album fa ON fa.favorite_id = f.id
-        GROUP BY f.id
         ORDER BY f.sort_order, f.id
         """,
     )
@@ -337,8 +340,13 @@ interface JmFavoriteDao {
 }
 
 /**
- * 收藏夹 + 本子数量。`sortOrder` 是 SQL 里 `sort_order` 的别名
+ * 收藏夹 + 本子数量 + 封面来源。
+ *
+ * `sortOrder` / `createTime` 等是 SQL 里 `AS` 出来的别名
  * （`@ColumnInfo` 不生效于查询投影，所以这里用显式的 `AS`）。
+ *
+ * [latestAlbumId] 是**最近加入这个收藏夹的那本漫画**，列表用它当封面
+ * （用户要求：收藏夹要有封面，空夹给占位）。
  */
 data class FavoriteWithCount(
     val id: Long,
@@ -347,6 +355,10 @@ data class FavoriteWithCount(
     val albumCount: Int,
     val createTime: String?,
     val modifyTime: String?,
+    /** 夹内最近一次"加入"的时间；空夹为 null。 */
+    val lastAddedTime: String?,
+    /** 夹内最近加入的本子 id；空夹为 null。 */
+    val latestAlbumId: Long?,
 )
 
 // ======================================================================

@@ -268,9 +268,43 @@ class JmRecentAndFavoriteTest {
         assertThat(repo.findAlbum(480854L)).isNotNull()
     }
 
+    // ---------------- 收藏夹封面与排序用的字段 ----------------
+
+    /**
+     * 收藏页要展示"夹内最近加入的那本"的封面，并按"最近加入时间"排序，
+     * 所以汇总查询必须把这两个字段带出来（用户要求第 1 点）。
+     */
     @Test
-    fun `favorite summary marks the default folder`() = runTest {
-        repo.ensureDefaultFavorite()
+    fun `favorite summary exposes the latest album and its added time`() = runTest {
+        repo.saveAlbum(albumFixture(111, "早加的"))
+        repo.saveAlbum(albumFixture(222, "晚加的"))
+        val folderId = repo.ensureDefaultFavorite().id
+
+        repo.addToFavorite(111L, folderId)
+        // 关联表的时间戳精确到秒，测试里连续写入会落在同一秒，所以显式隔开
+        Thread.sleep(1100)
+        repo.addToFavorite(222L, folderId)
+
+        val summary = repo.observeFavoritesWithCount().first().first { it.id == folderId }
+        assertThat(summary.albumCount).isEqualTo(2)
+        assertThat(summary.latestAlbumId).isEqualTo(222L)
+        assertThat(summary.lastAddedTime).isNotNull()
+        assertThat(summary.createTime).isNotNull()
+    }
+
+    @Test
+    fun `an empty favorite has no cover source`() = runTest {
+        // 默认收藏夹由收藏页的 ViewModel 保证存在，测试里显式建一次
+        val folderId = repo.ensureDefaultFavorite().id
+
+        val summary = repo.observeFavoritesWithCount().first().first { it.id == folderId }
+        assertThat(summary.albumCount).isEqualTo(0)
+        assertThat(summary.latestAlbumId).isNull()
+        assertThat(summary.lastAddedTime).isNull()
+    }
+
+    @Test
+    fun `favorite summary marks the default folder`() = runTest {        repo.ensureDefaultFavorite()
         repo.createFavorite("普通夹")
 
         val summaries = repo.observeFavoritesWithCount().first()

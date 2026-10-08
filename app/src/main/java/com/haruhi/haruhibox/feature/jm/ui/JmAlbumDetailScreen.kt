@@ -102,7 +102,6 @@ fun JmAlbumDetailScreen(
     onDeleteChapterFiles: (Long) -> Unit,
     onDeleteAlbumFiles: () -> Unit,
     onDeleteAlbumRecord: () -> Unit,
-    onOpenTaskPage: () -> Unit,
     onConsumeMessage: () -> Unit,
     /**
      * 提示文案的**上层**回调。
@@ -171,10 +170,6 @@ fun JmAlbumDetailScreen(
                             onClick = { menuExpanded = false },
                         )
                         HorizontalDivider()
-                        DropdownMenuItem(
-                            text = { Text("下载管理") },
-                            onClick = { menuExpanded = false; onOpenTaskPage() },
-                        )
                         DropdownMenuItem(
                             text = { Text("删除本地文件") },
                             onClick = { menuExpanded = false; showDeleteFilesDialog = true },

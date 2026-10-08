@@ -281,6 +281,7 @@ fun JmModeRoot(
                         onCreate = vm::create,
                         onRename = vm::rename,
                         onDelete = vm::delete,
+                        onSortChange = vm::setSort,
                     )
                 }
 
@@ -373,7 +374,6 @@ fun JmModeRoot(
                         onDownloadChapters = vm::downloadChapters,
                         onDeleteChapterFiles = vm::deleteChapterFiles,
                         onDeleteAlbumFiles = vm::deleteAlbumFiles,
-                        onOpenTaskPage = { navController.navigate(JmRoutes.TASKS) },
                         // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）
                         onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
                         onDeleteAlbumRecord = {

@@ -25,10 +25,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -768,6 +771,51 @@ private fun OnlineResultRow(
 // 收藏
 // ======================================================================
 
+/**
+ * 收藏夹的封面：夹内**最近加入**的那本漫画。
+ *
+ * 空夹在位图位置给一个同等大小的占位方块（带一个淡淡的星形），
+ * 保证列表每一行高度一致——如果空夹不占位，列表会因为有没有封面而跳动。
+ */
+@Composable
+private fun FavoriteCover(row: FavoritesUiState.FavoriteRow) {
+    val shape = RoundedCornerShape(8.dp)
+    val size = Modifier.size(width = 52.dp, height = 72.dp)
+    val albumId = row.latestAlbumId
+    if (albumId != null) {
+        JmCover(
+            albumId = albumId,
+            contentDescription = row.name,
+            modifier = size.clip(shape).background(MaterialTheme.colorScheme.surface),
+        )
+    } else {
+        Box(
+            modifier = size
+                .clip(shape)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "☆",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 收藏页。
+ *
+ * 每个收藏夹左侧是**夹内最近加入的那本漫画的封面**（用户要求第 1 点）：
+ * 走的还是 `JmCover` 那一条路——应用级 Coil 加载器 + `files/covers` 磁盘缓存，
+ * 所以看过的封面优先读本地、没有才联网，且下次不再请求。
+ * 空夹在同一个位置给一个占位方块，保证列表高度一致、不会因为有没有封面而跳动。
+ *
+ * 排序：右上角「排序」按钮打开一个三选一菜单（创建时间 / 漫画数量 / 最近加入，
+ * 都是降序，默认创建时间）。**默认收藏夹永远置顶**，不参与排序，
+ * 这样用户换排序时"默认夹在哪"这件事永远不用重新找。
+ */
 @Composable
 fun JmFavoritesScreen(
     state: FavoritesUiState,
@@ -775,6 +823,7 @@ fun JmFavoritesScreen(
     onCreate: (String) -> Unit,
     onRename: (Long, String) -> Unit,
     onDelete: (Long) -> Unit,
+    onSortChange: (FavoriteSort) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showCreate by remember { mutableStateOf(false) }
@@ -782,17 +831,52 @@ fun JmFavoritesScreen(
     var renameTarget by remember { mutableStateOf<FavoritesUiState.FavoriteRow?>(null) }
     // 删除要二次确认，并在确认框里写清影响（计划 §9 第 6 条）
     var deleteTarget by remember { mutableStateOf<FavoritesUiState.FavoriteRow?>(null) }
+    var sortExpanded by remember { mutableStateOf(false) }
+
+    // 排序在展示层做：数据库只负责"有什么"，顺序是纯粹的界面选择
+    val sorted = remember(state.favorites, state.sort) { sortFavorites(state.favorites, state.sort) }
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("收藏夹", style = MaterialTheme.typography.titleMedium)
-            TextButton(onClick = { showCreate = true }) { Text("新建") }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    TextButton(onClick = { sortExpanded = true }) {
+                        Text("排序：${state.sort.label}")
+                        Icon(
+                            Icons.Default.KeyboardArrowDown,
+                            contentDescription = "选择排序方式",
+                        )
+                    }
+                    DropdownMenu(expanded = sortExpanded, onDismissRequest = { sortExpanded = false }) {
+                        FavoriteSort.entries.forEach { option ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = if (option == state.sort) "✓ ${option.label}" else option.label,
+                                        color = if (option == state.sort) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        },
+                                    )
+                                },
+                                onClick = {
+                                    sortExpanded = false
+                                    onSortChange(option)
+                                },
+                            )
+                        }
+                    }
+                }
+                TextButton(onClick = { showCreate = true }) { Text("新建") }
+            }
         }
 
         when {
@@ -803,16 +887,18 @@ fun JmFavoritesScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
-                items(state.favorites, key = { it.id }) { row ->
+                items(sorted, key = { it.id }) { row ->
                     Card(
                         onClick = { onOpenFavorite(row.id, row.name) },
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Row(
-                            modifier = Modifier.padding(12.dp),
+                            modifier = Modifier.padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            FavoriteCover(row)
+                            Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(row.name, style = MaterialTheme.typography.bodyLarge)
                                 Text(

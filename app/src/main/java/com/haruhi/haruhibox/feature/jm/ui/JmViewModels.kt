@@ -525,26 +525,79 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
 // 收藏夹
 // ======================================================================
 
+/**
+ * 收藏夹列表的排序方式（用户要求：三种，全部降序，默认"创建时间"）。
+ *
+ * 「默认收藏夹始终置顶」不在这里表达，而是由 [sortFavorites] 统一保证——
+ * 排序方式换来换去，默认夹的位置都不动。
+ */
+enum class FavoriteSort(val label: String) {
+    CREATED_DESC("创建时间"),
+    ALBUM_COUNT_DESC("漫画数量"),
+    LAST_ADDED_DESC("最近加入"),
+    ;
+
+    companion object {
+        val DEFAULT = CREATED_DESC
+    }
+}
+
 data class FavoritesUiState(
     val favorites: List<FavoriteRow> = emptyList(),
     val loading: Boolean = true,
     val error: String? = null,
     val message: String? = null,
+    val sort: FavoriteSort = FavoriteSort.DEFAULT,
 ) {
     data class FavoriteRow(
         val id: Long,
         val name: String,
         val albumCount: Int,
         val isDefault: Boolean,
+        /** 创建时间（"创建时间"排序用）。 */
+        val createTime: String? = null,
+        /** 夹内最近一次加入漫画的时间；空夹为 null。 */
+        val lastAddedTime: String? = null,
+        /** 夹内最近加入的本子 id，列表拿它当封面；空夹为 null。 */
+        val latestAlbumId: Long? = null,
+    ) {
+        val isEmpty: Boolean get() = albumCount == 0
+    }
+}
+
+/**
+ * 收藏夹列表的排序。
+ *
+ * 规则（用户要求）：
+ * 1. **默认收藏夹永远置顶**，与排序方式无关；
+ * 2. 其余按所选方式**降序**：创建时间 / 漫画数量 / 最近加入漫画的时间；
+ * 3. 同值时按 id 兜底，保证顺序稳定（不会因为重组而跳动）。
+ *
+ * 时间字段是 `yyyy-MM-dd HH:mm:ss` 文本，字典序即时间序；`null` 当空串处理，
+ * 降序时自然排到最后（例如还没放过东西的夹子）。
+ */
+fun sortFavorites(
+    rows: List<FavoritesUiState.FavoriteRow>,
+    sort: FavoriteSort,
+): List<FavoritesUiState.FavoriteRow> {
+    val comparator = when (sort) {
+        FavoriteSort.CREATED_DESC -> compareByDescending<FavoritesUiState.FavoriteRow> { it.createTime.orEmpty() }
+        FavoriteSort.ALBUM_COUNT_DESC -> compareByDescending<FavoritesUiState.FavoriteRow> { it.albumCount }
+        FavoriteSort.LAST_ADDED_DESC -> compareByDescending<FavoritesUiState.FavoriteRow> { it.lastAddedTime.orEmpty() }
+    }
+    return rows.sortedWith(
+        compareByDescending<FavoritesUiState.FavoriteRow> { it.isDefault }
+            .then(comparator)
+            .thenBy { it.id },
     )
 }
 
 /**
  * 收藏夹列表。
  *
- * 数量来自 [JmRepository.observeFavoritesWithCount] 的 **Flow**：
- * 之前用 `listFavoritesWithCount()` 一次性取值，收藏之后回到收藏页数量不更新
- * （用户反馈第 1 点）。改成 Flow 后，关联表任何变动都会自动重发。
+ * 数量与封面来自 [JmRepository.observeFavoritesWithCount] 的 **Flow**：
+ * 之前用一次性查询，收藏之后回到收藏页数量不更新（用户反馈第 1 点）。
+ * 改成 Flow 后，关联表任何变动（包括封面对应的"最近加入的那本"）都会自动重发。
  */
 class JmFavoritesViewModel(private val repo: JmRepository) : ViewModel() {
 
@@ -568,6 +621,9 @@ class JmFavoritesViewModel(private val repo: JmRepository) : ViewModel() {
                                     name = it.name,
                                     albumCount = it.albumCount,
                                     isDefault = it.isDefault,
+                                    createTime = it.createTime,
+                                    lastAddedTime = it.lastAddedTime,
+                                    latestAlbumId = it.latestAlbumId,
                                 )
                             },
                             loading = false,
@@ -576,6 +632,9 @@ class JmFavoritesViewModel(private val repo: JmRepository) : ViewModel() {
                 }
         }
     }
+
+    /** 切换排序方式（只影响展示顺序，不写库）。 */
+    fun setSort(sort: FavoriteSort) = _state.update { it.copy(sort = sort) }
 
     fun create(name: String) {
         viewModelScope.launch {

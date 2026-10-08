@@ -574,8 +574,8 @@ class JmRepository(
     suspend fun listFavorites(): List<JmFavoriteEntity> = favoriteDao.all()
 
     /**
-     * 收藏夹列表 + 本子数量。**返回 Flow**：关联表任何变动都会重新发射，
-     * 收藏之后收藏页的数量会立刻更新（用户反馈的第 1 点）。
+     * 收藏夹列表 + 本子数量 + 封面来源。**返回 Flow**：关联表任何变动都会重新发射，
+     * 收藏之后收藏页的数量与封面会立刻更新。
      */
     fun observeFavoritesWithCount(): Flow<List<FavoriteSummary>> =
         favoriteDao.observeFavoritesWithCount().map { rows ->
@@ -586,6 +586,9 @@ class JmRepository(
                     sortOrder = row.sortOrder,
                     albumCount = row.albumCount,
                     isDefault = row.name == DEFAULT_FAVORITE_NAME,
+                    createTime = row.createTime,
+                    lastAddedTime = row.lastAddedTime,
+                    latestAlbumId = row.latestAlbumId,
                 )
             }
         }
@@ -911,13 +914,19 @@ data class LocalAlbumDetail(
     val fromLibrary: Boolean,
 )
 
-/** 收藏夹 + 本子数量。 */
+/** 收藏夹 + 本子数量 + 封面来源（收藏页列表用）。 */
 data class FavoriteSummary(
     val id: Long,
     val name: String,
     val sortOrder: Int,
     val albumCount: Int,
     val isDefault: Boolean,
+    /** 创建时间；收藏页的"创建时间"排序用它。 */
+    val createTime: String? = null,
+    /** 夹内最近一次加入漫画的时间；空夹为 null。 */
+    val lastAddedTime: String? = null,
+    /** 夹内最近加入的本子 id，列表拿它当封面；空夹为 null。 */
+    val latestAlbumId: Long? = null,
 )
 
 private fun JmSearchItemDto.toItem(localIds: Set<Long>): OnlineSearchItem? {
