@@ -145,12 +145,15 @@ class JmReaderAndTaskLogicTest {
     // ---------------- 阅读器 ----------------
 
     @Test
-    fun `reader exposes chapter navigation and missing page count`() {
+    fun `reader exposes chapter navigation and cache progress`() {
         val state = readerState(chapterIndex = 1, chapterCount = 3, pages = listOf(true, false, true))
         assertThat(state.hasPreviousChapter).isTrue()
         assertThat(state.hasNextChapter).isTrue()
-        assertThat(state.missingCount).isEqualTo(1)
-        assertThat(state.progressLabel).isEqualTo("3 页 · 缺 1 页")
+        assertThat(state.cachedCount).isEqualTo(2)
+        // 本地没有的页算"还在取"（会自动联网），不是错误
+        assertThat(state.pendingCount).isEqualTo(1)
+        assertThat(state.failedCount).isEqualTo(0)
+        assertThat(state.progressLabel).isEqualTo("3 页 · 已缓存 2 页")
     }
 
     @Test
@@ -164,12 +167,41 @@ class JmReaderAndTaskLogicTest {
         assertThat(last.hasNextChapter).isFalse()
     }
 
+    /** 底部进度条要的是"第几页/共几页"（用户要求第 3 点）。 */
     @Test
-    fun `reader reports all pages missing instead of silently skipping them`() {
-        val state = readerState(chapterIndex = 0, chapterCount = 1, pages = listOf(false, false))
-        assertThat(state.allMissing).isTrue()
-        assertThat(state.progressLabel).isEqualTo("2 页 · 缺 2 页")
+    fun `reader reports the current page for the progress bar`() {
+        val state = readerState(chapterIndex = 0, chapterCount = 1, pages = listOf(true, true, true, true))
+            .copy(currentPage = 2)
+        assertThat(state.pageLabel).isEqualTo("3/4 页")
+        assertThat(state.totalPages).isEqualTo(4)
     }
+
+    @Test
+    fun `page label is safe before the manifest is loaded`() {
+        assertThat(ReaderUiState().pageLabel).isEqualTo("0/0 页")
+    }
+
+    /** 全部还在取时是"加载中"，不是"图片缺失"（用户要求第 2、4 点）。 */
+    @Test
+    fun `pages that are not on disk yet are pending rather than missing`() {
+        val state = readerState(chapterIndex = 0, chapterCount = 1, pages = listOf(false, false))
+        assertThat(state.pendingCount).isEqualTo(2)
+        assertThat(state.cachedCount).isEqualTo(0)
+        assertThat(state.failedCount).isEqualTo(0)
+    }
+
+    @Test
+    fun `failed pages are the only ones that need a manual retry`() {
+        val pages = readerState(chapterIndex = 0, chapterCount = 1, pages = listOf(true, false)).pages
+        val state = ReaderUiState(pages = pages.mapIndexed { index, page ->
+            if (index == 1) page.copy(state = ReaderPage.PageState.Failed, error = "网络超时") else page
+        })
+        assertThat(state.failedCount).isEqualTo(1)
+        assertThat(state.pendingCount).isEqualTo(0)
+        assertThat(state.cachedCount).isEqualTo(1)
+    }
+
+    // ---------------- 阅读器 ----------------
 
     @Test
     fun `reader defaults to vertical continuous with left to right pages`() {
@@ -272,12 +304,14 @@ class JmReaderAndTaskLogicTest {
             )
         },
         chapterIndex = chapterIndex,
-        pages = pages.mapIndexed { index, available ->
+        pages = pages.mapIndexed { index, cached ->
             ReaderPage(
                 index = index,
                 imageFile = "%05d.webp".format(index + 1),
-                file = if (available) java.io.File("/tmp/${index + 1}.webp") else null,
+                file = if (cached) java.io.File("/tmp/${index + 1}.webp") else null,
                 aspectRatio = ReaderPage.DEFAULT_ASPECT,
+                // 本地没有的页就是"待取"：阅读器会自动联网拿回来（用户要求第 2 点）
+                state = if (cached) ReaderPage.PageState.Ready else ReaderPage.PageState.Pending,
             )
         },
     )

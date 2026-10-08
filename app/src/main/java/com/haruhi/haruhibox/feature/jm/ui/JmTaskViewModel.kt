@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.haruhi.haruhibox.core.database.entity.DownloadStatus
 import com.haruhi.haruhibox.core.database.entity.DownloadTaskChapterEntity
 import com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity
+import com.haruhi.haruhibox.core.database.entity.DownloadType
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
 import com.haruhi.haruhibox.feature.jm.data.JmDownloadManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +29,10 @@ data class TaskRow(
     val displayName: String
         get() = task.displayName?.takeIf { it.isNotBlank() }
             ?: if (task.type.name.startsWith("JM")) "JM${task.bizKey}" else task.bizKey
+
+    /** 只有漫画任务有封面（`bizKey` 就是 JM 号）；导出等任务没有。 */
+    val albumId: Long?
+        get() = if (task.type == DownloadType.JM_ALBUM) task.bizKey.toLongOrNull() else null
 
     val statusText: String get() = taskStatusLabel(task)
     val progressText: String get() = taskProgressText(task)

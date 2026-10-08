@@ -115,32 +115,6 @@ class JmReadingRepositoryTest {
     }
 
     @Test
-    fun `readable images list only files that exist and are not empty`() = runTest {
-        db.jmChapterDao().replaceChapter(
-            albumId,
-            chapterId,
-            listOf("00001.webp", "00002.webp", "00003.webp").mapIndexed { index, name ->
-                JmChapterImageEntity(
-                    albumId = albumId,
-                    chapterId = chapterId,
-                    chapterTitle = "第1话",
-                    imageFile = name,
-                    imageSort = index + 1,
-                )
-            },
-        )
-        val chapterDir = dirs.chapterDir(folderName, "第1话")
-        chapterDir.mkdirs()
-        File(chapterDir, "00001.webp").writeBytes(byteArrayOf(1, 2, 3))
-        // 0 字节残留：必须重新下载，不算"可读"
-        File(chapterDir, "00002.webp").writeBytes(ByteArray(0))
-
-        val images = reading.readableImages(album(), chapterId)
-
-        assertThat(images.map { it.name }).containsExactly("00001.webp")
-    }
-
-    @Test
     fun `chapter folder name follows title then name then id`() = runTest {
         assertThat(reading.chapterFolderName(albumId, chapterId)).isNull()
 

@@ -300,6 +300,8 @@ fun JmModeRoot(
                         onRetry = taskViewModel::retry,
                         onRemove = taskViewModel::remove,
                         onClearFinished = taskViewModel::clearFinished,
+                        // 点封面进详情页（用户要求第 1 点）
+                        onOpenAlbum = { albumId -> navController.navigate(JmRoutes.detail(albumId)) },
                     )
                 }
 
@@ -354,7 +356,6 @@ fun JmModeRoot(
                         onRefresh = { vm.refresh() },
                         onToggleReversed = vm::toggleReversed,
                         onToggleDescription = vm::toggleDescription,
-                        onToggleCollected = vm::toggleCollected,
                         onAddToLibrary = vm::addToLibrary,
                         onMoveToFavorite = vm::moveToFavorite,
                         onAddToFavorite = vm::addToFavorite,
@@ -404,6 +405,9 @@ fun JmModeRoot(
                             vm.consumeMessage()
                         }
                     }
+                    // 从任务页/详情页回到阅读器时重新扫一遍本地缓存：
+                    // 刚下好的页要立刻显示出来（用户要求第 2 点）
+                    OnResumeEffect { vm.refreshFromDisk() }
                     JmReaderScreen(
                         state = state,
                         // 退出前把去抖窗口里的位置立刻落库，重启后才能接着读
@@ -420,7 +424,9 @@ fun JmModeRoot(
                         onShowSettings = vm::showSettings,
                         onDismissSheets = vm::dismissSheets,
                         onRetryPage = vm::retryPage,
+                        onRequestPage = vm::requestPage,
                         onDownloadChapter = vm::downloadCurrentChapter,
+                        onToggleCollected = vm::toggleCollected,
                         onSetReadingMode = vm::setReadingMode,
                         onSetDirection = vm::setReadingDirection,
                         onSetBackground = vm::setBackground,
@@ -479,6 +485,7 @@ class JmViewModelFactory(
             JmReaderViewModel(
                 repo = container.jmRepository,
                 reading = container.jmReading,
+                store = container.jmImageStore,
                 settings = container.settings,
                 downloads = container.jmDownloads,
                 albumId = albumId ?: error("阅读器必须传 albumId"),

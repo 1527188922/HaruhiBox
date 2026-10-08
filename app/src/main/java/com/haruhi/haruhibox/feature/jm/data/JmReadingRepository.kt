@@ -87,16 +87,6 @@ class JmReadingRepository(
             ?: chapterId.toString()
     }
 
-    /** 某一话在磁盘上的图片文件（**已存在且非空**的，按 `image_sort` 排序）。 */
-    suspend fun readableImages(album: JmAlbumEntity, chapterId: Long): List<File> {
-        val folder = album.albumFolderName ?: return emptyList()
-        val chapterFolder = chapterFolderName(album.id, chapterId) ?: return emptyList()
-        val dir = dirs.chapterDir(folder, chapterFolder)
-        return chapterDao.images(album.id, chapterId)
-            .map { File(dir, it.imageFile) }
-            .filter { it.isFile && it.length() > 0 }
-    }
-
     /** 某一话已入库的图片清单（不管有没有下载）。 */
     suspend fun imagesOf(albumId: Long, chapterId: Long): List<JmChapterImageEntity> =
         chapterDao.images(albumId, chapterId)

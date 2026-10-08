@@ -1,5 +1,6 @@
 package com.haruhi.haruhibox.feature.jm.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -9,8 +10,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -25,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -52,6 +57,8 @@ fun JmTaskScreen(
     onRetry: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     onClearFinished: () -> Unit,
+    /** 点封面进这本漫画的详情页（只有漫画任务有封面）。 */
+    onOpenAlbum: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
@@ -99,6 +106,7 @@ fun JmTaskScreen(
                             onCancel = onCancel,
                             onRetry = onRetry,
                             onRemove = onRemove,
+                            onOpenAlbum = onOpenAlbum,
                         )
                     }
                 }
@@ -113,6 +121,7 @@ fun JmTaskScreen(
                             onCancel = onCancel,
                             onRetry = onRetry,
                             onRemove = onRemove,
+                            onOpenAlbum = onOpenAlbum,
                         )
                     }
                 }
@@ -140,6 +149,7 @@ private fun TaskCard(
     onCancel: (Long) -> Unit,
     onRetry: (Long) -> Unit,
     onRemove: (Long) -> Unit,
+    onOpenAlbum: (Long) -> Unit,
 ) {
     val task = row.task
     Card(
@@ -152,6 +162,19 @@ private fun TaskCard(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
             ) {
+                // 封面（用户要求第 1 点）：与书库同一套加载方式——应用级 Coil 加载器 +
+                // files/covers 磁盘缓存，所以"看过的封面优先读本地"。点它进详情页。
+                row.albumId?.let { albumId ->
+                    JmCover(
+                        albumId = albumId,
+                        contentDescription = row.displayName,
+                        modifier = Modifier
+                            .size(width = 48.dp, height = 66.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onOpenAlbum(albumId) },
+                    )
+                    Spacer(Modifier.width(10.dp))
+                }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = row.displayName,

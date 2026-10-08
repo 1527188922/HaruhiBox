@@ -86,7 +86,6 @@ fun JmAlbumDetailScreen(
     onRefresh: () -> Unit,
     onToggleReversed: () -> Unit,
     onToggleDescription: () -> Unit,
-    onToggleCollected: () -> Unit,
     onAddToLibrary: () -> Unit,
     onMoveToFavorite: (Long) -> Unit,
     onAddToFavorite: (Long) -> Unit,
@@ -201,7 +200,6 @@ fun JmAlbumDetailScreen(
                 item {
                     AlbumHeader(
                         state = state,
-                        onToggleCollected = onToggleCollected,
                         onAddToLibrary = onAddToLibrary,
                         onOpenFavoriteSheet = { showFavoriteSheet = true },
                         onToggleDescription = onToggleDescription,
@@ -291,7 +289,6 @@ fun JmAlbumDetailScreen(
 @Composable
 private fun AlbumHeader(
     state: AlbumDetailUiState,
-    onToggleCollected: () -> Unit,
     onAddToLibrary: () -> Unit,
     onOpenFavoriteSheet: () -> Unit,
     onToggleDescription: () -> Unit,
@@ -348,13 +345,13 @@ private fun AlbumHeader(
                     Button(onClick = onRead, enabled = state.chapters.isNotEmpty()) {
                         Text("阅读")
                     }
-                    // 「下载」是**唯一**的下载入口（用户要求第 3 点）。
                     // 即使所有章节都已在队列里也保持可点：面板要能把"已在下载队列"
                     // 这个状态显示给用户，按钮变灰反而让人不知道为什么。
                     OutlinedButton(onClick = onDownload, enabled = state.chapters.isNotEmpty()) {
                         Text("下载")
                     }
-                    OutlinedButton(onClick = onToggleCollected) {
+                    // 「收藏」直接打开收藏夹面板选夹（用户要求第 5 点：不再单独放「收藏夹」按钮）
+                    OutlinedButton(onClick = onOpenFavoriteSheet) {
                         Text(if (album.collected == true) "已收藏" else "收藏")
                     }
                 }
@@ -373,8 +370,15 @@ private fun AlbumHeader(
                             color = MaterialTheme.colorScheme.primary,
                         )
                     }
-                    // 用户要求第 6 点：支持修改所属收藏夹
-                    TextButton(onClick = onOpenFavoriteSheet) { Text("收藏夹") }
+                    Text(
+                        text = if (state.favoriteIds.isEmpty()) {
+                            "未收藏"
+                        } else {
+                            "已加入 ${state.favoriteIds.size} 个收藏夹"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }

@@ -218,6 +218,21 @@ class AppContainer(private val appContext: Context) {
     }
 
     /**
+     * 章节图片的本地优先取图器（**阅读器与下载任务共用**）。
+     *
+     * 阅读器遇到磁盘上没有的图会直接联网取回来并落盘，用户不必先下载再看；
+     * 下载任务每张图也走同一个"文件在不在"的判断，所以"一边看一边下"不冲突。
+     */
+    val jmImageStore: com.haruhi.haruhibox.feature.jm.data.JmImageStore by lazy {
+        com.haruhi.haruhibox.feature.jm.data.JmImageStore(
+            repo = jmRepository,
+            downloader = fileDownloader,
+            dirs = libraryDirs,
+            environment = jmDownloadEnvironment,
+        )
+    }
+
+    /**
      * 封面图加载器。
      *
      * **磁盘缓存显式指向 [LibraryDirs.covers]（`files/covers`）**：

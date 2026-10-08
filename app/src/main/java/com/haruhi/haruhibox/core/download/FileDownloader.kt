@@ -92,6 +92,16 @@ class FileDownloader(
     private val speedWindowMs = 2_000L
 
     /**
+     * 每个目标文件一把锁。
+     *
+     * 为什么引擎层要管这个：**同一张图可能被两个调用方同时要**
+     * （用户一边在线看、一边把这一话加进下载队列）。两边都会写同一个 `<目标>.part`，
+     * 没有锁就是两个写入者交错写同一个文件——轻则内容损坏，重则发布出半张图。
+     * 锁挂在实例上：阅读器与下载任务用的是同一个 [FileDownloader] 实例。
+     */
+    private val targetLocks = ConcurrentHashMap<String, Mutex>()
+
+    /**
      * 下载 [url] 到 [target]。
      *
      * @param urlProvider 每次尝试时调用，返回**当前有效**的直链。
@@ -109,6 +119,25 @@ class FileDownloader(
         expectedTotal: Long = 0L,
         skipIfComplete: Boolean = true,
         etag: String? = null,
+    ): DownloadOutcome {
+        // 同一个目标串行化（见 targetLocks 的说明）。等锁期间别人可能已经下好了，
+        // 所以拿到锁之后要重新判断一次"是不是已经完成"。
+        val lock = targetLocks.computeIfAbsent(target.absolutePath) { Mutex() }
+        return lock.withLock {
+            if (skipIfComplete && target.isFile && target.length() > 0) {
+                return@withLock DownloadOutcome.Skipped(target, target.length())
+            }
+            downloadLocked(urlProvider, target, onProgress, expectedTotal, skipIfComplete, etag)
+        }
+    }
+
+    private suspend fun downloadLocked(
+        urlProvider: suspend () -> String,
+        target: File,
+        onProgress: ((FileProgress) -> Unit)?,
+        expectedTotal: Long,
+        skipIfComplete: Boolean,
+        etag: String?,
     ): DownloadOutcome {
         val partFile = File(target.parentFile, target.name + PART_SUFFIX)
         target.parentFile?.mkdirs()

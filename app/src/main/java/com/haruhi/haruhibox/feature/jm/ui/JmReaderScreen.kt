@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
@@ -99,8 +101,11 @@ fun JmReaderScreen(
     onShowChapterPicker: () -> Unit,
     onShowSettings: () -> Unit,
     onDismissSheets: () -> Unit,
+    /** 某一页进入可视范围，请按需取图（本地优先）。 */
+    onRequestPage: (Int) -> Unit,
     onRetryPage: (Int) -> Unit,
     onDownloadChapter: () -> Unit,
+    onToggleCollected: () -> Unit,
     onSetReadingMode: (ReadingMode) -> Unit,
     onSetDirection: (ReadingDirection) -> Unit,
     onSetBackground: (ReadingBackground) -> Unit,
@@ -137,6 +142,7 @@ fun JmReaderScreen(
                     state = state,
                     onPositionChanged = onPositionChanged,
                     onToggleControls = onToggleControls,
+                    onRequestPage = onRequestPage,
                     onTapRetry = onRetryPage,
                 )
 
@@ -144,6 +150,7 @@ fun JmReaderScreen(
                     state = state,
                     onPositionChanged = onPositionChanged,
                     onToggleControls = onToggleControls,
+                    onRequestPage = onRequestPage,
                     onTapRetry = onRetryPage,
                 )
             }
@@ -177,6 +184,7 @@ fun JmReaderScreen(
                     onPreviousChapter = onPreviousChapter,
                     onNextChapter = onNextChapter,
                     onDownloadChapter = onDownloadChapter,
+                    onToggleCollected = onToggleCollected,
                 )
             }
 
@@ -234,6 +242,7 @@ private fun VerticalReader(
     state: ReaderUiState,
     onPositionChanged: (Int, Float) -> Unit,
     onToggleControls: () -> Unit,
+    onRequestPage: (Int) -> Unit,
     onTapRetry: (Int) -> Unit,
 ) {
     val listState = rememberLazyListState(
@@ -279,6 +288,7 @@ private fun VerticalReader(
             ReaderPageItem(
                 page = page,
                 onToggleControls = onToggleControls,
+                onRequest = { onRequestPage(page.index) },
                 onRetry = { onTapRetry(page.index) },
             )
         }
@@ -290,6 +300,7 @@ private fun HorizontalReader(
     state: ReaderUiState,
     onPositionChanged: (Int, Float) -> Unit,
     onToggleControls: () -> Unit,
+    onRequestPage: (Int) -> Unit,
     onTapRetry: (Int) -> Unit,
 ) {
     val pagerState = rememberPagerState(
@@ -313,6 +324,7 @@ private fun HorizontalReader(
         ReaderPageItem(
             page = page,
             onToggleControls = onToggleControls,
+            onRequest = { onRequestPage(page.index) },
             onRetry = { onTapRetry(page.index) },
             fillHeight = true,
         )
@@ -324,16 +336,25 @@ private fun HorizontalReader(
  *
  * 关键点：
  * - 占位用 [ReaderPage.aspectRatio]（图还没加载完时也一样高），长图滚动**不跳**；
- * - 缺图时显示"第 N 页"与重试，不静默跳过；
+ * - **本地没有的图会自动联网取回来**（用户要求第 2 点）：进入可视范围时触发
+ *   [onRequest]。`LazyColumn` / `HorizontalPager` 只组合可见项，
+ *   所以不会一进阅读器就把整话几十张图全拉下来；
+ * - 取的过程中显示进度圈，只有真的失败才显示"取不回来 + 重试"；
  * - 手势：单击显隐控件、双击放大/还原、双指缩放、放大后单指拖动。
  */
 @Composable
 private fun ReaderPageItem(
     page: ReaderPage,
     onToggleControls: () -> Unit,
+    onRequest: () -> Unit,
     onRetry: () -> Unit,
     fillHeight: Boolean = false,
 ) {
+    // 进入可视范围（被组合）就取图；本地已有或正在取时 requestPage 是空操作
+    LaunchedEffect(page.imageFile, page.state) {
+        if (!page.available && page.state == ReaderPage.PageState.Pending) onRequest()
+    }
+
     val zoom = remember(page.imageFile) { PageZoomState() }
     val modifier = Modifier
         .fillMaxWidth()
@@ -348,12 +369,29 @@ private fun ReaderPageItem(
             contentAlignment = Alignment.Center,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "第 ${page.index + 1} 页 · 图片缺失",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = onRetry) { Text("重试") }
+                if (page.state == ReaderPage.PageState.Failed) {
+                    Text(
+                        text = "第 ${page.index + 1} 页没取回来",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    page.error?.let { hint ->
+                        Text(
+                            text = hint,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = onRetry) { Text("重试") }
+                } else {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "正在加载第 ${page.index + 1} 页…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
         return
@@ -508,6 +546,17 @@ private fun ReaderTopBar(
     }
 }
 
+/**
+ * 阅读器的底部控件（用户要求第 3 点）。
+ *
+ * 三层信息：
+ * 1. **进度条**：当前页 / 总页数，滑动时实时跟着走；
+ * 2. 章节名与位置（"第 3 话 · 12/34 页"）；
+ * 3. 操作：上一话 / **下载本话** / **收藏** / 下一话。
+ *
+ * 收藏按钮与详情页同一套语义（收藏隐含入库），图标用 `material-icons-core`
+ * 里就有的实心/空心星，不引入 extended。
+ */
 @Composable
 private fun ReaderBottomBar(
     state: ReaderUiState,
@@ -516,31 +565,73 @@ private fun ReaderBottomBar(
     onPreviousChapter: () -> Unit,
     onNextChapter: () -> Unit,
     onDownloadChapter: () -> Unit,
+    onToggleCollected: () -> Unit,
 ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(background.copy(alpha = 0.92f))
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
-        TextButton(onClick = onPreviousChapter, enabled = state.hasPreviousChapter) {
-            Text("上一话", color = contentColor)
-        }
-        if (state.missingCount > 0) {
-            TextButton(onClick = onDownloadChapter) {
-                Text("补下缺图（${state.missingCount} 页）", color = contentColor)
-            }
-        } else {
+        // 顶部放一条细进度条：翻页时进度一眼可见
+        LinearProgressIndicator(
+            progress = {
+                if (state.totalPages <= 0) {
+                    0f
+                } else {
+                    (state.currentPage + 1).toFloat() / state.totalPages.toFloat()
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            color = contentColor,
+            trackColor = contentColor.copy(alpha = 0.25f),
+        )
+        Spacer(Modifier.height(4.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Text(
-                text = "第 ${state.chapterIndex + 1}/${state.chapters.size} 话",
+                text = "${state.chapterTitle} · ${state.pageLabel}",
                 style = MaterialTheme.typography.labelMedium,
-                color = contentColor.copy(alpha = 0.8f),
+                color = contentColor.copy(alpha = 0.85f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = when {
+                    state.pendingCount > 0 -> "加载中 ${state.pendingCount}"
+                    state.failedCount > 0 -> "有 ${state.failedCount} 页失败"
+                    state.cachedCount >= state.totalPages && state.totalPages > 0 -> "已缓存"
+                    else -> ""
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = contentColor.copy(alpha = 0.7f),
             )
         }
-        TextButton(onClick = onNextChapter, enabled = state.hasNextChapter) {
-            Text("下一话", color = contentColor)
+        Spacer(Modifier.height(2.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            TextButton(onClick = onPreviousChapter, enabled = state.hasPreviousChapter) {
+                Text("上一话", color = contentColor)
+            }
+            TextButton(onClick = onDownloadChapter) {
+                Text("下载本话", color = contentColor)
+            }
+            TextButton(onClick = onToggleCollected) {
+                Text(
+                    text = if (state.collected) "★ 已收藏" else "☆ 收藏",
+                    color = contentColor,
+                )
+            }
+            TextButton(onClick = onNextChapter, enabled = state.hasNextChapter) {
+                Text("下一话", color = contentColor)
+            }
         }
     }
 }
