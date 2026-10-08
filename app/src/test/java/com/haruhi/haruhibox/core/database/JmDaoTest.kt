@@ -17,10 +17,13 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * JM 相关 Dao 的语义测试：分页、排序、唯一索引冲突、删除语义。
+ * JM 相关 Dao 的语义测试：分页、排序、唯一索引冲突、删除语义、标签筛选。
  *
- * 这些语义直接决定书库页/详情页/收藏页的数据正确性，属于 P1 的验收项
+ * 这些语义直接决定书库页/详情页/收藏页的数据正确性，属于 P1/P2 的验收项
  * （计划 §11.2「数据库：Room 迁移测试 + Dao 语义测试（分页/排序/唯一索引冲突）」）。
+ *
+ * 注意标签参数是 `tagsCsv`（逗号分隔）不是单个标签：多选标签是 **OR** 语义，
+ * 对应参考实现 `applyTagFilter` 的动态 OR 拼接。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -54,9 +57,9 @@ class JmDaoTest {
             )
         }
 
-        val firstPage = dao.observeLibrary(null, null, null, null, null, limit = 2, offset = 0).first()
-        val secondPage = dao.observeLibrary(null, null, null, null, null, limit = 2, offset = 2).first()
-        val thirdPage = dao.observeLibrary(null, null, null, null, null, limit = 2, offset = 4).first()
+        val firstPage = dao.observeLibrary(null, null, null, "", null, limit = 2, offset = 0).first()
+        val secondPage = dao.observeLibrary(null, null, null, "", null, limit = 2, offset = 2).first()
+        val thirdPage = dao.observeLibrary(null, null, null, "", null, limit = 2, offset = 4).first()
 
         assertThat(firstPage.map { it.id }).containsExactly(4L, 2L).inOrder()
         assertThat(secondPage.map { it.id }).containsExactly(5L, 3L).inOrder()
@@ -70,10 +73,10 @@ class JmDaoTest {
         dao.insertIgnore(JmAlbumEntity(id = 2, name = "火影", author = "岸本", collected = false))
         dao.insertIgnore(JmAlbumEntity(id = 3, name = "海贼王外传", author = "尾田", collected = false))
 
-        assertThat(dao.observeLibraryCount(null, null, null, null, null).first()).isEqualTo(3)
-        assertThat(dao.observeLibraryCount("海贼", null, null, null, null).first()).isEqualTo(2)
-        assertThat(dao.observeLibraryCount(null, true, null, null, null).first()).isEqualTo(1)
-        assertThat(dao.observeLibraryCount(null, null, "尾田", null, null).first()).isEqualTo(2)
+        assertThat(dao.observeLibraryCount(null, null, null, "", null).first()).isEqualTo(3)
+        assertThat(dao.observeLibraryCount("海贼", null, null, "", null).first()).isEqualTo(2)
+        assertThat(dao.observeLibraryCount(null, true, null, "", null).first()).isEqualTo(1)
+        assertThat(dao.observeLibraryCount(null, null, "尾田", "", null).first()).isEqualTo(2)
     }
 
     @Test
@@ -82,8 +85,28 @@ class JmDaoTest {
         dao.insertIgnore(JmAlbumEntity(id = 480854, name = "标题"))
         dao.insertIgnore(JmAlbumEntity(id = 123, name = "别的"))
 
-        val hit = dao.observeLibrary("480854", null, null, null, null, 10, 0).first()
+        val hit = dao.observeLibrary("480854", null, null, "", null, 10, 0).first()
         assertThat(hit.map { it.id }).containsExactly(480854L)
+    }
+
+    @Test
+    fun `tag filter matches any of the selected tags`() = runTest {
+        val dao = db.jmAlbumDao()
+        // tags 列存的是 JSON 数组字符串（与参考实现一致）
+        dao.insertIgnore(JmAlbumEntity(id = 1, name = "A", tags = """["标签一","标签二"]"""))
+        dao.insertIgnore(JmAlbumEntity(id = 2, name = "B", tags = """["标签三"]"""))
+        dao.insertIgnore(JmAlbumEntity(id = 3, name = "C", tags = null))
+
+        // 单个标签
+        assertThat(dao.observeLibrary(null, null, null, "标签一", null, 10, 0).first().map { it.id })
+            .containsExactly(1L)
+        // 多选是 OR
+        assertThat(dao.observeLibrary(null, null, null, "标签一,标签三", null, 10, 0).first().map { it.id })
+            .containsExactly(1L, 2L)
+        // 空串表示不筛选
+        assertThat(dao.observeLibrary(null, null, null, "", null, 10, 0).first()).hasSize(3)
+        // 子串不能误命中（"标签" 不等于 "标签一"）
+        assertThat(dao.observeLibrary(null, null, null, "标签", null, 10, 0).first()).isEmpty()
     }
 
     @Test
@@ -202,6 +225,7 @@ class JmDaoTest {
         assertThat(first).isGreaterThan(0)
         assertThat(second).isEqualTo(-1) // 唯一索引 (favorite_id, album_id)
         assertThat(favoriteDao.observeAlbumCount(favoriteId).first()).isEqualTo(1)
+        assertThat(favoriteDao.albumCount(favoriteId)).isEqualTo(1)
     }
 
     @Test
@@ -229,7 +253,7 @@ class JmDaoTest {
         val favoriteId = favoriteDao.insert(JmFavoriteEntity(name = "夹子"))
         favoriteDao.link(JmFavoriteAlbumEntity(favoriteId = favoriteId, albumId = 2))
 
-        val inFolder = albumDao.observeLibrary(null, null, null, null, favoriteId, 10, 0).first()
+        val inFolder = albumDao.observeLibrary(null, null, null, "", favoriteId, 10, 0).first()
         assertThat(inFolder.map { it.id }).containsExactly(2L)
     }
 }

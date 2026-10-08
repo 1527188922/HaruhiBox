@@ -48,8 +48,13 @@ interface JmAlbumDao {
      * 书库列表（含筛选与排序）。
      *
      * 筛选条件全部用 `(:param IS NULL OR ...)` 形式，避免为每个组合写一条 SQL。
-     * 排序：`collected DESC` 让收藏的排前面，然后按 `modify_time` / `add_time` 倒序。
-     * 分页用 `LIMIT/OFFSET`；UI 侧表现为"连续加载"（§9 第 4 条）。
+     *
+     * **标签多选是 OR 语义**，与参考实现 `applyTagFilter` 一致：
+     * `tags` 列存的是 JSON 数组字符串，所以用 `INSTR(tags, '"标签"') > 0` 做子串匹配。
+     * 参考实现用 `wrapper.and(... or ...)` 拼动态 OR；Room 不支持动态 SQL，
+     * 这里用子查询 + `HAVING SUM(...) > 0` 表达同一语义（列表为空时条件恒假，
+     * 所以调用方必须传空列表表示"不筛选"）。
+     * 要求标签本身不含 `"` 与 `,`，否则会破坏匹配（JM 的标签不含这两种字符）。
      */
     @Query(
         """
@@ -60,7 +65,19 @@ interface JmAlbumDao {
                OR CAST(id AS TEXT) = :keyword)
           AND (:onlyCollected IS NULL OR collected = :onlyCollected)
           AND (:author IS NULL OR author LIKE '%' || :author || '%')
-          AND (:tag IS NULL OR tags LIKE '%' || :tag || '%')
+          AND (:tagsCsv = '' OR EXISTS (
+                SELECT 1 FROM (
+                    SELECT (INSTR(tags, '"' || value || '"') > 0) AS hit
+                    FROM (SELECT TRIM(value) AS value FROM (
+                        WITH RECURSIVE split(value, rest) AS (
+                            SELECT '', :tagsCsv || ','
+                            UNION ALL
+                            SELECT SUBSTR(rest, 0, INSTR(rest, ',')),
+                                   SUBSTR(rest, INSTR(rest, ',') + 1)
+                            FROM split WHERE rest <> ''
+                        ) SELECT value FROM split WHERE value <> ''
+                    ))
+                ) WHERE hit = 1))
           AND (:favoriteId IS NULL OR id IN (
                 SELECT album_id FROM t_jm_favorite_album WHERE favorite_id = :favoriteId))
         ORDER BY collected DESC, COALESCE(modify_time, create_time, '') DESC, id DESC
@@ -71,7 +88,7 @@ interface JmAlbumDao {
         keyword: String?,
         onlyCollected: Boolean?,
         author: String?,
-        tag: String?,
+        tagsCsv: String,
         favoriteId: Long?,
         limit: Int,
         offset: Int,
@@ -86,7 +103,19 @@ interface JmAlbumDao {
                OR CAST(id AS TEXT) = :keyword)
           AND (:onlyCollected IS NULL OR collected = :onlyCollected)
           AND (:author IS NULL OR author LIKE '%' || :author || '%')
-          AND (:tag IS NULL OR tags LIKE '%' || :tag || '%')
+          AND (:tagsCsv = '' OR EXISTS (
+                SELECT 1 FROM (
+                    SELECT (INSTR(tags, '"' || value || '"') > 0) AS hit
+                    FROM (SELECT TRIM(value) AS value FROM (
+                        WITH RECURSIVE split(value, rest) AS (
+                            SELECT '', :tagsCsv || ','
+                            UNION ALL
+                            SELECT SUBSTR(rest, 0, INSTR(rest, ',')),
+                                   SUBSTR(rest, INSTR(rest, ',') + 1)
+                            FROM split WHERE rest <> ''
+                        ) SELECT value FROM split WHERE value <> ''
+                    ))
+                ) WHERE hit = 1))
           AND (:favoriteId IS NULL OR id IN (
                 SELECT album_id FROM t_jm_favorite_album WHERE favorite_id = :favoriteId))
         """,
@@ -95,7 +124,7 @@ interface JmAlbumDao {
         keyword: String?,
         onlyCollected: Boolean?,
         author: String?,
-        tag: String?,
+        tagsCsv: String,
         favoriteId: Long?,
     ): Flow<Int>
 
@@ -264,6 +293,9 @@ interface JmFavoriteDao {
 
     @Query("SELECT favorite_id FROM t_jm_favorite_album WHERE album_id = :albumId")
     suspend fun favoriteIdsOf(albumId: Long): List<Long>
+
+    @Query("SELECT COUNT(*) FROM t_jm_favorite_album WHERE favorite_id = :favoriteId")
+    suspend fun albumCount(favoriteId: Long): Int
 
     @Query("SELECT COUNT(*) FROM t_jm_favorite_album WHERE favorite_id = :favoriteId")
     fun observeAlbumCount(favoriteId: Long): Flow<Int>

@@ -1,0 +1,134 @@
+package com.haruhi.haruhibox.feature.jm.ui
+
+import com.google.common.truth.Truth.assertThat
+import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import org.junit.Test
+
+/**
+ * 书库/详情页**展示逻辑**的纯单元测试。
+ *
+ * 这些文案与状态判定直接对应计划 §9 的界面要求：
+ * - §9 第 4 条：「状态优先展示下载章节数，避免堆叠徽标」；
+ * - §9 第 7 条：章节行显示"已下载 / 部分下载 x/y / 未下载"；
+ * - §9.1：占用体积要给用户看得懂的单位。
+ *
+ * **为什么不做 Compose UI 测试**：完整交互测试需要设备处于**亮屏且解锁**状态
+ * （Compose 的测试框架会一直等窗口获得焦点，熄屏时会永久阻塞）。
+ * 在无法保证该前提的机器上跑这类测试只会得到"永远挂住"，没有验证价值。
+ * 界面本身的验证方式见 `docs/BUILD.md` 的"设备测试"一节。
+ */
+class JmDisplayLogicTest {
+
+    // ---------------- 书库卡片状态文案 ----------------
+
+    @Test
+    fun `album card summarizes download progress instead of stacking badges`() {
+        assertThat(downloadSummary(card(total = 0, downloaded = 0))).isEqualTo("未获取章节")
+        assertThat(downloadSummary(card(total = 10, downloaded = 0))).isEqualTo("未下载 · 共 10 话")
+        assertThat(downloadSummary(card(total = 10, downloaded = 10))).isEqualTo("已下载全 10 话")
+        assertThat(downloadSummary(card(total = 10, downloaded = 3))).isEqualTo("已下载 3/10 话")
+    }
+
+    @Test
+    fun `album card falls back to the jm id when the name is blank`() {
+        val album = JmAlbumEntity(id = 480854, name = "   ")
+        assertThat(AlbumCard(album, 0, 0, 0).displayName).isEqualTo("JM480854")
+
+        val named = JmAlbumEntity(id = 480854, name = "有名字")
+        assertThat(AlbumCard(named, 0, 0, 0).displayName).isEqualTo("有名字")
+    }
+
+    // ---------------- 章节状态 ----------------
+
+    @Test
+    fun `chapter row reports downloaded partial and missing states`() {
+        assertThat(chapter(total = 20, done = 20).statusText).isEqualTo("已下载")
+        assertThat(chapter(total = 45, done = 12).statusText).isEqualTo("部分下载 12/45")
+        assertThat(chapter(total = 30, done = 0).statusText).isEqualTo("未下载")
+    }
+
+    @Test
+    fun `chapter row boolean flags match the status text`() {
+        val full = chapter(total = 20, done = 20)
+        assertThat(full.isDownloaded).isTrue()
+        assertThat(full.isPartial).isFalse()
+        assertThat(full.isMissing).isFalse()
+
+        val partial = chapter(total = 45, done = 12)
+        assertThat(partial.isDownloaded).isFalse()
+        assertThat(partial.isPartial).isTrue()
+        assertThat(partial.isMissing).isFalse()
+
+        val missing = chapter(total = 30, done = 0)
+        assertThat(missing.isDownloaded).isFalse()
+        assertThat(missing.isPartial).isFalse()
+        assertThat(missing.isMissing).isTrue()
+    }
+
+    @Test
+    fun `chapter without a known image list is treated as missing not downloaded`() {
+        // 还没拉过图片清单（totalImages == 0）时不能显示"已下载"
+        val unknown = chapter(total = 0, done = 0)
+        assertThat(unknown.isDownloaded).isFalse()
+        assertThat(unknown.statusText).isEqualTo("未下载")
+    }
+
+    // ---------------- 体积文案 ----------------
+
+    @Test
+    fun `formatBytes uses readable units`() {
+        assertThat(formatBytes(0)).isEqualTo("0 B")
+        assertThat(formatBytes(-1)).isEqualTo("0 B")
+        assertThat(formatBytes(512)).isEqualTo("512 B")
+        assertThat(formatBytes(2048)).isEqualTo("2.0 KB")
+        assertThat(formatBytes(5L * 1024 * 1024)).isEqualTo("5.0 MB")
+        assertThat(formatBytes(3L * 1024 * 1024 * 1024)).isEqualTo("3.00 GB")
+    }
+
+    // ---------------- 库里 JSON 数组字段的解析 ----------------
+
+    @Test
+    fun `parseStringArray handles null blank empty and malformed values`() {
+        assertThat(parseStringArray(null)).isEmpty()
+        assertThat(parseStringArray("")).isEmpty()
+        assertThat(parseStringArray("[]")).isEmpty()
+        // 解析失败不抛异常：库里可能有旧版本写入的脏数据
+        assertThat(parseStringArray("not json")).isEmpty()
+        assertThat(parseStringArray("""["作者A","作者B"]""")).containsExactly("作者A", "作者B").inOrder()
+    }
+
+    // ---------------- 异常 → 用户可读文案 ----------------
+
+    @Test
+    fun `network errors are translated into actionable messages`() {
+        assertThat(
+            com.haruhi.haruhibox.core.network.NetworkError.Timeout("u", java.io.IOException()).toUserMessage(),
+        ).isEqualTo("网络超时，请检查网络后重试")
+        assertThat(
+            com.haruhi.haruhibox.core.network.NetworkError.Unreachable("u", java.io.IOException()).toUserMessage(),
+        ).isEqualTo("连不上服务器，请检查网络或代理设置")
+        assertThat(
+            com.haruhi.haruhibox.core.network.NetworkError.HttpStatus("u", 503).toUserMessage(),
+        ).contains("503")
+        assertThat(
+            com.haruhi.haruhibox.core.network.NetworkError.Business("接口返回的 data 字段为空").toUserMessage(),
+        ).isEqualTo("接口返回的 data 字段为空")
+    }
+
+    // ------------------------------------------------------------------
+
+    private fun card(total: Int, downloaded: Int) = AlbumCard(
+        album = JmAlbumEntity(id = 1, name = "本子"),
+        totalChapters = total,
+        downloadedChapters = downloaded,
+        localSizeBytes = 0,
+    )
+
+    private fun chapter(total: Int, done: Int) = ChapterRow(
+        chapterId = 1,
+        title = "第1话",
+        sortIndex = 1,
+        totalImages = total,
+        downloadedImages = done,
+    )
+}

@@ -239,6 +239,10 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    // 只引 icons-core。**不要**换成 icons-extended：那个模块含几千个矢量图标，
+    // debug 包会全量保留、release 也要过 R8，明显增大体积（见 docs/BUILD.md）。
+    // 需要 core 里没有的图标时，自己画 ImageVector。
+    implementation(libs.androidx.compose.material.icons.core)
     // ⚠ 不要引 material-icons-extended：它是一个包含几千个矢量图标的模块，
     // 即使 R8 能删掉未使用的图标，也会显著拖慢构建、并且 debug 包里全量保留。
     // 需要图标时用 material-icons-core（随 material3 传递引入）里的常用集，

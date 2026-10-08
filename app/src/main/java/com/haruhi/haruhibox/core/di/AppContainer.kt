@@ -6,8 +6,10 @@ import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.network.NetworkClientFactory
 import com.haruhi.haruhibox.core.settings.SecretStore
+import com.haruhi.haruhibox.core.settings.SettingKeys
 import com.haruhi.haruhibox.core.settings.SettingsRepository
 import com.haruhi.haruhibox.core.storage.LibraryDirs
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import java.io.File
@@ -73,6 +75,54 @@ class AppContainer(private val appContext: Context) {
     val downloadTasks: com.haruhi.haruhibox.core.download.DownloadTaskRepository by lazy {
         com.haruhi.haruhibox.core.download.DownloadTaskRepository(
             dao = database.downloadTaskDao(),
+            dirs = libraryDirs,
+        )
+    }
+
+    // ---------------- JM ----------------
+
+    /**
+     * JM 接口客户端。
+     *
+     * **每次取用都重新构造**：它只持有 OkHttp 客户端与几个"读设置"的闭包，
+     * 构造成本可以忽略；而这样能保证改完设置（线路、重试次数、超时）后
+     * 新任务立刻用上新值（计划 §9.2 的生效时机要求）。
+     */
+    val jmApi: com.haruhi.haruhibox.feature.jm.api.JmApiClient
+        get() = com.haruhi.haruhibox.feature.jm.api.JmApiClient(
+            client = jmHttpClient,
+            config = { runBlocking { settings.resolveJmNetwork(secrets) } },
+            retryProvider = {
+                com.haruhi.haruhibox.feature.jm.api.JmApiClient.JmRetrySettings(
+                    album = runBlocking { jmRetry(SettingKeys.JM_RETRY_ALBUM) },
+                    search = runBlocking { jmRetry(SettingKeys.JM_RETRY_SEARCH) },
+                    chapter = runBlocking { jmRetry(SettingKeys.JM_RETRY_CHAPTER) },
+                )
+            },
+            apiDomainProvider = { runBlocking { jmApiDomain() } },
+        )
+
+    private suspend fun jmRetry(key: String): Int = settings
+        .jmInt(key, com.haruhi.haruhibox.core.settings.SettingDefaults.JM_RETRY)
+        .first()
+
+    /** 接口线路：取设置里列表的第一项；未配置时用参考实现的默认域名。 */
+    private suspend fun jmApiDomain(): String = settings
+        .jmString(SettingKeys.JM_API_DOMAINS)
+        .first()
+        .lineSequence()
+        .map { it.trim() }
+        .firstOrNull { it.isNotEmpty() }
+        ?: com.haruhi.haruhibox.core.jm.JmDefaults.DEFAULT_API_DOMAIN
+
+    /** JM 仓库（在线数据 ↔ 本地库）。 */
+    val jmRepository: com.haruhi.haruhibox.feature.jm.data.JmRepository by lazy {
+        com.haruhi.haruhibox.feature.jm.data.JmRepository(
+            api = jmApi,
+            albumDao = database.jmAlbumDao(),
+            chapterDao = database.jmChapterDao(),
+            favoriteDao = database.jmFavoriteDao(),
+            searchHistoryDao = database.jmSearchHistoryDao(),
             dirs = libraryDirs,
         )
     }

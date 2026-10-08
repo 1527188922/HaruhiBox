@@ -1,0 +1,391 @@
+package com.haruhi.haruhibox.feature.jm.data
+
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import com.google.common.truth.Truth.assertThat
+import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
+import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
+import com.haruhi.haruhibox.core.jm.JmDefaults
+import com.haruhi.haruhibox.core.storage.LibraryDirs
+import com.haruhi.haruhibox.feature.jm.api.JmAlbumDto
+import com.haruhi.haruhibox.feature.jm.api.JmApiClient
+import com.haruhi.haruhibox.feature.jm.api.JmChapterDto
+import com.haruhi.haruhibox.feature.jm.api.JmSeriesDto
+import com.haruhi.haruhibox.feature.jm.api.JmJson
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
+import okhttp3.OkHttpClient
+import org.junit.After
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.io.File
+
+/**
+ * JM 仓库的入库与查询语义验收（计划 §10 P2）：
+ * 「与参考实现同一 aid 的入库字段一致」。
+ *
+ * 这里覆盖三条最容易写错、且一旦写错就会丢数据的规则
+ * （逐条对应参考实现 `JmcomicSqliteServiceImpl`）：
+ *
+ * 1. `saveOrUpdateAlbum` 是"覆盖在线字段但**保留本地 collected**"；
+ * 2. `listChapters` **优先用 `album.series`**，为空才回落到章节图片表；
+ * 3. 章节图片入库是"整章替换"，`imageSort` 从 1 开始。
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
+class JmRepositoryTest {
+
+    @get:Rule
+    val temp = TemporaryFolder()
+
+    private lateinit var db: HaruhiBoxDatabase
+    private lateinit var dirs: LibraryDirs
+    private lateinit var repo: JmRepository
+
+    @Before
+    fun setUp() {
+        db = Room.inMemoryDatabaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            HaruhiBoxDatabase::class.java,
+        ).allowMainThreadQueries().build()
+        dirs = LibraryDirs(temp.newFolder("library")).ensureAll()
+        repo = JmRepository(
+            api = JmApiClient(
+                client = OkHttpClient(),
+                config = { error("本测试不发起网络请求") },
+            ),
+            albumDao = db.jmAlbumDao(),
+            chapterDao = db.jmChapterDao(),
+            favoriteDao = db.jmFavoriteDao(),
+            searchHistoryDao = db.jmSearchHistoryDao(),
+            dirs = dirs,
+        )
+    }
+
+    @After
+    fun tearDown() = db.close()
+
+    // ---------------- 入库字段一致性 ----------------
+
+    @Test
+    fun `saving an album maps every field and builds the folder name`() = runTest {
+        val album = repo.saveAlbum(albumFixture())
+
+        assertThat(album.id).isEqualTo(480854L)
+        assertThat(album.name).isEqualTo("测试本子")
+        // `<清洗后的标题>_JM<aid>`
+        assertThat(album.albumFolderName).isEqualTo("测试本子_JM480854")
+        assertThat(album.seriesId).isEqualTo("12345")
+        assertThat(album.description).isEqualTo("简介内容")
+        assertThat(album.totalViews).isEqualTo("12345")
+        assertThat(album.commentTotal).isEqualTo("7")
+        // 列表字段存 JSON 数组字符串；解析回来顺序不变
+        assertThat(parse(album.tags)).containsExactly("标签一", "标签二").inOrder()
+        assertThat(parse(album.author)).containsExactly("作者A")
+        assertThat(parse(album.actors)).containsExactly("演员1")
+        assertThat(album.createTime).isNotNull()
+        assertThat(album.modifyTime).isNotNull()
+    }
+
+    @Test
+    fun `saving an album keeps the local collected flag`() = runTest {
+        repo.saveAlbum(albumFixture())
+        repo.addToFavorite(480854L)
+
+        assertThat(repo.findAlbum(480854L)!!.collected).isTrue()
+
+        // 重新拉取在线数据必须**保留**本地收藏状态（参考实现的 delete+insert 也做同样的事）
+        repo.saveAlbum(albumFixture().copy(name = "改名后的标题"))
+
+        val updated = repo.findAlbum(480854L)!!
+        assertThat(updated.name).isEqualTo("改名后的标题")
+        assertThat(updated.collected).isTrue()
+        // 文件夹名跟着新标题走（重新入库会重算）
+        assertThat(updated.albumFolderName).isEqualTo("改名后的标题_JM480854")
+    }
+
+    @Test
+    fun `saving an album twice does not duplicate the row`() = runTest {
+        repo.saveAlbum(albumFixture())
+        repo.saveAlbum(albumFixture())
+
+        assertThat(db.jmAlbumDao().all()).hasSize(1)
+    }
+
+    @Test
+    fun `album folder name respects the configured byte limit`() = runTest {
+        val long = JmRepository(
+            api = repoApi(),
+            albumDao = db.jmAlbumDao(),
+            chapterDao = db.jmChapterDao(),
+            favoriteDao = db.jmFavoriteDao(),
+            searchHistoryDao = db.jmSearchHistoryDao(),
+            dirs = dirs,
+            albumNameMaxBytes = { 40 },
+        )
+        val album = long.saveAlbum(albumFixture().copy(name = "这是一个非常长的本子标题用于测试截断行为"))
+        // 后缀不参与截断，所以整体长度 = 基础名(<=40 字节) + "_JM480854"
+        assertThat(album.albumFolderName).endsWith("_JM480854")
+        val base = album.albumFolderName!!.removeSuffix("_JM480854")
+        assertThat(base.toByteArray(Charsets.UTF_8).size).isAtMost(40)
+    }
+
+    // ---------------- 章节来源优先级 ----------------
+
+    @Test
+    fun `chapters come from the online series field when present`() = runTest {
+        val album = repo.saveAlbum(albumFixture())
+
+        val chapters = repo.chaptersOf(album)
+
+        assertThat(chapters.map { it.chapterId }).containsExactly(500001L, 500002L).inOrder()
+        // title 为空时回落成「第{sort}话」
+        assertThat(chapters[0].title).isEqualTo("第1话")
+        assertThat(chapters[1].title).isEqualTo("第2话")
+    }
+
+    @Test
+    fun `chapters fall back to the local image table when series is empty`() = runTest {
+        // series 为空是真实情况：有的本子接口不返回章节，只能靠已下载章节
+        val album = repo.saveAlbum(albumFixture().copy(series = null))
+
+        assertThat(repo.chaptersOf(album)).isEmpty()
+
+        db.jmChapterDao().insertAll(
+            listOf(
+                JmChapterImageEntity(
+                    albumId = 480854,
+                    chapterId = 900001,
+                    chapterSort = "1",
+                    chapterTitle = "第1话",
+                    chapterName = "name",
+                    imageFile = "00001.webp",
+                    imageSort = 1,
+                ),
+            ),
+        )
+
+        val chapters = repo.chaptersOf(repo.findAlbum(480854L)!!)
+        assertThat(chapters.map { it.chapterId }).containsExactly(900001L)
+        assertThat(chapters[0].title).isEqualTo("第1话")
+    }
+
+    @Test
+    fun `chapter images are replaced as a whole and sorted with image sort starting at one`() = runTest {
+        repo.saveAlbum(albumFixture())
+        val chapter = JmChapterDto(
+            id = 500001,
+            // 故意乱序：入库前必须排序（对齐参考实现的 sortImageFiles）
+            images = listOf("00003.webp", "00001.webp", "00010.webp", "00002.webp"),
+            name = "章节名",
+            addTime = "2024-01-01",
+            seriesId = "12345",
+        )
+
+        repo.saveChapterImages(480854, chapter, JmSeriesDto(id = "500001", sort = "1", name = "章节名"))
+
+        val images = repo.imagesOf(480854, 500001)
+        assertThat(images.map { it.imageFile })
+            .containsExactly("00001.webp", "00002.webp", "00003.webp", "00010.webp").inOrder()
+        // imageSort 从 1 开始（参考实现是 i + 1）
+        assertThat(images.map { it.imageSort }).containsExactly(1, 2, 3, 4).inOrder()
+        assertThat(images[0].chapterTitle).isEqualTo("第1话")
+        assertThat(images[0].chapterSort).isEqualTo("1")
+    }
+
+    @Test
+    fun `replacing a chapter drops images the server no longer returns`() = runTest {
+        repo.saveAlbum(albumFixture())
+        val full = JmChapterDto(id = 500001, images = listOf("1.webp", "2.webp", "3.webp"))
+        repo.saveChapterImages(480854, full, null)
+        assertThat(repo.imagesOf(480854, 500001)).hasSize(3)
+
+        repo.saveChapterImages(480854, JmChapterDto(id = 500001, images = listOf("1.webp")), null)
+
+        assertThat(repo.imagesOf(480854, 500001).map { it.imageFile }).containsExactly("1.webp")
+    }
+
+    @Test
+    fun `chapter folder name follows title then name then id`() {
+        val withTitle = ChapterSummary(chapterId = 1, sort = "1", name = "n", title = "第1话")
+        assertThat(repo.chapterFolderName(withTitle)).isEqualTo("第1话")
+
+        val nameOnly = withTitle.copy(title = "", name = "章节名")
+        assertThat(repo.chapterFolderName(nameOnly)).isEqualTo("章节名")
+
+        val idOnly = withTitle.copy(title = "", name = null)
+        assertThat(repo.chapterFolderName(idOnly)).isEqualTo("1")
+    }
+
+    @Test
+    fun `downloaded image count only counts non empty files on disk`() = runTest {
+        repo.saveAlbum(albumFixture())
+        val folder = "测试本子_JM480854"
+        val chapterDir = dirs.chapterDir(folder, "第1话").apply { mkdirs() }
+        File(chapterDir, "00001.webp").writeBytes(ByteArray(16))
+        // 0 字节残留不算已下载（与下载层的判定一致）
+        File(chapterDir, "00002.webp").writeBytes(ByteArray(0))
+
+        val have = repo.downloadedImageCount(
+            folder,
+            "第1话",
+            listOf("00001.webp", "00002.webp", "00003.webp"),
+        )
+
+        assertThat(have).isEqualTo(1)
+    }
+
+    // ---------------- 书库筛选 ----------------
+
+    @Test
+    fun `library search matches name author and jm id`() = runTest {
+        repo.saveAlbum(albumFixture())
+        repo.saveAlbum(albumFixture().copy(id = 999, name = "别的本子", author = null, tags = null))
+
+        assertThat(repo.observeLibrary(keyword = "测试").first().map { it.id })
+            .containsExactly(480854L)
+        assertThat(repo.observeLibrary(keyword = "作者A").first().map { it.id })
+            .containsExactly(480854L)
+        assertThat(repo.observeLibrary(keyword = "999").first().map { it.id })
+            .containsExactly(999L)
+    }
+
+    @Test
+    fun `tag filter uses substring match on the stored json array`() = runTest {
+        repo.saveAlbum(albumFixture())
+        repo.saveAlbum(albumFixture().copy(id = 999, name = "别的本子", tags = listOf("标签三")))
+
+        assertThat(repo.observeLibrary(tags = listOf("标签一")).first().map { it.id })
+            .containsExactly(480854L)
+        // 多选是 OR 语义
+        assertThat(repo.observeLibrary(tags = listOf("标签一", "标签三")).first().map { it.id })
+            .containsExactly(480854L, 999L)
+        assertThat(repo.observeLibrary(tags = emptyList()).first()).hasSize(2)
+    }
+
+    @Test
+    fun `favorite folder filter ignores the collected flag`() = runTest {
+        repo.saveAlbum(albumFixture())
+        repo.saveAlbum(albumFixture().copy(id = 999, name = "别的本子"))
+
+        val favoriteId = repo.ensureDefaultFavorite().id
+        repo.addToFavorite(480854L, favoriteId)
+        // 取消 collected 但保留关联，验证"指定收藏夹时不叠加 collected 条件"
+        db.jmAlbumDao().setCollected(999L, true, "2026-01-01")
+        repo.removeFromFavorite(999L, favoriteId)
+
+        val inFolder = repo.observeLibrary(favoriteId = favoriteId).first()
+        assertThat(inFolder.map { it.id }).containsExactly(480854L)
+    }
+
+    @Test
+    fun `collect and uncollect update the flag from the favorite links`() = runTest {
+        repo.saveAlbum(albumFixture())
+
+        val first = repo.ensureDefaultFavorite()
+        val second = repo.createFavorite("第二夹")!!
+
+        repo.addToFavorite(480854L, first.id)
+        repo.addToFavorite(480854L, second.id)
+        assertThat(repo.findAlbum(480854L)!!.collected).isTrue()
+
+        // 移出一个夹，另一个还在 -> 仍是已收藏
+        repo.removeFromFavorite(480854L, first.id)
+        assertThat(repo.findAlbum(480854L)!!.collected).isTrue()
+
+        repo.removeFromFavorite(480854L, second.id)
+        assertThat(repo.findAlbum(480854L)!!.collected).isFalse()
+
+        // 取消收藏会清掉所有关联
+        repo.addToFavorite(480854L, first.id)
+        repo.uncollect(480854L)
+        assertThat(repo.favoriteIdsOf(480854L)).isEmpty()
+        assertThat(repo.findAlbum(480854L)!!.collected).isFalse()
+    }
+
+    @Test
+    fun `default favorite cannot be renamed or deleted`() = runTest {
+        val default = repo.ensureDefaultFavorite()
+
+        assertThat(repo.renameFavorite(default.id, "新名字")).isFalse()
+        assertThat(repo.deleteFavorite(default.id)).isFalse()
+        assertThat(repo.findAlbum(0)).isNull()
+    }
+
+    @Test
+    fun `deleting albums removes records and chapter lists but keeps files`() = runTest {
+        repo.saveAlbum(albumFixture())
+        repo.saveChapterImages(480854, JmChapterDto(id = 500001, images = listOf("1.webp")), null)
+        val chapterDir = dirs.chapterDir("测试本子_JM480854", "第1话").apply { mkdirs() }
+        File(chapterDir, "1.webp").writeBytes(ByteArray(8))
+
+        repo.deleteAlbums(listOf(480854L))
+
+        assertThat(repo.findAlbum(480854L)).isNull()
+        assertThat(repo.imagesOf(480854, 500001)).isEmpty()
+        // 本地文件不受"删除记录"影响（计划 §9.1 的删除语义区分）
+        assertThat(File(chapterDir, "1.webp").exists()).isTrue()
+    }
+
+    @Test
+    fun `deleting album files keeps the record`() = runTest {
+        repo.saveAlbum(albumFixture())
+        val chapterDir = dirs.chapterDir("测试本子_JM480854", "第1话").apply { mkdirs() }
+        File(chapterDir, "1.webp").writeBytes(ByteArray(8))
+
+        val freed = repo.deleteAlbumFiles("测试本子_JM480854")
+
+        assertThat(freed).isGreaterThan(0L)
+        assertThat(dirs.albumDir("测试本子_JM480854").exists()).isFalse()
+        assertThat(repo.findAlbum(480854L)).isNotNull()
+    }
+
+    // ------------------------------------------------------------------
+
+    private fun repoApi() = JmApiClient(
+        client = OkHttpClient(),
+        config = { error("本测试不发起网络请求") },
+    )
+
+    private fun parse(json: String?): List<String> =
+        json?.let { JmJson.decodeFromString(ListSerializer(String.serializer()), it) }.orEmpty()
+
+    /** 与参考实现同 aid 的一份固定响应样本（字段名逐条对齐 `Album.java`）。 */
+    private fun albumFixture() = JmAlbumDto(
+        id = 480854,
+        name = "测试本子",
+        addTime = "2024-01-01 00:00:00",
+        description = "简介内容",
+        totalViews = "12345",
+        likes = "678",
+        series = listOf(
+            JmSeriesDto(id = "500001", name = "第1话", sort = "1", title = ""),
+            JmSeriesDto(id = "500002", name = "第2话", sort = "2", title = ""),
+        ),
+        seriesId = "12345",
+        commentTotal = "7",
+        author = listOf("作者A"),
+        tags = listOf("标签一", "标签二"),
+        works = listOf("作品1"),
+        actors = listOf("演员1"),
+        liked = true,
+        isFavorite = false,
+        price = "0",
+        purchased = "0",
+    )
+
+    @Test
+    fun `jm defaults expose the reference api domain and image domain`() {
+        // 防止有人"顺手"改掉这两个域名而没意识到会影响所有请求
+        assertThat(JmDefaults.DEFAULT_API_DOMAIN).isEqualTo("www.cdnbea.net")
+        assertThat(JmDefaults.IMAGE_DOMAIN).isEqualTo("cdn-msp2.jmapiproxy2.cc")
+        assertThat(JmDefaults.SEARCH_PAGE_SIZE).isEqualTo(80)
+    }
+}

@@ -20,8 +20,11 @@ object JmDefaults {
     /** zip/pdf 默认密码，参考实现 `JM_DEFAULT_PASSWORD`。 */
     const val DEFAULT_EXPORT_PASSWORD = "1234"
 
-    /** 搜索结果返回条数上限（参考实现 `jm.search_result.limit=12`，用于机器人推送，本 App 不用）。 */
+    /** JM /search 每页固定返回 80 条。 */
     const val SEARCH_PAGE_SIZE = 80
+
+    /** 在线搜索历史条数上限，参考实现 `jm.search.history.limit`。 */
+    const val SEARCH_HISTORY_LIMIT = 20
 
     /**
      * 参考实现 `JmcomicService` 第 91 行的固定 UA，**必须带上**：
@@ -41,6 +44,12 @@ object JmDefaults {
 
     /** 网络超时重试的基础休眠时长，指数退避 1s/2s/4s…，参考实现 `TIMEOUT_RETRY_SLEEP_MILLIS`。 */
     const val TIMEOUT_RETRY_SLEEP_MS = 1_000L
+
+    /**
+     * 各接口的默认重试次数（参考实现 `jm.request.*.retry=0`）。
+     * 0 的含义是"不自动重试"，不是"请求 0 次"（计划 §9.3 明确要求 UI 这么写）。
+     */
+    const val RETRY_DEFAULT = 0
 
     /** 封面 URL：`https://{domain}/media/albums/{aid}.jpg`。 */
     fun buildCoverUrl(jmId: Long, domain: String? = null): String {

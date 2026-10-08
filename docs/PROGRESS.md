@@ -33,13 +33,52 @@ app/src/main/java/com/haruhi/haruhibox/
 | 阶段 | 状态 | 说明 |
 |---|---|---|
 | **P0 环境与基线** | ✅ 完成 | 见 `docs/p0/README.md`；3 个 spike 全部有结论 |
-| **P1 基础设施** | 🚧 进行中 | 见下表 |
-| P2 JM 数据与浏览 | ⬜ 未开始 | |
-| P3 JM 下载与阅读闭环 | ⬜ 未开始 | |
+| **P1 基础设施** | ✅ 完成 | 见下表；验收项全部达成 |
+| **P2 JM 数据与浏览** | 🚧 代码完成，**界面待人工确认** | 见下方 P2 明细 |
+| P3 JM 下载与阅读闭环 | ⬜ 未开始 | 下载引擎与任务仓库已在 P1 备好 |
 | P4 JM 导出 zip / pdf | ⬜ 未开始 | PDF 能力已在 P0 spike 验证 |
 | P5 B站 | ⬜ 未开始 | |
 | P6 壳与体验 | ⬜ 未开始 | |
-| P7 验收与真机 | ⬜ 未开始 | 本机无已连接设备，需用户提供 |
+| P7 验收与真机 | ⬜ 未开始 | |
+
+### P2 明细（JM 数据与浏览）
+
+| 项 | 状态 | 产出 |
+|---|---|---|
+| JM 接口客户端（搜索/详情/章节/模板，**不含登录**） | ✅ | `feature/jm/api/JmApiClient.kt` |
+| 接口响应模型（字段逐条对齐参考实现） | ✅ | `feature/jm/api/JmModels.kt` |
+| 本子入库（覆盖在线字段 + **保留本地收藏**） | ✅ | `JmRepository.saveAlbum`，测试锁定 |
+| 章节清单入库（整章替换 + `imageSort` 从 1 开始） | ✅ | `JmRepository.saveChapterImages` |
+| 章节来源优先级（`album.series` → 本地图片表） | ✅ | `JmRepository.chaptersOf`，两个分支都有测试 |
+| 在线搜索 + 是否已入库标记 + 分页 | ✅ | `JmRepository.searchOnline` |
+| 搜索历史（保留条数、相同条件刷新、快照回显） | ✅ | `recordSearchHistory` / `searchHistorySnapshot` |
+| 收藏夹 CRUD（默认夹不可删改、删除只删关联） | ✅ | `JmRepository` 收藏段，测试锁定 |
+| 书库筛选（关键字/作者/**多标签 OR**/收藏夹） | ✅ | Dao 用递归 CTE 表达 OR 语义 |
+| 书库页（筛选、状态优先展示下载章节数） | ✅ 代码 | `JmLibraryScreen` |
+| 发现页（在线搜索 + 历史 + 分页） | ✅ 代码 | `JmOnlineSearchScreen` |
+| 收藏页（增删改、默认夹标识） | ✅ 代码 | `JmFavoritesScreen` |
+| 漫画详情页（本地优先 + 在线刷新 + 章节状态） | ✅ 代码 | `JmAlbumDetailScreen` |
+| 漫画模式底部导航（书库/发现/收藏） | ✅ 代码 | `JmModeRoot` |
+| **界面人工确认（截图/交互）** | ⏳ **待你确认** | 见下方"P2 待验证" |
+
+### P2 待验证（需要你确认）
+
+代码已编译、可安装、启动无崩溃，**逻辑层有 115 个单元测试覆盖**，
+但**界面本身我无法在这台设备上自动验证**：
+
+1. 设备当前处于休眠（`mWakefulness=Dozing`），`adb shell input keyevent POWER/WAKEUP`
+   都唤不醒，截出来是全黑；
+2. 我写的 Compose UI 测试（`JmScreensTest`）在这种状态下会**永久阻塞**——
+   Compose 测试框架要等窗口获得焦点，熄屏时永远等不到。**已删除**，
+   不留无法验证的"绿色"测试。
+
+需要你做的（任选其一）：
+
+- 解锁手机后告诉我，我把 Compose UI 测试加回来并跑通；
+- 或者自己打开 App 看一眼四个页面是否符合预期。
+
+界面的展示逻辑（状态文案、体积格式、空态、章节状态判定）已经用
+`JmDisplayLogicTest` 单测覆盖，所以"文案对不对"是验证过的，未验证的是"排版与交互"。
 
 ### P1 明细
 
@@ -168,20 +207,36 @@ cd D:\Project\HaruhiBox
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**88 个单元测试 + 4 个真机用例全绿**，lint 0 error，
-debug APK 22 MB / release APK 4.4 MB 均可安装运行。
+当前基线：**115 个单元测试 + 4 个真机用例全绿**，lint 0 error，
+debug APK 可安装运行（P2 四个页面已接入），release APK 可构建。
 
-### 测试清单
+### 测试清单（单元测试）
 
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
+| `feature.jm.data.JmRepositoryTest` | 18 | 入库字段一致性 / 收藏保留 / 章节来源优先级 / 标签 OR / 删除语义 |
 | `core.jm.JmCryptoGoldenTest` | 14 | 签名 / AES-256 解密 / 块数，与参考实现逐值一致 |
 | `core.storage.FileNamingGoldenTest` | 14 | 文件名清洗 / 本子目录名 / 章节与图片排序 |
-| `core.database.JmDaoTest` | 12 | 书库分页排序筛选 / 章节分组 / 收藏唯一索引与删除语义 |
+| `core.database.JmDaoTest` | 13 | 书库分页排序筛选 / 标签 OR / 章节分组 / 收藏唯一索引 |
 | `core.database.DownloadTaskDaoTest` | 12 | 任务去重 / 恢复 / 章节计数幂等 / 历史裁剪 |
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
 | `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
+| `feature.jm.ui.JmDisplayLogicTest` | 8 | 书库状态文案 / 章节状态 / 体积格式 / 空态与错误文案 |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
-| `core.codec.PdfWriterSpikeTest` | 6 | PDF 页面 / 书签 / 加密 / 权限位 / 不加密 |
+| `core.codec.PdfWriterSpikeTest` | 4 | PDF 页面 / 书签 / `PageMode` / 不加密 |
 | `core.jm.CryptoProbeTest` | 2 | 环境回归：JCE 可用性 |
 | `core.codec.PixelProbeTest` | 2 | 环境回归：位图像素读写行为 |
+
+### 设备测试（instrumented）
+
+| 测试类 | 用例数 | 覆盖内容 |
+|---|---|---|
+| `core.codec.PdfEncryptionInstrumentedTest` | 4 | AES-128 / 错误密码 / 权限位事实 |
+
+```powershell
+.\gradlew.bat :app:runDeviceTests
+```
+
+> **界面交互测试的前置条件**：Compose 的测试框架会一直等窗口获得焦点，
+> 因此设备必须**亮屏且已解锁**。熄屏状态下 `connectedAndroidTest` /
+> `runDeviceTests` 会永久阻塞（不是失败，是挂住）。
