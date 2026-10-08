@@ -40,6 +40,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,6 +54,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.storage.FileNaming
+
+/** 简介收起时显示的行数。 */
+private const val DESCRIPTION_COLLAPSED_LINES = 3
 
 /**
  * 漫画详情页（核心中转页，计划 §9 第 7 条）。
@@ -84,9 +88,16 @@ fun JmAlbumDetailScreen(
     onDeleteAlbumFiles: () -> Unit,
     onDeleteAlbumRecord: () -> Unit,
     onConsumeMessage: () -> Unit,
+    /**
+     * 提示文案的**上层**回调。
+     *
+     * 为什么不在这里自己弹 Snackbar：收藏夹是 `ModalBottomSheet`，
+     * 会盖住宿主 `Scaffold` 的 Snackbar（用户反馈"提示语被弹框挡住看不见"）。
+     * 把提示交给根部的 Scaffold 弹，才能浮在面板之上。
+     */
+    onMessage: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val snackbar = remember { SnackbarHostState() }
     var menuExpanded by remember { mutableStateOf(false) }
     var showDeleteFilesDialog by remember { mutableStateOf(false) }
     var showDeleteRecordDialog by remember { mutableStateOf(false) }
@@ -94,16 +105,18 @@ fun JmAlbumDetailScreen(
 
     LaunchedEffect(state.message) {
         state.message?.let {
-            snackbar.showSnackbar(it)
+            onMessage(it)
             onConsumeMessage()
         }
     }
 
     Scaffold(
         modifier = modifier,
-        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
+                // 显式声明 windowInsets：edge-to-edge 下如果让它与 Scaffold 的
+                // 内容内边距叠加，标题下面会出现一大块空白（用户反馈）。
+                windowInsets = TopAppBarDefaults.windowInsets,
                 title = {
                     Text(
                         text = state.album?.name?.takeIf { it.isNotBlank() }
@@ -344,14 +357,26 @@ private fun AlbumHeader(
 
         album.description?.takeIf { it.isNotBlank() }?.let { description ->
             Spacer(Modifier.height(8.dp))
+            // 只有真的被截断时才显示"展开简介"（用户反馈：内容本来就能全部显示时
+            // 按钮是多余的）。判断方式是用 onTextLayout 看行数是否被 maxLines 限制。
+            var descriptionOverflows by remember(description) { mutableStateOf(false) }
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,
-                maxLines = if (state.descriptionExpanded) Int.MAX_VALUE else 3,
+                maxLines = if (state.descriptionExpanded) Int.MAX_VALUE else DESCRIPTION_COLLAPSED_LINES,
                 overflow = TextOverflow.Ellipsis,
+                onTextLayout = { result ->
+                    // hasVisualOverflow 表示文本被 maxLines 截断了
+                    if (!state.descriptionExpanded) {
+                        descriptionOverflows = result.hasVisualOverflow ||
+                            result.lineCount > DESCRIPTION_COLLAPSED_LINES
+                    }
+                },
             )
-            TextButton(onClick = onToggleDescription) {
-                Text(if (state.descriptionExpanded) "收起简介" else "展开简介")
+            if (descriptionOverflows || state.descriptionExpanded) {
+                TextButton(onClick = onToggleDescription) {
+                    Text(if (state.descriptionExpanded) "收起简介" else "展开简介")
+                }
             }
         }
     }

@@ -79,6 +79,25 @@ app/src/main/java/com/haruhi/haruhibox/
 > 目前只清 `tmp` / `export`，**没算上 `covers`**。封面缓存有 256MB 上限、
 > 由 Coil 按 LRU 自行淘汰，所以不紧急；做"清理缓存"设置项时要把它纳入（P6）。
 
+### 第二轮反馈修复（2026-10-08）
+
+| # | 反馈 | 根因 | 修复 |
+|---|---|---|---|
+| B1 | 搜索分屏追加要"先滑到顶再滑到底"才生效 | ① `derivedStateOf` 读 `listState.layoutInfo` 拿到**过期快照**，只在别的重组顺带读它时才重算；② `LaunchedEffect` 的 key 含当前批次条数，每次追加都取消并重启 effect，打断正在进行的滚动检测 | 改 `snapshotFlow` 主动监听；key 只放列表身份，判定用 `rememberUpdatedState` 读实时值 |
+| B2 | 收藏夹内一直显示"清除 1 项" | 进夹时 `favoriteId` 必然已设置，`filter.isActive` 恒真；但那是页面上下文、不是用户可清的筛选 | 夹内不显示清除按钮 |
+| B3 | 详情页标题下方一大块留白 | edge-to-edge 下 `TopAppBar` 的 windowInsets 与 Scaffold 内容内边距叠加 | 显式声明 `windowInsets = TopAppBarDefaults.windowInsets`（待你在设备上确认是否真的解决） |
+| B4 | 简介本来能全显示时仍出现"展开简介" | 按钮无条件渲染 | 用 `onTextLayout` 的 `hasVisualOverflow` 判断是否真被截断 |
+| B5 | 页面切换是淡入淡出 | 未配转场 | NavHost 加 `slideInHorizontally` / `slideOutHorizontally`（260ms），返回反向 |
+| B6 | 收藏夹弹框挡住提示语 | 详情页自己的 Scaffold 弹 Snackbar，被 `ModalBottomSheet` 盖住 | 提示上抛到根部 Scaffold 弹（新增 `onMessage` 回调） |
+| Q3 | 首次点收藏卡一下，取消再收藏就很快 | **首次收藏多打了一次 `/album` 网络请求**（`addToLibrary(albumId)`），本地已有记录后就不再请求 | 新增 `addToLibrary(dto)` / `addToLibrary(entity)`，用内存数据直接落库 |
+
+> B1 的判定抽成了 `OnlineSearchUiState.shouldRevealMore()` 纯函数，
+> 由 `SearchRevealStateTest` 覆盖（10→20→30→35 的推进与边界条件）。
+> 滚动触发本身没法在这台设备上自动验证，所以单独把"判定条件"锁住。
+
+**仍未自动验证**：B1 的滚动触发（模拟器单次 `/search` 要 44 秒、超过应用 30 秒超时；
+真机 MIUI 又拒绝 `adb input`）、以及 B3/B5/B6 的观感。需要你在设备上确认。
+
 ### 真机验证发现的一个严重 bug（已修）
 
 **改动数据库表结构却忘记升 `@Database(version)`**，导致**应用一启动就崩**：

@@ -274,9 +274,27 @@ data class OnlineSearchUiState(
     /** 本页是否已经全部展示完（决定"加载下一页"按钮是否出现）。 */
     val allVisible: Boolean get() = remainingCount == 0
 
+    /**
+     * 滚动到某个位置时是否应该继续追加。
+     *
+     * 抽成纯函数是为了能单测——Compose 里的滚动触发在这台设备上没法自动验证，
+     * 但"判定条件对不对"是可以测的（[shouldRevealMore] 的边界）。
+     *
+     * @param lastVisibleIndex `listState.layoutInfo` 里最后一个可见项的 index；
+     *        列表还没有布局时传 -1
+     */
+    fun shouldRevealMore(lastVisibleIndex: Int): Boolean =
+        remainingCount > 0 && lastVisibleIndex >= visibleItemsCount - REVEAL_AHEAD
+
+    /** 当前批次的条数。 */
+    val visibleItemsCount: Int get() = minOf(visibleCount, result?.items?.size ?: 0)
+
     companion object {
         /** 首屏渲染条数 / 每次追加条数。 */
         const val INITIAL_VISIBLE_COUNT = 10
+
+        /** 距离底部还有几条时就开始追加，滚动更顺。 */
+        const val REVEAL_AHEAD = 2
     }
 }
 
@@ -722,13 +740,32 @@ class JmAlbumDetailViewModel(
     /** 加入书库（用户要求第 2 点：只有点这里才真正入书库）。 */
     fun addToLibrary() {
         viewModelScope.launch {
-            runCatching { repo.addToLibrary(albumId) }
+            runCatching { ensureInLibrary() }
                 .onSuccess { album ->
                     _state.update { it.copy(album = album, inLibrary = true, message = "已加入书库") }
                     refreshLocalStats()
                 }
                 .onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
         }
+    }
+
+    /**
+     * 确保本子已在书库，返回库里的实体。
+     *
+     * **不请求网络**：详情页手里已经有完整数据（本地副本或刚拉到的在线数据），
+     * 直接落库即可。之前这里调 `repo.addToLibrary(albumId)` 会再拉一次 `/album`，
+     * 于是"从未收藏过的漫画点收藏"要等一次网络往返，看起来卡一下；
+     * 取消再收藏时本地已有记录就直接落库，所以很快（用户反馈的正是这个现象）。
+     */
+    private suspend fun ensureInLibrary(): JmAlbumEntity {
+        val current = _state.value.album
+        val library = if (current != null) {
+            repo.addToLibrary(current)
+        } else {
+            repo.addToLibrary(albumId)
+        }
+        _state.update { it.copy(album = library, inLibrary = true) }
+        return library
     }
 
     private suspend fun refreshLocalStats() {
@@ -776,7 +813,7 @@ class JmAlbumDetailViewModel(
                 if (nowCollected) {
                     repo.uncollect(albumId)
                 } else {
-                    if (!_state.value.inLibrary) repo.addToLibrary(albumId)
+                    if (!_state.value.inLibrary) ensureInLibrary()
                     repo.addToFavorite(albumId)
                 }
             }.onSuccess {
@@ -797,7 +834,7 @@ class JmAlbumDetailViewModel(
     fun moveToFavorite(favoriteId: Long) {
         viewModelScope.launch {
             runCatching {
-                if (!_state.value.inLibrary) repo.addToLibrary(albumId)
+                if (!_state.value.inLibrary) ensureInLibrary()
                 // 先移出其它夹再入目标夹，语义是"移动到"而不是"同时属于多个"
                 repo.favoriteIdsOf(albumId).forEach { old ->
                     if (old != favoriteId) repo.removeFromFavorite(albumId, old)
@@ -820,7 +857,7 @@ class JmAlbumDetailViewModel(
     fun addToFavorite(favoriteId: Long) {
         viewModelScope.launch {
             runCatching {
-                if (!_state.value.inLibrary) repo.addToLibrary(albumId)
+                if (!_state.value.inLibrary) ensureInLibrary()
                 repo.addToFavorite(albumId, favoriteId)
             }.onSuccess {
                 val name = _state.value.allFavorites.firstOrNull { it.id == favoriteId }?.name
@@ -857,7 +894,7 @@ class JmAlbumDetailViewModel(
                 _state.update { it.copy(message = "收藏夹名称已存在或为空") }
                 return@launch
             }
-            if (!_state.value.inLibrary) runCatching { repo.addToLibrary(albumId) }
+            if (!_state.value.inLibrary) runCatching { ensureInLibrary() }
             repo.addToFavorite(albumId, created.id)
             _state.update {
                 it.copy(album = repo.findAlbum(albumId) ?: it.album, inLibrary = true)

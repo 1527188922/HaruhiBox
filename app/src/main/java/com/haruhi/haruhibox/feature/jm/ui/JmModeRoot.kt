@@ -1,5 +1,10 @@
 package com.haruhi.haruhibox.feature.jm.ui
 
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -19,6 +24,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.ViewModel
@@ -33,6 +39,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.haruhi.haruhibox.core.di.AppContainer
+import kotlinx.coroutines.launch
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -66,6 +73,9 @@ private enum class JmTab(val route: String, val label: String, val icon: ImageVe
     FAVORITES(JmRoutes.FAVORITES, "收藏", Icons.Default.Favorite),
 }
 
+/** 页面切换动画时长（毫秒）。 */
+private const val PAGE_TRANSITION_MS = 260
+
 @Composable
 fun JmModeRoot(
     container: AppContainer,
@@ -79,6 +89,7 @@ fun JmModeRoot(
     val showBottomBar = currentRoute in JmTab.entries.map { it.route }
 
     val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     // 封面统一走应用级 ImageLoader：正确的 UA/代理 + files/covers 磁盘缓存
     // （用户要求第 8 点：加载过的封面优先读本地）
@@ -114,6 +125,32 @@ fun JmModeRoot(
                 navController = navController,
                 startDestination = JmRoutes.LIBRARY,
                 modifier = Modifier.padding(padding),
+                // 页面切换改成"新页面从右侧划入"（用户反馈：默认淡入淡出太弱）。
+                // 返回时反向滑出。底部 tab 之间共用这套动画，方向一致、不突兀。
+                enterTransition = {
+                    slideInHorizontally(
+                        initialOffsetX = { fullWidth -> fullWidth },
+                        animationSpec = tween(PAGE_TRANSITION_MS),
+                    ) + fadeIn(animationSpec = tween(PAGE_TRANSITION_MS))
+                },
+                exitTransition = {
+                    slideOutHorizontally(
+                        targetOffsetX = { fullWidth -> -fullWidth / 4 },
+                        animationSpec = tween(PAGE_TRANSITION_MS),
+                    ) + fadeOut(animationSpec = tween(PAGE_TRANSITION_MS))
+                },
+                popEnterTransition = {
+                    slideInHorizontally(
+                        initialOffsetX = { fullWidth -> -fullWidth / 4 },
+                        animationSpec = tween(PAGE_TRANSITION_MS),
+                    ) + fadeIn(animationSpec = tween(PAGE_TRANSITION_MS))
+                },
+                popExitTransition = {
+                    slideOutHorizontally(
+                        targetOffsetX = { fullWidth -> fullWidth },
+                        animationSpec = tween(PAGE_TRANSITION_MS),
+                    ) + fadeOut(animationSpec = tween(PAGE_TRANSITION_MS))
+                },
             ) {
                 composable(JmRoutes.LIBRARY) { entry ->
                     val vm: JmLibraryViewModel = viewModel(viewModelStoreOwner = entry, factory = factory)
@@ -236,6 +273,8 @@ fun JmModeRoot(
                         onOpenChapter = { vm.ensureChapterImages(it) },
                         onFetchChapterImages = vm::ensureChapterImages,
                         onDeleteAlbumFiles = vm::deleteAlbumFiles,
+                        // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）
+                        onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
                         onDeleteAlbumRecord = {
                             vm.deleteAlbumRecord()
                             navController.popBackStack()

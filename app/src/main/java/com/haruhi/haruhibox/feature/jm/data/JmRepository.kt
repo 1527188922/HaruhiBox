@@ -251,11 +251,41 @@ class JmRepository(
         return dto
     }
 
-    /** 把本子加入书库（书库页的「加入书库」按钮 / 搜索结果按钮）。 */
+    /** 把本子加入书库（先拉一次 `/album`，用于只有 aid 的场景，例如搜索结果）。 */
     suspend fun addToLibrary(aid: Long): JmAlbumEntity {
         val dto = api.album(aid)
         saveToRecent(dto)
         return saveAlbum(dto)
+    }
+
+    /**
+     * 用**已有的**详情数据入库，不再请求网络。
+     *
+     * 详情页手里已经有完整的本子数据（本地缓存或刚拉到的），
+     * 收藏时没必要再拉一次 `/album`。之前收藏按钮走的是 [addToLibrary]（含一次网络往返），
+     * 所以"从未收藏过的漫画点收藏"会明显卡一下；取消再收藏时本地已有记录就很快
+     * ——用户反馈的现象正是这个原因。
+     */
+    suspend fun addToLibrary(dto: JmAlbumDto): JmAlbumEntity {
+        saveToRecent(dto)
+        return saveAlbum(dto)
+    }
+
+    /**
+     * 把内存里的书库实体直接落库（不请求网络）。
+     *
+     * 详情页在"未入库"状态下只有最近浏览的副本，它本身就是完整的本子数据，
+     * 直接写书库即可。收藏标记由调用方随后设置。
+     */
+    suspend fun addToLibrary(album: JmAlbumEntity): JmAlbumEntity {
+        val existing = albumDao.findById(album.id)
+        val now = nowText()
+        if (existing == null) {
+            albumDao.insertIgnore(album.copy(createTime = now, modifyTime = now))
+        } else {
+            albumDao.update(album.copy(collected = existing.collected, modifyTime = now))
+        }
+        return albumDao.findById(album.id) ?: album
     }
 
     /** 把接口返回的本子写库（不请求网络）。 */

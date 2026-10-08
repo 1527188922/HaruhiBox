@@ -41,11 +41,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -273,8 +274,10 @@ private fun LibraryFilterBar(
                     label = { Text("收藏") },
                 )
             }
-            // 生效条件数量 + 清除（计划 §9.1「筛选生效后显示条件标签或数量，支持清除」）
-            if (filter.isActive) {
+            // 生效条件数量 + 清除（计划 §9.1「筛选生效后显示条件标签或数量，支持清除」）。
+            // **收藏夹内不显示**：进夹时 favoriteId 必然已设置，会一直显示"清除 1 项"，
+            // 而那个条件是页面的上下文、不是用户可以清的筛选（用户反馈）。
+            if (showCollectedChip && filter.isActive) {
                 TextButton(onClick = onClearFilter) {
                     Text("清除 ${filter.activeCount} 项")
                 }
@@ -472,14 +475,22 @@ fun JmOnlineSearchScreen(
                 // 用户要求第 5 点：**最后一条进入可视范围就继续追加**，
                 // 而不是等用户滑到底再点按钮。这样列表是"连续滚不完"的观感，
                 // 同时首屏只渲染 10 条、不会一次性发起几十个封面请求。
-                val shouldRevealMore by remember {
-                    derivedStateOf {
-                        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                        state.remainingCount > 0 && lastVisible >= visibleItems.lastIndex
-                    }
-                }
-                LaunchedEffect(shouldRevealMore) {
-                    if (shouldRevealMore) onRevealMore()
+                //
+                // 两个坑，都已踩过：
+                // 1. 不要用 `derivedStateOf { listState.layoutInfo... }`：读 layoutInfo 拿到的
+                //    是**过期快照**，只有别的重组顺带读到它时才重算，表现为"必须先滑回顶部
+                //    再滑到底才加载"；
+                // 2. `LaunchedEffect` 的 key **不能包含当前批次条数**：每次追加都会取消并
+                //    重启这个 effect，正在进行的滚动检测被打断，于是永远停在某一批。
+                //    所以 key 只放"列表身份"，判定条件通过 rememberUpdatedState 读实时值，
+                //    判定本身用 [OnlineSearchUiState.shouldRevealMore]（有单测）。
+                val currentState by rememberUpdatedState(state)
+                LaunchedEffect(result.query, result.page, result.fromHistory) {
+                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+                        .distinctUntilChanged()
+                        .collect { lastVisibleIndex ->
+                            if (currentState.shouldRevealMore(lastVisibleIndex)) onRevealMore()
+                        }
                 }
 
                 LazyColumn(
