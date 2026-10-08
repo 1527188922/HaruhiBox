@@ -2,6 +2,7 @@ package com.haruhi.haruhibox.feature.jm.ui
 
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import com.haruhi.haruhibox.core.network.toUserMessage
 import org.junit.Test
 
 /**

@@ -140,7 +140,6 @@ class JmRepositoryTest {
     }
 
     // ---------------- 章节来源优先级 ----------------
-
     @Test
     fun `chapters come from the online series field when present`() = runTest {
         val album = repo.saveAlbum(albumFixture())
@@ -158,7 +157,8 @@ class JmRepositoryTest {
         // series 为空是真实情况：有的本子接口不返回章节，只能靠已下载章节
         val album = repo.saveAlbum(albumFixture().copy(series = null))
 
-        assertThat(repo.chaptersOf(album)).isEmpty()
+        // 还没下过任何一话时给一个兜底的单话章节（见下一个用例）
+        assertThat(repo.chaptersOf(album).map { it.chapterId }).containsExactly(480854L)
 
         db.jmChapterDao().insertAll(
             listOf(
@@ -177,6 +177,27 @@ class JmRepositoryTest {
         val chapters = repo.chaptersOf(repo.findAlbum(480854L)!!)
         assertThat(chapters.map { it.chapterId }).containsExactly(900001L)
         assertThat(chapters[0].title).isEqualTo("第1话")
+    }
+
+    /**
+     * 单话本子：`/album` 不返回 `series` 时，JM 的约定是"章节 id 就是本子 id"。
+     *
+     * 参考实现 `downloadAlbumWithoutLock` 第 866～872 行就是这么兜底的。
+     * 少了这条兜底，单话本子在 App 里显示"共 0 话"，**永远无法下载**——
+     * 而单话本子在 JM 上非常常见（模拟器实测才发现）。
+     */
+    @Test
+    fun `a single chapter album falls back to using the album id as the chapter id`() = runTest {
+        val album = repo.saveAlbum(albumFixture().copy(series = null, name = "单话本子"))
+
+        val chapters = repo.chaptersOf(album)
+
+        assertThat(chapters).hasSize(1)
+        assertThat(chapters[0].chapterId).isEqualTo(480854L)
+        assertThat(chapters[0].title).isEqualTo("第1话")
+        assertThat(chapters[0].sort).isEqualTo("1")
+        // 章节目录名走 title -> "第1话"，与参考实现一致
+        assertThat(repo.chapterFolderName(chapters[0])).isEqualTo("第1话")
     }
 
     @Test

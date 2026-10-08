@@ -187,6 +187,32 @@ class JmRecentAndFavoriteTest {
         assertThat(repo.localAlbumDetail(999L)).isNull()
     }
 
+    /**
+     * 进入详情页时先建的"骨架行"不能被当成"本地已有数据"。
+     *
+     * 真机/模拟器实测：从搜索结果点进一本**没入库**的漫画时，
+     * `touchRecent` 会先写一条只有 id 的记录，如果详情页据此认为"本地有数据"，
+     * 页面就会显示一个只有 JM 号、"共 0 话"的空壳，**而且永远不会联网**。
+     */
+    @Test
+    fun `the touch placeholder does not count as local data`() = runTest {
+        repo.touchRecent(480854L)
+
+        assertThat(repo.findRecent(480854L)).isNotNull()
+        // 必须返回 null，详情页才会去请求 /album
+        assertThat(repo.localAlbumDetail(480854L)).isNull()
+    }
+
+    @Test
+    fun `recent data becomes usable once the album has been fetched`() = runTest {
+        repo.touchRecent(480854L)
+        repo.saveToRecent(albumFixture(480854, "拉到数据之后"))
+
+        val local = repo.localAlbumDetail(480854L)!!
+        assertThat(local.fromLibrary).isFalse()
+        assertThat(local.album.name).isEqualTo("拉到数据之后")
+    }
+
     @Test
     fun `recent can be cleared without touching the library`() = runTest {
         repo.saveAlbum(albumFixture(480854, "在书库"))

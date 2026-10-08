@@ -40,6 +40,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,14 +48,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import coil3.compose.AsyncImage
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
@@ -97,6 +100,8 @@ fun JmLibraryScreen(
     title: String? = null,
     /** 是否显示「收藏」快捷筛选。收藏夹内不需要（用户要求第 7 点）。 */
     showCollectedChip: Boolean = true,
+    /** 「继续阅读」卡片被点击（计划 §9 第 4 条）。 */
+    onContinueReading: ((Long) -> Unit)? = null,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
         if (title != null) {
@@ -107,6 +112,17 @@ fun JmLibraryScreen(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
             )
+        }
+
+        // 有阅读记录时显示紧凑的"继续阅读"卡片（没有就不占地方）。
+        // 只在书库首页显示：收藏夹里是"这一夹有什么"，塞一张别的本子会让人困惑。
+        if (title == null) {
+            state.continueReading?.let { card ->
+                ContinueReadingCardRow(
+                    card = card,
+                    onOpen = { onContinueReading?.invoke(card.albumId) ?: onOpenAlbum(card.albumId) },
+                )
+            }
         }
 
         LibraryFilterBar(
@@ -142,6 +158,54 @@ fun JmLibraryScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+/** 书库顶部的"继续阅读"卡片：一行封面 + 标题 + 上次读到哪一话。 */
+@Composable
+private fun ContinueReadingCardRow(
+    card: ContinueReadingCard,
+    onOpen: () -> Unit,
+) {
+    Card(
+        onClick = onOpen,
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(10.dp),
+        ) {
+            JmCover(
+                albumId = card.albumId,
+                contentDescription = card.albumTitle,
+                modifier = Modifier
+                    .size(width = 44.dp, height = 60.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = card.albumTitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = card.subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text("›", style = MaterialTheme.typography.titleMedium)
         }
     }
 }
@@ -840,6 +904,28 @@ fun ErrorBanner(message: String, onRetry: (() -> Unit)? = null, modifier: Modifi
 
 private val TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
+/**
+ * 页面重新回到前台时执行一次（导航返回也算）。
+ *
+ * 为什么需要它：书库的"已下载 x/y 话"、详情页的章节状态都只反映**进入页面那一刻**的磁盘情况。
+ * 下载完成后回到这些页面，数字必须跟着变，否则用户会以为没下成功。
+ * 用 `LocalLifecycleOwner`（在导航目标里就是 NavBackStackEntry）的 ON_RESUME，
+ * 而不是 `LaunchedEffect(Unit)`——后者只在首次进入时触发一次，返回时不会重来。
+ */
+@Composable
+fun OnResumeEffect(key: Any? = Unit, block: () -> Unit) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentBlock by rememberUpdatedState(block)
+    DisposableEffect(lifecycleOwner, key) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) currentBlock()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+}
+
+/** 时间戳 → 用户能看懂的短格式。 */
 fun formatTime(epochMillis: Long): String =
     TIME_FORMAT.format(Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault()))
 

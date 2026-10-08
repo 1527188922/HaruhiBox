@@ -34,6 +34,15 @@ enum class DownloadStatus {
     val isActive: Boolean
         get() = this == QUEUED || this == RUNNING || this == PAUSED || this == WAITING_NETWORK
 
+    /**
+     * 是否允许执行器接着跑。
+     *
+     * 与 [isActive] 的差别只在 [PAUSED]：暂停之后即使网络刚好恢复、
+     * 或者界面又调了一次 `start`，也不能把状态自己改回运行中。
+     */
+    val isRunnable: Boolean
+        get() = this == QUEUED || this == RUNNING || this == WAITING_NETWORK
+
     /** 是否已完成（任务页"已完成"分组；失败不算完成）。 */
     val isFinished: Boolean
         get() = this == SUCCESS

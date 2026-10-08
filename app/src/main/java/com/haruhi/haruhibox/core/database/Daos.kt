@@ -543,7 +543,16 @@ interface DownloadTaskDao {
     )
     fun observeFinished(limit: Int): Flow<List<DownloadTaskEntity>>
 
-    @Query("SELECT COUNT(*) FROM t_download_task WHERE status IN ('QUEUED', 'RUNNING')")
+    /**
+     * 底部角标：**排队 + 执行中 + 等待网络**。
+     *
+     * 计划 §9 第 9 条说"角标仅统计排队/执行任务，失败另用提示点"——这里的取舍是：
+     * 「等待网络」也算进角标。它不是失败（不计入 [observeFailedCount]），
+     * 而是一个**已经提交、正卡在网络上**的任务：不亮角标的话，用户点完下载、
+     * 回到浏览页以后就再也没有任何线索（模拟器实测就是这个现象）。
+     * 失败与取消仍然只走 [observeFailedCount]。
+     */
+    @Query("SELECT COUNT(*) FROM t_download_task WHERE status IN ('QUEUED', 'RUNNING', 'WAITING_NETWORK')")
     fun observeBadgeCount(): Flow<Int>
 
     @Query("SELECT COUNT(*) FROM t_download_task WHERE status = 'FAIL'")
@@ -623,6 +632,38 @@ interface DownloadTaskDao {
         message: String?,
         now: Long,
     )
+
+    /**
+     * 写入某章应有的图片数。
+     *
+     * 提交任务时往往还不知道章节里有多少张图（图片清单要拉 `/chapter` 才知道），
+     * 所以 `totalImages` 先写 0，拿到清单后再补。**单独一条 UPDATE**
+     * 而不是重跑 `upsertChapters`：后者是 REPLACE，会把已完成的进度清掉。
+     */
+    @Query(
+        """
+        UPDATE t_download_task_chapter
+        SET totalImages = :totalImages, updateTime = :now
+        WHERE taskId = :taskId AND chapterId = :chapterId
+        """,
+    )
+    suspend fun setChapterTotal(taskId: Long, chapterId: Long, totalImages: Int, now: Long)
+
+    /**
+     * 重试 / 恢复前把章节打回队列。
+     *
+     * 覆盖 `FAIL`、`CANCELLED`，以及被取消时**卡在 `RUNNING` 的章节**
+     * （任务被取消时正在跑的那一章就是这种状态，不重置的话它会永远显示"下载中"）。
+     * **不动 `doneImages`**：磁盘上已有的图片会被跳过，重算由仓库层做。
+     */
+    @Query(
+        """
+        UPDATE t_download_task_chapter
+        SET status = 'QUEUED', message = NULL, updateTime = :now
+        WHERE taskId = :taskId AND status IN ('FAIL', 'CANCELLED', 'RUNNING')
+        """,
+    )
+    suspend fun requeueUnfinishedChapters(taskId: Long, now: Long): Int
 
     @Query("DELETE FROM t_download_task_chapter WHERE taskId = :taskId")
     suspend fun deleteChapters(taskId: Long)

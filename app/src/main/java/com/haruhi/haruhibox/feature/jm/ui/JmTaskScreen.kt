@@ -1,0 +1,267 @@
+package com.haruhi.haruhibox.feature.jm.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.haruhi.haruhibox.core.database.entity.DownloadStatus
+
+/**
+ * 漫画任务页（计划 §9 第 9 条）。
+ *
+ * 三件事必须让用户一眼看清：
+ * 1. **状态**：排队 / 下载中 / 已暂停 / 等待网络 / 未完成 / 已完成，各自独立文案，
+ *    失败**不算**"正在运行"；
+ * 2. **进度**：章节数与图片数一起给（"2/12 话 · 18/240 张"），这是 P3 的验收项；
+ * 3. **能做什么**：暂停/继续、取消、重试、删除记录、清空完成历史。
+ *
+ * 任务跑在应用级作用域上，所以离开这个页面不会影响下载——
+ * 文案里明确写出这一点，避免用户以为"退出就停了"。
+ */
+@Composable
+fun JmTaskScreen(
+    state: JmTaskUiState,
+    onToggleExpanded: (Long) -> Unit,
+    onPause: (Long) -> Unit,
+    onResume: (Long) -> Unit,
+    onCancel: (Long) -> Unit,
+    onRetry: (Long) -> Unit,
+    onRemove: (Long) -> Unit,
+    onClearFinished: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("下载任务", style = MaterialTheme.typography.titleMedium)
+            if (state.finished.isNotEmpty()) {
+                TextButton(onClick = onClearFinished) { Text("清空完成记录") }
+            }
+        }
+
+        if (state.failedCount > 0) {
+            Text(
+                text = "有 ${state.failedCount} 个任务没下完，展开后可以重试补下",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
+
+        when {
+            state.loading -> LoadingBox()
+            state.isEmpty -> EmptyBox(
+                title = "还没有下载任务",
+                hint = "在漫画详情页选好章节后点「下载」",
+            )
+            else -> LazyColumn(
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                if (state.active.isNotEmpty()) {
+                    item { SectionHeader("进行中（${state.active.size}）") }
+                    items(state.active, key = { "active-${it.task.id}" }) { row ->
+                        TaskCard(
+                            row = row,
+                            onToggleExpanded = onToggleExpanded,
+                            onPause = onPause,
+                            onResume = onResume,
+                            onCancel = onCancel,
+                            onRetry = onRetry,
+                            onRemove = onRemove,
+                        )
+                    }
+                }
+                if (state.finished.isNotEmpty()) {
+                    item { SectionHeader("已完成（${state.finished.size}）") }
+                    items(state.finished, key = { "done-${it.task.id}" }) { row ->
+                        TaskCard(
+                            row = row,
+                            onToggleExpanded = onToggleExpanded,
+                            onPause = onPause,
+                            onResume = onResume,
+                            onCancel = onCancel,
+                            onRetry = onRetry,
+                            onRemove = onRemove,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+    )
+}
+
+@Composable
+private fun TaskCard(
+    row: TaskRow,
+    onToggleExpanded: (Long) -> Unit,
+    onPause: (Long) -> Unit,
+    onResume: (Long) -> Unit,
+    onCancel: (Long) -> Unit,
+    onRetry: (Long) -> Unit,
+    onRemove: (Long) -> Unit,
+) {
+    val task = row.task
+    Card(
+        shape = MaterialTheme.shapes.medium,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = row.displayName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "${row.statusText} · ${row.progressText}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = statusColor(task.status),
+                    )
+                }
+                if (row.chapters.isNotEmpty() || task.totalChapters > 0) {
+                    TextButton(onClick = { onToggleExpanded(task.id) }) {
+                        Icon(
+                            imageVector = if (row.expanded) {
+                                Icons.Default.KeyboardArrowUp
+                            } else {
+                                Icons.Default.KeyboardArrowDown
+                            },
+                            contentDescription = if (row.expanded) "收起章节" else "展开章节",
+                        )
+                    }
+                }
+            }
+
+            if (task.status == DownloadStatus.RUNNING && task.totalImages > 0) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = {
+                        (task.doneImages.toFloat() / task.totalImages).coerceIn(0f, 1f)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            row.detailText?.let { detail ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (row.canPause) {
+                    TextButton(onClick = { onPause(task.id) }) { Text("暂停") }
+                }
+                if (row.canResume) {
+                    TextButton(onClick = { onResume(task.id) }) { Text("继续") }
+                }
+                if (row.canRetry) {
+                    TextButton(onClick = { onRetry(task.id) }) { Text("重试") }
+                }
+                if (row.canCancel) {
+                    TextButton(onClick = { onCancel(task.id) }) { Text("取消") }
+                } else {
+                    TextButton(onClick = { onRemove(task.id) }) { Text("删除记录") }
+                }
+            }
+
+            if (row.expanded && row.chapters.isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                row.chapters.forEach { chapter ->
+                    ChapterProgressRow(chapter)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChapterProgressRow(chapter: com.haruhi.haruhibox.core.database.entity.DownloadTaskChapterEntity) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = chapter.chapterTitle ?: chapter.chapterId.toString(),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = when (chapter.status) {
+                DownloadStatus.SUCCESS -> "已完成"
+                DownloadStatus.FAIL -> chapter.message ?: "未完成"
+                DownloadStatus.RUNNING -> "${chapter.doneImages}/${chapter.totalImages} 张"
+                DownloadStatus.PAUSED -> "已暂停"
+                DownloadStatus.WAITING_NETWORK -> "等待网络"
+                DownloadStatus.CANCELLED -> "已取消"
+                DownloadStatus.QUEUED -> "排队中"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = statusColor(chapter.status),
+        )
+    }
+}
+
+@Composable
+private fun statusColor(status: DownloadStatus) = when (status) {
+    DownloadStatus.SUCCESS -> MaterialTheme.colorScheme.primary
+    DownloadStatus.FAIL -> MaterialTheme.colorScheme.error
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
+}

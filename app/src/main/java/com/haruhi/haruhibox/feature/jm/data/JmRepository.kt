@@ -228,11 +228,19 @@ class JmRepository(
     /**
      * 详情页数据来源：**先本地（书库 → 最近浏览），都没有才请求网络**。
      *
-     * `null` 表示两处都没有，调用方需要走一次网络。
+     * `null` 表示两处都没有**可用数据**，调用方需要走一次网络。
+     *
+     * **注意最近浏览里的"骨架行"**：进入详情页时会先 [touchRecent] 建一条只有 id 的记录
+     * （这样"最近"页立刻就能看到这本），此时它的字段全是空的。
+     * 如果把它当成"本地已有数据"，详情页就会显示一个只有 JM 号、
+     * "共 0 话"的空壳，并且**永远不会去联网**——实测从搜索结果点进来就是这个现象。
+     * 所以这里要求最近浏览的记录必须**已经有过在线数据**（[hasOnlineData]）才算数。
      */
     suspend fun localAlbumDetail(aid: Long): LocalAlbumDetail? {
         albumDao.findById(aid)?.let { return LocalAlbumDetail(it, fromLibrary = true) }
-        recentDao.findById(aid)?.let { return LocalAlbumDetail(it.toAlbumEntity(), fromLibrary = false) }
+        recentDao.findById(aid)
+            ?.takeIf { it.hasOnlineData }
+            ?.let { return LocalAlbumDetail(it.toAlbumEntity(), fromLibrary = false) }
         return null
     }
 
@@ -472,7 +480,7 @@ class JmRepository(
                 .filterNotNull()
         }
 
-        return chapterDao.chapterList(album.id).map { row ->
+        val local = chapterDao.chapterList(album.id).map { row ->
             ChapterSummary(
                 chapterId = row.chapterId,
                 sort = row.chapterSort,
@@ -482,6 +490,14 @@ class JmRepository(
                     ?: row.chapterId.toString(),
             )
         }
+        if (local.isNotEmpty()) return local
+
+        // 单话本子：`/album` 不返回 series，本地也还没下过任何一话。
+        // JM 的约定是"**章节 id 就是本子 id**"，`/chapter?id=<aid>` 能取到这一话的图片清单
+        // （参考实现 `downloadAlbumWithoutLock` 第 866～872 行就是这么做兜底的）。
+        // 不补这一条的话，单话本子在 App 里会显示"共 0 话"，永远下不动。
+        return listOf(SINGLE_CHAPTER)
+            .map { it.copy(chapterId = album.id, name = album.name) }
     }
 
     /** 某章的图片清单（本地已入库的）。 */
@@ -683,6 +699,21 @@ class JmRepository(
         return freed
     }
 
+    /**
+     * 删除某一话的本地文件，**保留章节清单与任务记录**（计划 §9 第 7 条：
+     * 章节行尾菜单可"重下、删除章节文件"）。
+     *
+     * 只删文件不删清单：清单是"这一话应该有哪些图"的权威来源，
+     * 删掉它就没法判断缺图，也没法重新下载。
+     */
+    suspend fun deleteChapterFiles(albumFolderName: String, chapterFolder: String): Long {
+        if (albumFolderName.isBlank() || chapterFolder.isBlank()) return 0L
+        val dir = dirs.chapterDir(albumFolderName, chapterFolder)
+        val freed = dirs.sizeOf(dir)
+        dir.deleteRecursively()
+        return freed
+    }
+
     /** 本子本地占用（字节）。 */
     fun localSize(albumFolderName: String?): Long =
         albumFolderName?.takeIf { it.isNotBlank() }?.let { dirs.sizeOf(dirs.albumDir(it)) } ?: 0L
@@ -722,8 +753,30 @@ class JmRepository(
     private fun encodeStringList(list: List<String>?): String? =
         list?.let { JmJson.encodeToString(ListSerializer(String.serializer()), it) }
 
+    /**
+     * 最近浏览的记录里是否已经有**真实的在线数据**。
+     *
+     * [touchRecent] 建的是骨架行（只有 id / 目录名 / 时间），字段全空；
+     * 只有 [saveToRecent] 写过的记录才有标题。详情页靠这个判断要不要联网。
+     */
+    private val JmRecentAlbumEntity.hasOnlineData: Boolean
+        get() = !name.isNullOrBlank()
+
     companion object {
         const val DEFAULT_FAVORITE_NAME = "默认收藏夹"
+
+        /**
+         * 单话本子的兜底章节（章节 id 随后被替换成本子 id）。
+         *
+         * 与参考实现 `downloadAlbumWithoutLock` 的兜底完全一致：
+         * `sort = "1"`、`title = "第1话"`、`id = aid`。
+         */
+        private val SINGLE_CHAPTER = ChapterSummary(
+            chapterId = 0L,
+            sort = "1",
+            name = null,
+            title = "第1话",
+        )
 
         private val TEXT_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     }

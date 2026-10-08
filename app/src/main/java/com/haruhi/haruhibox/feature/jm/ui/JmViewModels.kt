@@ -8,9 +8,13 @@ import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.core.network.NetworkError
+import com.haruhi.haruhibox.core.network.toUserMessage
+import com.haruhi.haruhibox.feature.jm.data.JmDownloadManager
+import com.haruhi.haruhibox.feature.jm.data.JmReadingRepository
 import com.haruhi.haruhibox.feature.jm.data.JmRepository
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchItem
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchResult
+import com.haruhi.haruhibox.feature.jm.data.ReadingPosition
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -64,7 +68,23 @@ data class LibraryUiState(
     val error: String? = null,
     /** 还有没有下一页（连续加载用）。 */
     val hasMore: Boolean = false,
+    /**
+     * 「继续阅读」卡片（计划 §9 第 4 条：**有阅读记录时**显示，没有就不显示）。
+     */
+    val continueReading: ContinueReadingCard? = null,
 )
+
+/** 书库顶部"继续阅读"卡片的数据。 */
+data class ContinueReadingCard(
+    val albumId: Long,
+    val albumTitle: String,
+    val chapterTitle: String,
+    /** 位置是否已经落到某一页（只有章节号时说明刚进过这一话）。 */
+    val hasPage: Boolean,
+) {
+    val subtitle: String
+        get() = if (hasPage) "继续阅读 · $chapterTitle" else "开始阅读 · $chapterTitle"
+}
 
 /** 书库卡片。`downloadedChapters`/`totalChapters` 用于"状态优先展示下载章节数"。 */
 data class AlbumCard(
@@ -76,7 +96,10 @@ data class AlbumCard(
     val displayName: String get() = album.name?.takeIf { it.isNotBlank() } ?: "JM${album.id}"
 }
 
-class JmLibraryViewModel(private val repo: JmRepository) : ViewModel() {
+class JmLibraryViewModel(
+    private val repo: JmRepository,
+    private val reading: JmReadingRepository,
+) : ViewModel() {
 
     private val filter = MutableStateFlow(LibraryFilter())
     private val paging = MutableStateFlow(PagingState())
@@ -87,6 +110,7 @@ class JmLibraryViewModel(private val repo: JmRepository) : ViewModel() {
     private data class ExtraState(
         val summaries: Map<Long, ChapterStat> = emptyMap(),
         val loadingStat: Boolean = false,
+        val continueReading: ContinueReadingCard? = null,
     )
 
     private data class ChapterStat(val total: Int, val downloaded: Int, val size: Long)
@@ -140,6 +164,7 @@ class JmLibraryViewModel(private val repo: JmRepository) : ViewModel() {
             loadingMore = p.loadingMore,
             error = p.error,
             hasMore = albums.size >= PAGE_SIZE,
+            continueReading = e.continueReading,
         )
     }.catch { e ->
         Timber.tag("jm").w(e, "书库查询失败")
@@ -152,6 +177,36 @@ class JmLibraryViewModel(private val repo: JmRepository) : ViewModel() {
 
     init {
         refreshStats()
+        // 「继续阅读」跟着阅读位置走：读完一本回到书库，卡片要立刻变成那一本
+        viewModelScope.launch {
+            reading.observeLastRead()
+                .catch { e -> Timber.tag("jm").w(e, "观察阅读位置失败") }
+                .collect { position ->
+                    extra.update { it.copy(continueReading = resolveContinueReading(position)) }
+                }
+        }
+    }
+
+    /**
+     * 把阅读位置翻译成卡片内容。
+     *
+     * 位置可能指向一本**已经不在书库**的本子（用户移除了记录但没删文件），
+     * 这时退回最近浏览表取标题；两处都没有就干脆不显示卡片。
+     */
+    private suspend fun resolveContinueReading(position: ReadingPosition?): ContinueReadingCard? {
+        val chapterId = position?.chapterId ?: return null
+        val album = runCatching { repo.findAlbum(position.albumId) }.getOrNull()
+            ?: runCatching { reading.albumForDisplay(position.albumId)?.toAlbumEntityForDisplay() }.getOrNull()
+            ?: return null
+        val chapterTitle = runCatching { reading.chapterFolderName(position.albumId, chapterId) }
+            .getOrNull()
+            ?: chapterId.toString()
+        return ContinueReadingCard(
+            albumId = position.albumId,
+            albumTitle = album.name?.takeIf { it.isNotBlank() } ?: "JM${album.id}",
+            chapterTitle = chapterTitle,
+            hasPage = !position.imageFile.isNullOrBlank(),
+        )
     }
 
     fun updateFilter(transform: (LibraryFilter) -> LibraryFilter) {
@@ -179,13 +234,21 @@ class JmLibraryViewModel(private val repo: JmRepository) : ViewModel() {
                 val stats = albums.associate { album ->
                     album.id to buildStat(album)
                 }
-                extra.value = ExtraState(summaries = stats, loadingStat = false)
+                // 用 update 而不是整体替换：continueReading 由另一条流维护，不能被统计覆盖掉
+                extra.update { it.copy(summaries = stats, loadingStat = false) }
             }.onFailure { e ->
                 Timber.tag("jm").w(e, "统计章节与占用失败")
                 extra.update { it.copy(loadingStat = false) }
             }
         }
     }
+
+    /**
+     * 回到书库时刷新统计。
+     *
+     * 下载完成后章节数会变，"已下载 x/y 话"必须跟着变（否则用户会以为没下成功）。
+     */
+    fun onScreenResumed() = refreshStats()
 
     private suspend fun buildStat(album: JmAlbumEntity): ChapterStat {
         val chapters = repo.chaptersOf(album)
@@ -637,7 +700,32 @@ data class AlbumDetailUiState(
     val reversed: Boolean = false,
     val descriptionExpanded: Boolean = false,
     val allFavorites: List<JmFavoriteEntity> = emptyList(),
-)
+    /** 下载面板是否展开（默认勾选未完成章节）。 */
+    val showDownloadSheet: Boolean = false,
+) {
+    /** 下载面板的默认勾选：**所有未下完的章节**（§9 第 7 条）。 */
+    val defaultDownloadSelection: Set<Long>
+        get() = chapters.filter { !it.isDownloaded }.map { it.chapterId }.toSet()
+
+    /** 主按钮要做什么："继续阅读 / 开始阅读 / 下载首章"（§9 第 7 条）。 */
+    val primaryAction: PrimaryAction
+        get() = when {
+            chapters.isEmpty() -> PrimaryAction.None
+            chapters.any { it.isDownloaded || it.isPartial } -> PrimaryAction.ContinueReading
+            else -> PrimaryAction.DownloadFirstChapter
+        }
+}
+
+/** 详情页主按钮的语义。 */
+enum class PrimaryAction(val label: String) {
+    None(""),
+
+    /** 有可读的章节：直接进阅读器。 */
+    ContinueReading("继续阅读"),
+
+    /** 一张图都没有：主按钮变成"下载首章"。 */
+    DownloadFirstChapter("下载首章"),
+}
 
 /**
  * 漫画详情。
@@ -660,6 +748,7 @@ data class AlbumDetailUiState(
  */
 class JmAlbumDetailViewModel(
     private val repo: JmRepository,
+    private val downloads: JmDownloadManager,
     private val albumId: Long,
 ) : ViewModel() {
 
@@ -768,7 +857,12 @@ class JmAlbumDetailViewModel(
         return library
     }
 
-    private suspend fun refreshLocalStats() {
+    /** 回到这个页面时重算本地章节状态（下载完成后数字必须跟着变）。 */
+    fun refreshLocalStats() {
+        viewModelScope.launch { loadLocalStats() }
+    }
+
+    private suspend fun loadLocalStats() {
         val album = _state.value.album ?: return
         val chapters = repo.chaptersOf(album)
         val rows = chapters.sortedBy { it.sort?.toIntOrNull() ?: Int.MAX_VALUE }.map { chapter ->
@@ -903,7 +997,7 @@ class JmAlbumDetailViewModel(
         }
     }
 
-    /** 入库章节图片清单（供阅读器判断缺图）。下载由 P3 的任务页驱动。 */
+    /** 入库章节图片清单（供阅读器判断缺图）。 */
     fun ensureChapterImages(chapterId: Long) {
         viewModelScope.launch {
             runCatching { repo.fetchAndSaveChapter(albumId, chapterId) }
@@ -916,6 +1010,61 @@ class JmAlbumDetailViewModel(
                 }
         }
     }
+
+    /**
+     * 下载选中的章节（计划 §9 第 7 条「下载面板默认勾选未完成章节」）。
+     *
+     * 下载的前置是"本子有书库记录"——目录名由书库记录决定，所以这里先确保入库，
+     * 用户不必先点一次「加入书库」再回来下载。
+     */
+    fun downloadChapters(chapterIds: List<Long>) {
+        if (chapterIds.isEmpty()) {
+            _state.update { it.copy(message = "请先选择要下载的章节") }
+            return
+        }
+        viewModelScope.launch {
+            val current = _state.value
+            val selected = current.chapters.filter { it.chapterId in chapterIds }
+            if (selected.isEmpty()) return@launch
+            runCatching {
+                val album = ensureInLibrary()
+                val summaries = repo.chaptersOf(album).filter { it.chapterId in chapterIds }
+                downloads.submit(album, summaries)
+            }.onSuccess { result ->
+                val text = when (result) {
+                    is com.haruhi.haruhibox.core.download.DownloadTaskRepository.SubmitResult.Created ->
+                        "已加入下载队列（${selected.size} 话），可在「任务」里查看进度"
+
+                    is com.haruhi.haruhibox.core.download.DownloadTaskRepository.SubmitResult.AlreadyRunning ->
+                        "这本漫画已有下载任务，已把选中的 ${selected.size} 话加进去"
+                }
+                _state.update { it.copy(message = text, showDownloadSheet = false) }
+                refreshLocalStats()
+            }.onFailure { e ->
+                _state.update { it.copy(message = e.toUserMessage()) }
+            }
+        }
+    }
+
+    /** 删除某一话的本地文件（保留章节清单与任务记录）。 */
+    fun deleteChapterFiles(chapterId: Long) {
+        viewModelScope.launch {
+            val album = _state.value.album ?: return@launch
+            val folder = album.albumFolderName
+            if (folder.isNullOrBlank()) return@launch
+            val chapter = _state.value.chapters.firstOrNull { it.chapterId == chapterId } ?: return@launch
+            runCatching { repo.deleteChapterFiles(folder, chapter.title) }
+                .onSuccess { freed ->
+                    _state.update { it.copy(message = "已删除这一话的本地文件（${formatBytes(freed)}）") }
+                    refreshLocalStats()
+                }
+                .onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
+        }
+    }
+
+    fun showDownloadSheet() = _state.update { it.copy(showDownloadSheet = true) }
+
+    fun dismissDownloadSheet() = _state.update { it.copy(showDownloadSheet = false) }
 
     fun consumeMessage() = _state.update { it.copy(message = null) }
 
@@ -971,14 +1120,6 @@ internal fun JmRecentAlbumEntity.toAlbumEntityForDisplay() = JmAlbumEntity(
     modifyTime = modifyTime,
 )
 
-/** 把异常翻译成可理解文案（计划 §9.1「失败重试不清空已有数据」+ 错误要能看懂）。 */
-fun Throwable.toUserMessage(): String = when (this) {
-    is NetworkError.Timeout -> "网络超时，请检查网络后重试"
-    is NetworkError.Unreachable -> "连不上服务器，请检查网络或代理设置"
-    is NetworkError.Tls -> "HTTPS 证书校验失败，可能是线路被劫持"
-    is NetworkError.HttpStatus -> "服务器返回 $code，稍后再试或更换线路"
-    is NetworkError.Malformed -> "返回内容异常（$detail）"
-    is NetworkError.Business -> message ?: "操作失败"
-    is NetworkError.Cancelled -> "已取消"
-    else -> message ?: javaClass.simpleName
-}
+/** 把异常翻译成可理解文案：实现已移到 `core.network`（下载执行器也要用），这里只做转发注释。 */
+// 详见 core/network/UserMessage.kt
+

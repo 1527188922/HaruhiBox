@@ -1,6 +1,7 @@
 package com.haruhi.haruhibox.feature.jm.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -23,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -83,10 +87,18 @@ fun JmAlbumDetailScreen(
     onAddToFavorite: (Long) -> Unit,
     onRemoveFromFavorite: (Long) -> Unit,
     onCreateFavoriteAndAdd: (String) -> Unit,
-    onOpenChapter: (Long) -> Unit,
+    /** 点章节进阅读器（章节已下载时可读，未下载时阅读器会给出下载入口）。 */
+    onReadChapter: (Long) -> Unit,
+    /** 主按钮「继续阅读」：接着上次的位置打开。 */
+    onContinueReading: () -> Unit,
+    /** 下载面板提交（选中的章节 id）。 */
+    onDownloadChapters: (List<Long>) -> Unit,
+    onDismissDownloadSheet: () -> Unit,
+    onDeleteChapterFiles: (Long) -> Unit,
     onFetchChapterImages: (Long) -> Unit,
     onDeleteAlbumFiles: () -> Unit,
     onDeleteAlbumRecord: () -> Unit,
+    onOpenTaskPage: () -> Unit,
     onConsumeMessage: () -> Unit,
     /**
      * 提示文案的**上层**回调。
@@ -151,6 +163,10 @@ fun JmAlbumDetailScreen(
                         )
                         HorizontalDivider()
                         DropdownMenuItem(
+                            text = { Text("下载管理") },
+                            onClick = { menuExpanded = false; onOpenTaskPage() },
+                        )
+                        DropdownMenuItem(
                             text = { Text("删除本地文件") },
                             onClick = { menuExpanded = false; showDeleteFilesDialog = true },
                         )
@@ -185,6 +201,18 @@ fun JmAlbumDetailScreen(
                         onAddToLibrary = onAddToLibrary,
                         onOpenFavoriteSheet = { showFavoriteSheet = true },
                         onToggleDescription = onToggleDescription,
+                        onPrimaryAction = {
+                            when (state.primaryAction) {
+                                PrimaryAction.ContinueReading -> onContinueReading()
+                                PrimaryAction.DownloadFirstChapter -> {
+                                    val first = state.chapters.firstOrNull { !it.isDownloaded }
+                                        ?: state.chapters.firstOrNull()
+                                    if (first != null) onDownloadChapters(listOf(first.chapterId))
+                                }
+                                PrimaryAction.None -> onRefresh()
+                            }
+                        },
+                        onDownload = { onDownloadChapters(state.defaultDownloadSelection.toList()) },
                     )
                 }
                 if (state.refreshing) {
@@ -200,6 +228,7 @@ fun JmAlbumDetailScreen(
                         downloaded = state.downloadedChapters,
                         reversed = state.reversed,
                         onToggleReversed = onToggleReversed,
+                        onDownload = { onDownloadChapters(state.defaultDownloadSelection.toList()) },
                     )
                 }
                 if (state.chapters.isEmpty()) {
@@ -214,13 +243,24 @@ fun JmAlbumDetailScreen(
                     items(state.chapters, key = { it.chapterId }) { chapter ->
                         ChapterRowItem(
                             chapter = chapter,
-                            onOpen = { onOpenChapter(chapter.chapterId) },
+                            // 有图就直接读；一张都没有时先获取清单，再由阅读器给下载入口
+                            onOpen = { onReadChapter(chapter.chapterId) },
                             onFetchImages = { onFetchChapterImages(chapter.chapterId) },
+                            onDownload = { onDownloadChapters(listOf(chapter.chapterId)) },
+                            onDeleteFiles = { onDeleteChapterFiles(chapter.chapterId) },
                         )
                     }
                 }
             }
         }
+    }
+
+    if (state.showDownloadSheet) {
+        DownloadSheet(
+            state = state,
+            onDownload = onDownloadChapters,
+            onDismiss = onDismissDownloadSheet,
+        )
     }
 
     if (showFavoriteSheet) {
@@ -263,6 +303,8 @@ private fun AlbumHeader(
     onAddToLibrary: () -> Unit,
     onOpenFavoriteSheet: () -> Unit,
     onToggleDescription: () -> Unit,
+    onPrimaryAction: () -> Unit,
+    onDownload: () -> Unit,
 ) {
     val album = state.album ?: return
     Column(modifier = Modifier.padding(12.dp)) {
@@ -309,16 +351,18 @@ private fun AlbumHeader(
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // 主按钮按状态显示（§9 第 7 条）；真正的阅读器在 P3 接
-                    val primaryLabel = when {
-                        state.chapters.isEmpty() -> "刷新章节"
-                        state.downloadedChapters > 0 -> "开始阅读"
-                        else -> "下载首章（P3 接入）"
-                    }
+                    // 主按钮按状态显示"继续阅读 / 开始阅读 / 下载首章"（§9 第 7 条）。
+                    // 还没有章节数据时它就是"刷新章节"，因为那是唯一有用的动作。
+                    val primary = state.primaryAction
                     Button(
-                        onClick = { if (state.chapters.isEmpty()) onRefresh() },
-                        enabled = state.chapters.isNotEmpty(),
-                    ) { Text(primaryLabel) }
+                        onClick = onPrimaryAction,
+                        enabled = primary != PrimaryAction.None || !state.refreshing,
+                    ) {
+                        Text(if (primary == PrimaryAction.None) "刷新章节" else primary.label)
+                    }
+                    OutlinedButton(onClick = onDownload, enabled = state.chapters.isNotEmpty()) {
+                        Text("下载")
+                    }
                     OutlinedButton(onClick = onToggleCollected) {
                         Text(if (album.collected == true) "已收藏" else "收藏")
                     }
@@ -470,6 +514,7 @@ private fun ChapterSectionHeader(
     downloaded: Int,
     reversed: Boolean,
     onToggleReversed: () -> Unit,
+    onDownload: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -482,8 +527,13 @@ private fun ChapterSectionHeader(
             text = if (total == 0) "章节" else "章节 · $downloaded/$total 已下载",
             style = MaterialTheme.typography.titleSmall,
         )
-        TextButton(onClick = onToggleReversed) {
-            Text(if (reversed) "倒序" else "正序")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (downloaded < total) {
+                TextButton(onClick = onDownload) { Text("下载未完成") }
+            }
+            TextButton(onClick = onToggleReversed) {
+                Text(if (reversed) "倒序" else "正序")
+            }
         }
     }
 }
@@ -493,8 +543,11 @@ private fun ChapterRowItem(
     chapter: ChapterRow,
     onOpen: () -> Unit,
     onFetchImages: () -> Unit,
+    onDownload: () -> Unit,
+    onDeleteFiles: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
 
     Card(
         onClick = onOpen,
@@ -530,19 +583,129 @@ private fun ChapterRowItem(
             }
             DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                 DropdownMenuItem(
+                    text = {
+                        Text(
+                            when {
+                                chapter.isDownloaded || chapter.isPartial -> "重新下载"
+                                else -> "下载这一话"
+                            },
+                        )
+                    },
+                    onClick = { menuExpanded = false; onDownload() },
+                )
+                DropdownMenuItem(
                     text = { Text("获取图片清单") },
                     onClick = { menuExpanded = false; onFetchImages() },
                 )
                 DropdownMenuItem(
-                    text = { Text("重新下载（P3 接入）") },
-                    enabled = false,
-                    onClick = { menuExpanded = false },
+                    text = { Text("删除本话文件") },
+                    // 没下过就没有可删的
+                    enabled = chapter.downloadedImages > 0,
+                    onClick = { menuExpanded = false; confirmDelete = true },
                 )
-                DropdownMenuItem(
-                    text = { Text("删除本话文件（P3 接入）") },
-                    enabled = false,
-                    onClick = { menuExpanded = false },
-                )
+            }
+        }
+    }
+
+    if (confirmDelete) {
+        ConfirmDialog(
+            title = "删除「${chapter.title}」的本地文件？",
+            text = "只删除这一话已经下载的图片，章节清单、书库记录与收藏都保留。" +
+                "之后可以重新下载。",
+            confirmText = "删除文件",
+            onConfirm = { confirmDelete = false; onDeleteFiles() },
+            onDismiss = { confirmDelete = false },
+        )
+    }
+}
+
+/**
+ * 下载面板（计划 §9 第 7 条）。
+ *
+ * - **默认勾选未完成的章节**；支持"全选未下载"和逐话自选；
+ * - 已经下完的章节默认不勾，避免用户重复提交；
+ * - 提交后不强制跳任务页，只给短提示。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DownloadSheet(
+    state: AlbumDetailUiState,
+    onDownload: (List<Long>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var selected by remember(state.chapters) {
+        mutableStateOf(state.defaultDownloadSelection)
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+            Text(
+                text = "下载章节",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+            Text(
+                text = "默认勾选还没下完的章节；已下载的可以单独勾选重新下载。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                TextButton(onClick = { selected = state.defaultDownloadSelection }) {
+                    Text("全选未下载")
+                }
+                TextButton(onClick = { selected = emptySet() }) { Text("全不选") }
+            }
+            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
+                items(state.chapters, key = { it.chapterId }) { chapter ->
+                    val checked = chapter.chapterId in selected
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selected = if (checked) {
+                                    selected - chapter.chapterId
+                                } else {
+                                    selected + chapter.chapterId
+                                }
+                            }
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                    ) {
+                        Checkbox(checked = checked, onCheckedChange = null)
+                        Spacer(Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = chapter.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = chapter.statusText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Button(
+                    onClick = { onDownload(selected.toList()) },
+                    enabled = selected.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (selected.isEmpty()) "请选择章节" else "下载选中的 ${selected.size} 话")
+                }
+                OutlinedButton(onClick = onDismiss) { Text("取消") }
             }
         }
     }

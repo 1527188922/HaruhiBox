@@ -38,11 +38,26 @@ object SettingDefaults {
     /** [计划 §9.3] 横向翻页方向：左到右。 */
     const val JM_READING_DIRECTION_LTR = 0
 
+    /** [计划 §9.3] 横向翻页方向：右到左。 */
+    const val JM_READING_DIRECTION_RTL = 1
+
     /** [计划 §9.3] 阅读背景：跟随主题。 */
     const val JM_READING_BACKGROUND_THEME = 0
 
-    /** [计划 §9.3] 阅读亮度：跟随系统。 */
+    /** [计划 §9.3] 阅读背景：浅色 / 深色 / 护眼暖色。 */
+    const val JM_READING_BACKGROUND_LIGHT = 1
+    const val JM_READING_BACKGROUND_DARK = 2
+    const val JM_READING_BACKGROUND_SEPIA = 3
+
+    /** [计划 §9.3] 阅读方式：横向分页。 */
+    const val JM_READING_MODE_HORIZONTAL = 1
+
+    /** [计划 §9.3] 阅读亮度：跟随系统 / 自定义。 */
     const val JM_BRIGHTNESS_FOLLOW_SYSTEM = 0
+    const val JM_BRIGHTNESS_CUSTOM = 1
+
+    /** [计划 §9.3] 自定义亮度默认值（0～100，应用内相对亮度）。 */
+    const val JM_BRIGHTNESS_VALUE_DEFAULT = 60
 
     /** [计划 §9.3] 阅读时保持亮屏：开启。 */
     const val JM_KEEP_SCREEN_ON = true

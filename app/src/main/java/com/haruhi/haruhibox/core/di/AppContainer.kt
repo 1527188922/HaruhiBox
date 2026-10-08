@@ -5,10 +5,15 @@ import com.haruhi.haruhibox.BuildConfig
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.network.NetworkClientFactory
+import com.haruhi.haruhibox.core.network.NetworkMonitor
 import com.haruhi.haruhibox.core.settings.SecretStore
+import com.haruhi.haruhibox.core.settings.SettingDefaults
 import com.haruhi.haruhibox.core.settings.SettingKeys
 import com.haruhi.haruhibox.core.settings.SettingsRepository
 import com.haruhi.haruhibox.core.storage.LibraryDirs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -31,6 +36,15 @@ import java.io.File
  * 所以改设置后调 [invalidateNetworkClients] 重建客户端，已在跑的任务继续用旧实例。
  */
 class AppContainer(private val appContext: Context) {
+
+    /**
+     * 应用级协程作用域（进程存活期）。
+     *
+     * 下载任务必须活过任何页面：用户提交下载后可以退出详情页、切到别的 tab，
+     * 任务不能跟着 ViewModel 一起被取消。所以执行器挂在这个作用域上，
+     * 由前台服务负责"让进程别被杀"。
+     */
+    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // ---------------- 存储 ----------------
 
@@ -76,6 +90,80 @@ class AppContainer(private val appContext: Context) {
     val downloadTasks: com.haruhi.haruhibox.core.download.DownloadTaskRepository by lazy {
         com.haruhi.haruhibox.core.download.DownloadTaskRepository(
             dao = database.downloadTaskDao(),
+            dirs = libraryDirs,
+        )
+    }
+
+    /** 网络状况监视器（下载闸门与"等待网络"状态的数据源）。 */
+    val networkMonitor: NetworkMonitor by lazy { NetworkMonitor(appContext) }
+
+    /**
+     * JM 章节图片下载的编排器。
+     *
+     * 挂在 [appScope] 上而不是任何 ViewModel 上：用户提交下载后可以离开页面，
+     * 任务必须继续跑；进程被杀后由 `HaruhiBoxApp` 的恢复流程重新拉起。
+     */
+    val jmDownloads: com.haruhi.haruhibox.feature.jm.data.JmDownloadManager by lazy {
+        com.haruhi.haruhibox.feature.jm.data.JmDownloadManager(
+            repo = jmRepository,
+            tasks = downloadTasks,
+            downloader = com.haruhi.haruhibox.core.download.ParallelImageDownloader(
+                downloader = fileDownloader,
+            ),
+            dirs = libraryDirs,
+            environment = jmDownloadEnvironment,
+            scope = appScope,
+            onTaskStarted = {
+                // 长下载必须有前台服务，否则息屏后会被系统掐掉（计划 §8）
+                com.haruhi.haruhibox.core.download.DownloadForegroundService.ensureRunning(appContext)
+            },
+        )
+    }
+
+    /**
+     * 执行下载时读取的环境参数。
+     *
+     * **每次调用都重新读设置**：计划 §9.2 要求"线程数、线路、网络策略对新任务或
+     * 下次重试生效，不中途替换运行任务配置"。所以这里是 `suspend` 读取而不是快照。
+     */
+    private val jmDownloadEnvironment: com.haruhi.haruhibox.feature.jm.data.JmDownloadEnvironment =
+        object : com.haruhi.haruhibox.feature.jm.data.JmDownloadEnvironment {
+
+            override suspend fun concurrency(): Int {
+                val configured = settings.jmInt(SettingKeys.JM_DOWNLOAD_THREADS, SettingDefaults.JM_DOWNLOAD_THREADS_AUTO).first()
+                return if (configured > 0) {
+                    configured.coerceIn(
+                        SettingDefaults.JM_DOWNLOAD_THREADS_MIN,
+                        SettingDefaults.JM_DOWNLOAD_THREADS_MAX,
+                    )
+                } else {
+                    com.haruhi.haruhibox.feature.jm.data.JmDownloadManager.AUTO_CONCURRENCY
+                }
+            }
+
+            override suspend fun imageDomain(): String {
+                val first = settings.jmString(SettingKeys.JM_IMAGE_DOMAINS).first()
+                    .lineSequence()
+                    .map { it.trim() }
+                    .firstOrNull { it.isNotEmpty() }
+                return first ?: JmDefaults.IMAGE_DOMAIN
+            }
+
+            override suspend fun allowsTransfer(metered: Boolean): Boolean {
+                val policy = settings.resolveJmNetwork(secrets).downloadNetwork
+                return com.haruhi.haruhibox.core.download.DownloadGate.of(policy, metered)
+                    .allowNewTransfer()
+            }
+
+            override val networkState = networkMonitor.state
+        }
+
+    /** 阅读位置与离线可读性查询（阅读器与"继续阅读"入口）。 */
+    val jmReading: com.haruhi.haruhibox.feature.jm.data.JmReadingRepository by lazy {
+        com.haruhi.haruhibox.feature.jm.data.JmReadingRepository(
+            positionDao = database.playbackPositionDao(),
+            chapterDao = database.jmChapterDao(),
+            recentDao = database.jmRecentAlbumDao(),
             dirs = libraryDirs,
         )
     }

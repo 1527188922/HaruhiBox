@@ -126,7 +126,11 @@ class DownloadTaskRepository(
         )
     }
 
-    suspend fun markPaused(id: Long) = dao.updateStatus(id, DownloadStatus.PAUSED, System.currentTimeMillis())
+    suspend fun markPaused(id: Long) {
+        dao.updateStatus(id, DownloadStatus.PAUSED, System.currentTimeMillis())
+        // 暂停时正在跑的那一章会卡在 RUNNING，立刻打回队列，界面上不留"假下载中"
+        dao.requeueUnfinishedChapters(id, System.currentTimeMillis())
+    }
 
     /** 等待网络：不算失败，也不算"正在运行"（§9 第 9 条）。 */
     suspend fun markWaitingNetwork(id: Long, reason: String?) {
@@ -156,6 +160,7 @@ class DownloadTaskRepository(
     /** 取消：**不自动复活**（§D.3）。已经写下的 `.part` 由调用方决定是否清理。 */
     suspend fun markCancelled(id: Long) {
         dao.finish(id, DownloadStatus.CANCELLED, null, System.currentTimeMillis())
+        dao.requeueUnfinishedChapters(id, System.currentTimeMillis())
         dao.trimFinished(FINISHED_HISTORY_LIMIT)
     }
 
@@ -173,6 +178,49 @@ class DownloadTaskRepository(
 
     suspend fun upsertChapters(taskId: Long, chapters: List<ChapterSpec>) {
         dao.upsertChapters(chapters.map { it.toEntity(taskId) })
+    }
+
+    suspend fun chapterList(taskId: Long): List<DownloadTaskChapterEntity> = dao.chapters(taskId)
+
+    /**
+     * 写入某章应有的图片数。拿到图片清单之后调用。
+     *
+     * 与 [updateChapterProgress] 分开是因为它不改状态、不改 done：
+     * 提交任务时还不知道每章有多少张图，`totalImages` 先写 0。
+     */
+    suspend fun setChapterTotal(taskId: Long, chapterId: Long, totalImages: Int) {
+        dao.setChapterTotal(taskId, chapterId, totalImages, System.currentTimeMillis())
+    }
+
+    /**
+     * 把任务级进度按章节明细重算一遍（图片总数 / 已完成图片 / 已完成章节）。
+     *
+     * **任务级数字永远由章节明细推导**，不单独累加：这样取消、重试、恢复
+     * 都不会让任务进度和章节进度对不上。
+     */
+    suspend fun recomputeTaskTotals(taskId: Long) {
+        val task = dao.findById(taskId) ?: return
+        val chapters = dao.chapters(taskId)
+        dao.update(
+            task.copy(
+                totalChapters = chapters.size,
+                doneChapters = chapters.count { it.status == DownloadStatus.SUCCESS },
+                totalImages = chapters.sumOf { it.totalImages },
+                doneImages = chapters.sumOf { it.doneImages },
+                updateTime = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    /**
+     * 重试 / 恢复前把没跑完的章节打回队列，并返回刷新后的章节明细。
+     *
+     * 只重置状态，不重置已下载计数：磁盘上已有的图片会在执行时被跳过，
+     * 计数由执行器按磁盘现状重新上报。
+     */
+    suspend fun requeueUnfinishedChapters(taskId: Long): List<DownloadTaskChapterEntity> {
+        dao.requeueUnfinishedChapters(taskId, System.currentTimeMillis())
+        return dao.chapters(taskId)
     }
 
     /**
@@ -273,6 +321,8 @@ class DownloadTaskRepository(
 
         for (task in interrupted) {
             runCatching {
+                // 章节明细里卡在 RUNNING 的那一条也要打回队列，否则界面永远显示"下载中"
+                dao.requeueUnfinishedChapters(task.id, System.currentTimeMillis())
                 val discovered = chapterResolver(task)
                 for (chapter in discovered) {
                     recomputeChapterProgress(

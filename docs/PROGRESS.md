@@ -1,7 +1,7 @@
 # 实施进度台账
 
 > 计划原文：`docs/android-app-plan.md`（= `2026-10-05-android-jm-bilibili-app.md`）
-> 最后更新：2026-10-07
+> 最后更新：2026-10-09
 
 ## 目录结构决策
 
@@ -35,7 +35,7 @@ app/src/main/java/com/haruhi/haruhibox/
 | **P0 环境与基线** | ✅ 完成 | 见 `docs/p0/README.md`；3 个 spike 全部有结论 |
 | **P1 基础设施** | ✅ 完成 | 见下表；验收项全部达成 |
 | **P2 JM 数据与浏览** | 🚧 代码完成，**界面待人工确认** | 见下方 P2 明细 |
-| P3 JM 下载与阅读闭环 | ⬜ 未开始 | 下载引擎与任务仓库已在 P1 备好 |
+| **P3 JM 下载与阅读闭环** | 🚧 代码完成，**界面待人工确认** | 见下方 P3 明细 |
 | P4 JM 导出 zip / pdf | ⬜ 未开始 | PDF 能力已在 P0 spike 验证 |
 | P5 B站 | ⬜ 未开始 | |
 | P6 壳与体验 | ⬜ 未开始 | |
@@ -60,6 +60,83 @@ app/src/main/java/com/haruhi/haruhibox/
 | 漫画详情页（本地优先 + 在线刷新 + 章节状态） | ✅ 代码 | `JmAlbumDetailScreen` |
 | 漫画模式底部导航（书库/最近/发现/收藏） | ✅ 代码 | `JmModeRoot` |
 | **界面人工确认（截图/交互）** | ⏳ **待你确认** | 见下方"P2 待验证" |
+
+### P3 明细（JM 下载与阅读闭环）
+
+| 项 | 状态 | 产出 |
+|---|---|---|
+| 下载任务编排（提交去重 / 开始 / 暂停 / 恢复 / 取消 / 重试） | ✅ | `feature/jm/data/JmDownloadManager.kt` |
+| 章节图片清单按需补齐（没有就现场拉 `/chapter` 并入库） | ✅ | `JmDownloadManager.ensureImageList` |
+| 解扰落盘（`blockNum==0` 直接落原图，不重新编码） | ✅ | `ImageDownloadTransform`，测试逐字节断言 |
+| 图片"存在即跳过" + 0 字节残留算缺失 | ✅ | 测试 `images already on disk are not requested again` 等 |
+| 进度持久化到"第 N 话 x/y 张" | ✅ | 每张图落库一次；任务级数字由章节明细推导 |
+| 任务级防死循环（缺图数不下降就停） | ✅ | 章节内 3 轮上限 + 任务级"没有进展就停" |
+| 网络策略闸门（仅 Wi-Fi 时进"等待网络"而不是失败） | ✅ | `awaitNetworkPermission` + `core/network/NetworkMonitor` |
+| 杀进程后按磁盘现状重算并继续 | ✅ | `recoverInterrupted` → `requeueForResume` → 自动接着跑 |
+| 前台服务常驻通知 | ✅ | 有任务开始即 `DownloadForegroundService.ensureRunning` |
+| 任务页（进行中 / 已完成、暂停恢复取消重试、清空历史、角标） | ✅ 代码 | `feature/jm/ui/JmTaskScreen.kt` + `JmTaskViewModel.kt` |
+| 阅读器（纵向连续 / 横向分页 / 右到左） | ✅ 代码 | `feature/jm/ui/JmReaderScreen.kt` |
+| 单击显隐控件、双指缩放、双击放大还原、放大后拖动 | ✅ 代码 | `PageZoomState` + 自写手势（不用 `transformable`，见下） |
+| 章节选择、上一话/下一话、缺图页与重试 | ✅ 代码 | 阅读器控件栏 |
+| 阅读位置持久化（本子+章节+图片+页内比例，去抖 400ms） | ✅ | `JmReadingRepository`，测试 7 个用例 |
+| 书库「继续阅读」卡片 + 详情页主按钮三态 | ✅ 代码 | `ContinueReadingCard`、`PrimaryAction` |
+| 阅读设置（方式/方向/背景/亮度/常亮）与 JM 设置**同一份偏好** | ✅ 代码 | `JmReaderPreferences.kt`，键位复用 JM 作用域 |
+| 长图占位稳定（按图片宽高比占位，加载前后不跳） | ✅ 代码 | `ImageCodec.readMeta` + `aspectRatio` |
+| **界面人工确认（下载/阅读/任务页观感）** | ⏳ **待你确认** | 见下方"P3 待验证" |
+
+#### P3 的两个实现取舍
+
+1. **不用 `Modifier.transformable` 做缩放**：它会把单指拖动也当作平移并消费掉事件，
+   于是"没放大时列表就再也滚不动了"。阅读器自己写手势循环：
+   **只在双指缩放、或已放大后的拖动时才消费事件**，其余交给 `LazyColumn` / `HorizontalPager`。
+2. **重复提交不新建任务，而是把章节追加进已有任务**。计划 §9 只要求"重复提交显示已有任务"，
+   但"我勾了第 5 话却没开始下载"是更糟的体验；去重规则（同一 `(type, bizKey)` 一个活跃任务）
+   仍然成立，只是在追加时会唤醒暂停中的任务。
+
+#### 模拟器实测发现并修掉的两个 bug（2026-10-09）
+
+这两个都是**只有真的把 App 跑起来点一遍才会暴露**的问题，单测覆盖不到：
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| E1 | 从搜索结果点进一本**没入库**的漫画，详情页只有一个 JM 号与"共 0 话"，**永远不联网** | 进详情页时会先 `touchRecent` 建一条**只有 id 的骨架行**；`localAlbumDetail` 把它当成"本地已有数据"，于是详情页走了"本地优先"分支、再也不请求 `/album` | `localAlbumDetail` 只认**已经有过在线数据**的最近浏览记录（`name` 非空）；骨架行返回 null，详情页照常联网。用例 `the touch placeholder does not count as local data` |
+| E2 | 单话本子显示"共 0 话"，**无法下载**（JM 上这类本子很常见） | `/album` 对单话本子不返回 `series`，本地章节表也是空的，于是章节列表为空 | 按参考实现 `downloadAlbumWithoutLock` 第 866～872 行的兜底：**章节 id = 本子 id**，标题"第1话"。用例 `a single chapter album falls back to using the album id as the chapter id` |
+
+顺带调整：底部「任务」角标把 `WAITING_NETWORK` 也算进去（它不是失败，但用户点完下载
+回到浏览页后，没有角标就完全没有线索——实测就是这样）。
+
+#### 模拟器实测走过的链路（2026-10-09）
+
+| 步骤 | 结果 |
+|---|---|
+| 冷启动 | ✅ 5 个底栏 tab（书库/最近/发现/收藏/任务）正常渲染 |
+| 单话本子详情页 | ✅ 共 1 话、主按钮「下载首章」、章节行「第1话·未下载」 |
+| 点「下载首章」 | ✅ 自动入库 + 建任务；角标出现 |
+| 任务页 | ✅ **等待网络 · 0/1 话** + "当前网络不允许下载，已暂停传输"（模拟器走 5G，默认策略是仅 Wi-Fi） |
+| 切到 Wi-Fi | ✅ 任务自动继续：`下载图片 · 0/1 话 · 0/11 张`，磁盘上出现 `第1话/0000N.webp.part` |
+| 杀进程再启动 | ✅ 日志 `恢复 1 个被中断的下载任务`，恢复后继续跑 |
+
+图片传输在模拟器上很慢（单张封面要 40 秒），所以没等它跑完整本；
+"落盘 → 解扰 → 原子发布 → 进度"这一段由 `JmDownloadManagerTest`（真实 HTTP 服务 + 逐字节校验）覆盖。
+
+### P3 待验证（需要你在设备上确认）
+
+自动验证过的部分：**182 个单元测试 + 6 个真机测试**全绿，lint 0 error，debug/release 均可构建。
+（真机 6 个用例是上一轮跑的：迁移 2 + PDF 加密 4；本轮没有改数据库结构，所以没有重跑。）
+
+| # | 请确认 | 期望 |
+|---|---|---|
+| 1 | 详情页点「下载」→ 勾选章节 → 提交 | 不跳页，短提示；底部「任务」tab 出现角标 |
+| 2 | 任务页 | "进行中"能看到话数与张数（如 `2/12 话 · 18/240 张`），可展开看每一话 |
+| 3 | 下载完点章节进阅读器 | 纵向连续、单击显隐控件、双指缩放、双击放大缩小 |
+| 4 | 阅读设置里改「横向分页」 | 立即变成左右翻页；改背景/亮度/常亮都生效 |
+| 5 | 退出阅读器再进来 | 回到上次读到的那一页（不是第一页） |
+| 6 | 书库顶部 | 出现「继续阅读」卡片，显示上次读到哪一话 |
+| 7 | 下载到一半杀进程再打开 | 从断点继续，已下载的图片不重下 |
+| 8 | 设置里把下载网络改成"仅 Wi-Fi"后用移动网络下载 | 任务显示"等待网络"而不是失败；切回 Wi-Fi 自动继续 |
+
+> 第 7、8 两条的**状态机**已有单测锁定（拦截、恢复、只补缺口），但"在真实设备上杀进程/切网络"
+> 的观感需要你确认一次。
 
 ### 用户提出的 8 点改动（2026-10-08 完成）
 
@@ -192,7 +269,8 @@ Expected identity hash: 7ecd5cfc..., found: 31e452937...
 | 通知显示进度 | ✅ | `DownloadForegroundService` 订阅活跃任务渲染通知（真机观感待 P7） |
 | 杀进程后任务与进度从数据库恢复 | ✅ | `recoverInterrupted` + `DownloadTaskRepositoryTest` 的 4 个恢复用例 |
 | 恢复后按磁盘现状重算（不回退、不重复累加） | ✅ | `recomputeChapterProgress`；0 字节残file 不计入 |
-| WorkManager 约束调度（仅 Wi-Fi 时自动延后） | ⬜ | `DownloadGate` 已就绪，缺 Worker 接线 |
+| **恢复后自动接着跑**（P3 接上） | ✅ | `HaruhiBoxApp.recoverInterruptedDownloads` → `jmDownloads.resumeQueued` |
+| WorkManager 约束调度（仅 Wi-Fi 时自动延后） | ⬜ | 前台服务已就绪；"等待网络"由执行器的闸门实现，Worker 留到 P6 |
 
 ## 已确认的决策（2026-10-08）
 
@@ -266,30 +344,35 @@ OK (4 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：88 个单元测试 + lint + 两种构建
+# 开发机：182 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
-# 设备：instrumented test（PDF 加密等）
+# 设备：instrumented test（迁移 + PDF 加密）
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**130 个单元测试 + 4 个真机用例全绿**，lint 0 error，
-debug / release APK 均可构建。
+当前基线：**182 个单元测试 + 6 个真机用例全绿**，lint 0 error（27 条 warning 均为既有项），
+debug / release APK 均可构建（4.4 MB → 5.6 MB，新增阅读器与任务页）。
 
 ### 测试清单（单元测试）
 
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
-| `feature.jm.data.JmRepositoryTest` | 18 | 入库字段一致性 / 收藏保留 / 章节来源优先级 / 标签 OR / 删除语义 |
-| `feature.jm.data.JmRecentAndFavoriteTest` | 15 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / 收藏夹数量 Flow |
+| `feature.jm.data.JmRepositoryTest` | 19 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底）/ 标签 OR / 删除语义 |
+| `feature.jm.ui.JmReaderAndTaskLogicTest` | 18 | 任务状态与进度文案 / 详情页主按钮三态 / 下载面板默认勾选 / 阅读器导航与缺图 / 阅读偏好编解码 |
+| `feature.jm.data.JmRecentAndFavoriteTest` | 17 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / **骨架行不算本地数据** / 收藏夹数量 Flow |
 | `core.jm.JmCryptoGoldenTest` | 14 | 签名 / AES-256 解密 / 块数，与参考实现逐值一致 |
 | `core.storage.FileNamingGoldenTest` | 14 | 文件名清洗 / 本子目录名 / 章节与图片排序 |
+| `feature.jm.data.JmDownloadManagerTest` | 13 | **下载编排**：逐字节一致（块数 0 不重编码）/ 跳过已存在 / 断点只补缺口 / 等待网络 / 取消 / 追加章节 / 重试 |
 | `core.database.JmDaoTest` | 13 | 书库分页排序筛选 / 标签 OR / 章节分组 / 收藏唯一索引 |
 | `core.database.DownloadTaskDaoTest` | 12 | 任务去重 / 恢复 / 章节计数幂等 / 历史裁剪 |
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
 | `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
 | `feature.jm.ui.JmDisplayLogicTest` | 8 | 书库状态文案 / 章节状态 / 体积格式 / 空态与错误文案 |
+| `feature.jm.data.JmReadingRepositoryTest` | 7 | 阅读位置读写与钳位 / "继续阅读"取最近一本 / 只读存在的图片 / 章节目录名规则 |
+| `feature.jm.ui.SearchRevealStateTest` | 6 | 搜索增量展示的推进与边界 |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
+| `core.download.DownloadGateTest` | 5 | 下载网络策略矩阵（仅 Wi-Fi / 允许移动网络） |
 | `core.codec.PdfWriterSpikeTest` | 4 | PDF 页面 / 书签 / `PageMode` / 不加密 |
 | `core.jm.CryptoProbeTest` | 2 | 环境回归：JCE 可用性 |
 | `core.codec.PixelProbeTest` | 2 | 环境回归：位图像素读写行为 |

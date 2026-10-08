@@ -195,3 +195,36 @@ powershell -File tools\device-tests\run-one.ps1 `
 ```powershell
 adb shell df -h /data
 ```
+
+## ⚠ 不要用 PowerShell 重写含中文的源文件
+
+**症状**：用 `Get-Content -Raw` + `Set-Content`（哪怕显式写了 `-Encoding utf8`）改一个含中文的
+`.kt` / `.md`，文件里的中文会全部变成 `锛? 鐨? 涓?` 这种乱码，而且**换行会被吞掉**
+（多行注释和下一行代码挤成一行）。这次就是这样把 `JmModeRoot.kt` 弄坏的，
+只能用 `git checkout` 回滚重做。
+
+**原因**：这个环境里 PowerShell 读写文本时用的编码与控制台编码不一致，
+`Get-Content` 按 GBK 解码 UTF-8 字节，再以 UTF-8 写回，乱码就被"固化"进文件。
+`Set-Content -Encoding utf8` 不能阻止这件事，因为在**读**的那一步信息就已经丢了。
+
+**正确做法**：
+
+- 改文件一律用编辑工具（或 IDE），不要用 shell 文本重写；
+- 确实要用 shell 处理字节时，走 .NET API 并显式指定两端编码，例如：
+
+  ```powershell
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  $text = $utf8.GetString([System.IO.File]::ReadAllBytes($path))
+  # ……处理 $text……
+  [System.IO.File]::WriteAllBytes($path, $utf8.GetBytes($text))
+  ```
+
+- 写完立刻自查（0 表示干净）：
+
+  ```powershell
+  $t = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+  ([regex]::Matches($t, "[锛鐨涓鍒鏄鎴鏂涔寰鍥鏃鐢]")).Count
+  ```
+
+- `git diff` 输出里的中文乱码**不代表文件坏了**——那是控制台解码的问题，
+  用编辑器打开文件确认才算数。
