@@ -64,6 +64,7 @@ class JmRepositoryTest {
             albumDao = db.jmAlbumDao(),
             chapterDao = db.jmChapterDao(),
             favoriteDao = db.jmFavoriteDao(),
+            recentDao = db.jmRecentAlbumDao(),
             searchHistoryDao = db.jmSearchHistoryDao(),
             dirs = dirs,
         )
@@ -126,6 +127,7 @@ class JmRepositoryTest {
             albumDao = db.jmAlbumDao(),
             chapterDao = db.jmChapterDao(),
             favoriteDao = db.jmFavoriteDao(),
+            recentDao = db.jmRecentAlbumDao(),
             searchHistoryDao = db.jmSearchHistoryDao(),
             dirs = dirs,
             albumNameMaxBytes = { 40 },

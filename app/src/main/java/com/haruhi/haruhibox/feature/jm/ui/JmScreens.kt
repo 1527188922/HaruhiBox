@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
@@ -35,10 +36,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
+import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchItem
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -88,10 +92,25 @@ fun JmLibraryScreen(
     onOpenAlbum: (Long) -> Unit,
     onToggleCollected: (Long, Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    /** 标题；在收藏夹内时为收藏夹名字（用户要求第 7 点：显示当前收藏夹名称）。 */
+    title: String? = null,
+    /** 是否显示「收藏」快捷筛选。收藏夹内不需要（用户要求第 7 点）。 */
+    showCollectedChip: Boolean = true,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
+        if (title != null) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
+            )
+        }
+
         LibraryFilterBar(
             filter = state.filter,
+            showCollectedChip = showCollectedChip,
             onFilterChange = onFilterChange,
             onClearFilter = onClearFilter,
         )
@@ -126,10 +145,79 @@ fun JmLibraryScreen(
     }
 }
 
+/**
+ * 最近浏览页（用户要求第 3 点）。
+ *
+ * 只按浏览时间倒序展示、点击进详情、可单条删除或整体清空；
+ * **不显示下载章节数**——这张表的用途是"回到刚看过的本子"，
+ * 为 60 条记录逐条查章节统计会明显拖慢页面。
+ */
+@Composable
+fun JmRecentScreen(
+    state: RecentUiState,
+    onOpenAlbum: (Long) -> Unit,
+    onClearAll: () -> Unit,
+    columns: Int = 3,
+    modifier: Modifier = Modifier,
+) {
+    var showClearDialog by remember { mutableStateOf(false) }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("最近浏览", style = MaterialTheme.typography.titleMedium)
+            if (state.albums.isNotEmpty()) {
+                TextButton(onClick = { showClearDialog = true }) { Text("清空") }
+            }
+        }
+
+        when {
+            state.loading -> LoadingBox()
+            state.error != null -> EmptyBox("读取最近浏览失败", state.error)
+            state.albums.isEmpty() -> EmptyBox(
+                title = "还没有浏览记录",
+                hint = "点开任意漫画详情后会出现在这里",
+            )
+            else -> LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
+                contentPadding = PaddingValues(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                items(state.albums, key = { it.album.id }) { card ->
+                    AlbumGridCard(
+                        card = card,
+                        onOpen = { onOpenAlbum(card.album.id) },
+                        // 最近浏览里没有收藏语义，不显示星标
+                        onToggleCollected = null,
+                    )
+                }
+            }
+        }
+    }
+
+    if (showClearDialog) {
+        ConfirmDialog(
+            title = "清空最近浏览？",
+            text = "只清空浏览记录，书库、收藏夹与本地文件都不受影响。",
+            confirmText = "清空",
+            onConfirm = { showClearDialog = false; onClearAll() },
+            onDismiss = { showClearDialog = false },
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LibraryFilterBar(
     filter: LibraryFilter,
+    showCollectedChip: Boolean,
     onFilterChange: ((LibraryFilter) -> LibraryFilter) -> Unit,
     onClearFilter: () -> Unit,
 ) {
@@ -173,15 +261,18 @@ private fun LibraryFilterBar(
                 },
                 label = { Text("未下载") },
             )
-            FilterChip(
-                selected = filter.collectedOnly == true,
-                onClick = {
-                    onFilterChange {
-                        it.copy(collectedOnly = if (it.collectedOnly == true) null else true)
-                    }
-                },
-                label = { Text("收藏") },
-            )
+            // 收藏夹内不需要这个按钮（用户要求第 7 点：夹内只留已下载/未下载）
+            if (showCollectedChip) {
+                FilterChip(
+                    selected = filter.collectedOnly == true,
+                    onClick = {
+                        onFilterChange {
+                            it.copy(collectedOnly = if (it.collectedOnly == true) null else true)
+                        }
+                    },
+                    label = { Text("收藏") },
+                )
+            }
             // 生效条件数量 + 清除（计划 §9.1「筛选生效后显示条件标签或数量，支持清除」）
             if (filter.isActive) {
                 TextButton(onClick = onClearFilter) {
@@ -196,7 +287,7 @@ private fun LibraryFilterBar(
 private fun AlbumGridCard(
     card: AlbumCard,
     onOpen: () -> Unit,
-    onToggleCollected: () -> Unit,
+    onToggleCollected: (() -> Unit)?,
 ) {
     Card(
         onClick = onOpen,
@@ -210,13 +301,12 @@ private fun AlbumGridCard(
                 .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
                 .background(MaterialTheme.colorScheme.surface),
         ) {
-            AsyncImage(
-                model = card.album.id.let { "https://${com.haruhi.haruhibox.core.jm.JmDefaults.IMAGE_DOMAIN}/media/albums/$it.jpg" },
+            JmCover(
+                albumId = card.album.id,
                 contentDescription = card.displayName,
-                contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
-            if (card.album.collected == true) {
+            if (card.album.collected == true && onToggleCollected != null) {
                 IconButton(onClick = onToggleCollected, modifier = Modifier.align(Alignment.TopEnd)) {
                     Text("★", style = MaterialTheme.typography.titleMedium)
                 }
@@ -230,15 +320,45 @@ private fun AlbumGridCard(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.height(4.dp))
-            // 状态优先展示下载章节数，避免堆叠徽标（计划 §9 第 4 条）
-            Text(
-                text = downloadSummary(card),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // 状态优先展示下载章节数，避免堆叠徽标（计划 §9 第 4 条）。
+            // 最近浏览页没有章节统计，此时不显示这一行，避免出现误导性的"未获取章节"。
+            if (card.totalChapters > 0 || card.downloadedChapters > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = downloadSummary(card),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
+}
+
+/**
+ * JM 封面。
+ *
+ * 用户要求第 8 点（封面本地缓存）由 Coil 的**磁盘缓存**实现：
+ * `AppContainer.imageLoader` 把缓存目录指到 `files/covers`，
+ * Coil 的默认策略就是"先查磁盘缓存，没有再请求网络"。
+ *
+ * 走应用级 ImageLoader 的关键原因是网络层：JM 的封面域名对 UA 有校验，
+ * 必须复用带正确 UA / 代理的 OkHttp。
+ */
+@Composable
+fun JmCover(
+    albumId: Long,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+) {
+    val imageLoader = LocalImageLoader.current
+    val model = remember(albumId) { JmDefaults.buildCoverUrl(albumId) }
+    AsyncImage(
+        model = model,
+        contentDescription = contentDescription,
+        contentScale = ContentScale.Crop,
+        imageLoader = imageLoader,
+        modifier = modifier,
+    )
 }
 
 /**
@@ -267,13 +387,23 @@ fun JmOnlineSearchScreen(
     onSearch: () -> Unit,
     onSortChange: (JmSearchSort) -> Unit,
     onLoadMore: () -> Unit,
+    onRevealMore: () -> Unit,
     onOpenAlbum: (Long) -> Unit,
     onAddToLibrary: (OnlineSearchItem) -> Unit,
     onOpenHistory: (JmSearchHistoryEntity) -> Unit,
     onDeleteHistory: (Long) -> Unit,
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier,
+    onConsumeMessage: () -> Unit = {},
 ) {
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(state.message) {
+        state.message?.let {
+            snackbarHostState.showSnackbar(it)
+            onConsumeMessage()
+        }
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
         OutlinedTextField(
             value = state.keyword,
@@ -324,37 +454,92 @@ fun JmOnlineSearchScreen(
                 hint = "换个关键字试试",
             )
             else -> {
+                val listState = rememberLazyListState()
+                val visibleItems = remember(state.visibleCount, result.items.size) {
+                    result.items.take(state.visibleCount)
+                }
+
+                // 用户要求第 5 点：**最后一条进入可视范围就继续追加**，
+                // 而不是等用户滑到底再点按钮。这样列表是"连续滚不完"的观感，
+                // 同时首屏只渲染 10 条、不会一次性发起几十个封面请求。
+                val shouldRevealMore by remember {
+                    derivedStateOf {
+                        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+                        state.remainingCount > 0 && lastVisible >= visibleItems.lastIndex
+                    }
+                }
+                LaunchedEffect(shouldRevealMore) {
+                    if (shouldRevealMore) onRevealMore()
+                }
+
                 LazyColumn(
+                    state = listState,
                     contentPadding = PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     item {
                         Text(
-                            text = if (result.fromHistory) {
-                                "搜索历史快照 · 共 ${result.total} 条"
-                            } else {
-                                "共 ${result.total} 条 · 第 ${result.page}/${result.totalPages} 页"
+                            text = buildString {
+                                if (result.fromHistory) {
+                                    append("搜索历史快照 · 共 ${result.total} 条")
+                                } else {
+                                    append("共 ${result.total} 条 · 第 ${result.page}/${result.totalPages} 页")
+                                }
+                                // 让用户知道下面还有多少没展开
+                                if (state.remainingCount > 0) {
+                                    append(" · 已显示 ${visibleItems.size}/${result.items.size}")
+                                }
                             },
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    items(result.items, key = { it.id }) { item ->
+                    items(visibleItems, key = { it.id }) { item ->
                         OnlineResultRow(
                             item = item,
                             onOpen = { onOpenAlbum(item.id) },
                             onAddToLibrary = { onAddToLibrary(item) },
                         )
                     }
-                    if (state.loadingMore) {
-                        item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
-                    } else if (result.page < result.totalPages && !result.fromHistory) {
-                        item {
+                    when {
+                        state.loadingMore -> item {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+
+                        // 本页还有没展示完的：继续下滑会自动追加
+                        state.remainingCount > 0 -> item {
+                            Text(
+                                text = "继续下滑显示更多（还有 ${state.remainingCount} 条）",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp),
+                            )
+                        }
+
+                        // 本页全部展示完，才出现"加载下一页"（用户要求第 5 点）
+                        !result.fromHistory && result.page < result.totalPages -> item {
                             TextButton(
                                 onClick = onLoadMore,
                                 modifier = Modifier.fillMaxWidth(),
-                            ) { Text("加载下一页") }
+                            ) { Text("加载下一页（第 ${result.page + 1} 页）") }
+                        }
+
+                        else -> item {
+                            Text(
+                                text = if (result.fromHistory) {
+                                    "历史快照已全部显示"
+                                } else {
+                                    "已显示全部结果"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp),
+                            )
                         }
                     }
                 }

@@ -15,6 +15,7 @@ import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
+import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
 import kotlinx.coroutines.flow.Flow
@@ -299,6 +300,85 @@ interface JmFavoriteDao {
 
     @Query("SELECT COUNT(*) FROM t_jm_favorite_album WHERE favorite_id = :favoriteId")
     fun observeAlbumCount(favoriteId: Long): Flow<Int>
+
+    /**
+     * 收藏夹列表 + 每个夹的本子数量，**一次查询**拿到。
+     *
+     * 之前收藏页给每行分别 `observeAlbumCount` 再用 `first()` 取一次值，
+     * 结果收藏之后数量不刷新（用户反馈的第 1 点）。
+     * 用一条 LEFT JOIN 的 Flow 查询取代 N 次单发查询：
+     * 关联表任何变动都会重新发射，UI 自然跟着更新。
+     */
+    @Query(
+        """
+        SELECT f.id AS id, f.name AS name, f.sort_order AS sortOrder,
+               COUNT(fa.album_id) AS albumCount,
+               f.create_time AS createTime, f.modify_time AS modifyTime
+        FROM t_jm_favorite f
+        LEFT JOIN t_jm_favorite_album fa ON fa.favorite_id = f.id
+        GROUP BY f.id
+        ORDER BY f.sort_order, f.id
+        """,
+    )
+    fun observeFavoritesWithCount(): Flow<List<FavoriteWithCount>>
+}
+
+/**
+ * 收藏夹 + 本子数量。`sortOrder` 是 SQL 里 `sort_order` 的别名
+ * （`@ColumnInfo` 不生效于查询投影，所以这里用显式的 `AS`）。
+ */
+data class FavoriteWithCount(
+    val id: Long,
+    val name: String,
+    val sortOrder: Int,
+    val albumCount: Int,
+    val createTime: String?,
+    val modifyTime: String?,
+)
+
+// ======================================================================
+// JM 最近浏览
+// ======================================================================
+
+/**
+ * 最近浏览。凡是点进过详情页的本子都进这张表，
+ * 再次进入只刷新 `viewed_time`（`upsert` + 显式带新时间）。
+ */
+@Dao
+interface JmRecentAlbumDao {
+
+    /**
+     * 写入/更新一条最近浏览。
+     *
+     * `REPLACE` 语义在这里是安全的：这张表**没有需要保留的本地字段**
+     * （不像 `t_jm_album` 有 `collected`），整行覆盖正是想要的行为。
+     */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(album: JmRecentAlbumEntity)
+
+    @Query("SELECT * FROM t_jm_recent_album WHERE id = :id")
+    suspend fun findById(id: Long): JmRecentAlbumEntity?
+
+    @Query("SELECT * FROM t_jm_recent_album WHERE id = :id")
+    fun observeById(id: Long): Flow<JmRecentAlbumEntity?>
+
+    /** 按浏览时间倒序（用户要求：最近浏览降序）。 */
+    @Query("SELECT * FROM t_jm_recent_album ORDER BY viewed_time DESC LIMIT :limit OFFSET :offset")
+    fun observeRecent(limit: Int, offset: Int = 0): Flow<List<JmRecentAlbumEntity>>
+
+    @Query("SELECT COUNT(*) FROM t_jm_recent_album")
+    fun observeCount(): Flow<Int>
+
+    /** 只更新浏览时间（进入详情页时调用），不动其它字段。 */
+    @Query("UPDATE t_jm_recent_album SET viewed_time = :viewedTime WHERE id = :id")
+    suspend fun touch(id: Long, viewedTime: Long)
+
+    /** 删除一条。 */
+    @Query("DELETE FROM t_jm_recent_album WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    @Query("DELETE FROM t_jm_recent_album")
+    suspend fun clear(): Int
 }
 
 // ======================================================================

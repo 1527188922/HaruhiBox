@@ -58,27 +58,37 @@ app/src/main/java/com/haruhi/haruhibox/
 | 发现页（在线搜索 + 历史 + 分页） | ✅ 代码 | `JmOnlineSearchScreen` |
 | 收藏页（增删改、默认夹标识） | ✅ 代码 | `JmFavoritesScreen` |
 | 漫画详情页（本地优先 + 在线刷新 + 章节状态） | ✅ 代码 | `JmAlbumDetailScreen` |
-| 漫画模式底部导航（书库/发现/收藏） | ✅ 代码 | `JmModeRoot` |
+| 漫画模式底部导航（书库/最近/发现/收藏） | ✅ 代码 | `JmModeRoot` |
 | **界面人工确认（截图/交互）** | ⏳ **待你确认** | 见下方"P2 待验证" |
+
+### 用户提出的 8 点改动（2026-10-08 完成）
+
+| # | 内容 | 落地方式 | 验证 |
+|---|---|---|---|
+| 1 | 收藏后收藏页数量不更新 | 收藏页改用 `observeFavoritesWithCount()` 的 **Flow**（之前是 N 次一次性查询），一条 LEFT JOIN + Flow 重发 | `favorite count flow emits after collecting` 等 3 个用例 |
+| 2 | 点详情不该等于加入书库 | 详情页只 `touchRecent`；入书库只发生在点「加入书库」 | `touching recent does not add to the library` 等 3 个用例 |
+| 3 | 新增最近浏览页（按浏览降序） | 新表 `t_jm_recent_album`（字段同书库 + `viewed_time`），底栏新增「最近」tab | `recent list is ordered by viewed time descending` |
+| 4 | 详情页先读本地再联网；刷新更新记录但不改浏览时间 | `localAlbumDetail()` 先查书库→最近浏览；`fetchAlbumDetail(saveToLibrary)`；`saveToRecent` 保留原 `viewedTime` | `refresh updates recent fields but keeps the viewed time` |
+| 5 | 搜索一次渲染太多封面 | 首屏只渲染 10 条，**最后一条进入可视区就自动追加**；本页全部展示完才出现「加载下一页」 | 逻辑在 `OnlineSearchUiState.remainingCount / allVisible`；观感待设备确认 |
+| 6 | 缺少修改收藏夹功能 | 详情页「收藏夹」底部面板：加入 / 移出 / 移动到 / 新建并加入 | 实现于 `moveToFavorite` + 收藏夹关联用例 |
+| 7 | 夹内显示收藏夹名称、去掉「收藏」筛选 | `JmLibraryScreen(title = …, showCollectedChip = false)` | 代码 |
+| 8 | 封面本地缓存 | `AppContainer.imageLoader` 把 Coil 磁盘缓存指向 `files/covers`，网络层复用 JM 的 OkHttp（UA/代理） | 代码；观感待设备确认 |
+
+> **第 8 点说明**：Coil 的磁盘缓存默认就是"先查本地、没有再联网"，
+> 不需要自己写文件缓存。但它同时带来一个待办：`LibraryDirs.clearCache()`
+> 目前只清 `tmp` / `export`，**没算上 `covers`**。封面缓存有 256MB 上限、
+> 由 Coil 按 LRU 自行淘汰，所以不紧急；做"清理缓存"设置项时要把它纳入（P6）。
 
 ### P2 待验证（需要你确认）
 
-代码已编译、可安装、启动无崩溃，**逻辑层有 115 个单元测试覆盖**，
-但**界面本身我无法在这台设备上自动验证**：
+代码已编译、可安装，**逻辑层有 130 个单元测试覆盖**，
+但**界面观感我无法在这台设备上自动验证**：设备处于休眠
+（`mWakefulness=Dozing`），`adb shell input keyevent POWER/WAKEUP` 都唤不醒；
+Compose UI 测试在熄屏时会**永久阻塞**（框架要等窗口获得焦点），
+所以那类测试没有留在仓库里，不留无法验证的"绿色"测试。
 
-1. 设备当前处于休眠（`mWakefulness=Dozing`），`adb shell input keyevent POWER/WAKEUP`
-   都唤不醒，截出来是全黑；
-2. 我写的 Compose UI 测试（`JmScreensTest`）在这种状态下会**永久阻塞**——
-   Compose 测试框架要等窗口获得焦点，熄屏时永远等不到。**已删除**，
-   不留无法验证的"绿色"测试。
-
-需要你做的（任选其一）：
-
-- 解锁手机后告诉我，我把 Compose UI 测试加回来并跑通；
-- 或者自己打开 App 看一眼四个页面是否符合预期。
-
-界面的展示逻辑（状态文案、体积格式、空态、章节状态判定）已经用
-`JmDisplayLogicTest` 单测覆盖，所以"文案对不对"是验证过的，未验证的是"排版与交互"。
+需要你做的：解锁手机后我用 `:app:runDeviceTests` 跑界面回归，
+或你自己打开 App 看这几个交互（重点是第 5 点的滚动追加、第 8 点的封面缓存）。
 
 ### P1 明细
 
@@ -207,14 +217,15 @@ cd D:\Project\HaruhiBox
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**115 个单元测试 + 4 个真机用例全绿**，lint 0 error，
-debug APK 可安装运行（P2 四个页面已接入），release APK 可构建。
+当前基线：**130 个单元测试 + 4 个真机用例全绿**，lint 0 error，
+debug / release APK 均可构建。
 
 ### 测试清单（单元测试）
 
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
 | `feature.jm.data.JmRepositoryTest` | 18 | 入库字段一致性 / 收藏保留 / 章节来源优先级 / 标签 OR / 删除语义 |
+| `feature.jm.data.JmRecentAndFavoriteTest` | 15 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / 收藏夹数量 Flow |
 | `core.jm.JmCryptoGoldenTest` | 14 | 签名 / AES-256 解密 / 块数，与参考实现逐值一致 |
 | `core.storage.FileNamingGoldenTest` | 14 | 文件名清洗 / 本子目录名 / 章节与图片排序 |
 | `core.database.JmDaoTest` | 13 | 书库分页排序筛选 / 标签 OR / 章节分组 / 收藏唯一索引 |

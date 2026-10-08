@@ -12,6 +12,7 @@ import com.haruhi.haruhibox.core.storage.LibraryDirs
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import okio.Path.Companion.toOkioPath
 import java.io.File
 
 /**
@@ -122,9 +123,44 @@ class AppContainer(private val appContext: Context) {
             albumDao = database.jmAlbumDao(),
             chapterDao = database.jmChapterDao(),
             favoriteDao = database.jmFavoriteDao(),
+            recentDao = database.jmRecentAlbumDao(),
             searchHistoryDao = database.jmSearchHistoryDao(),
             dirs = libraryDirs,
         )
+    }
+
+    /**
+     * 封面图加载器。
+     *
+     * **磁盘缓存显式指向 [LibraryDirs.covers]（`files/covers`）**：
+     * "加载过的封面优先读本地、没有才请求网络"就是 Coil 磁盘缓存的默认行为，
+     * 不需要自己写一套文件缓存。缓存文件可被设置里的"清理缓存"整体清空。
+     *
+     * 网络层复用 JM 的 OkHttp（带正确的 UA 与代理设置）——
+     * JM 的封面域名对 UA 有校验，用 Coil 默认的 OkHttp 会被拒。
+     */
+    val imageLoader: coil3.ImageLoader by lazy {
+        coil3.ImageLoader.Builder(appContext)
+            .components {
+                add(
+                    coil3.network.okhttp.OkHttpNetworkFetcherFactory(
+                        callFactory = { jmHttpClient },
+                    ),
+                )
+            }
+            .memoryCache {
+                coil3.memory.MemoryCache.Builder()
+                    .maxSizePercent(appContext, MEMORY_CACHE_PERCENT)
+                    .build()
+            }
+            .diskCache {
+                coil3.disk.DiskCache.Builder()
+                    // Coil 3 的 DiskCache 用 okio 的 Path，不是 java.io.File
+                    .directory(libraryDirs.covers.toOkioPath())
+                    .maxSizeBytes(DISK_CACHE_BYTES)
+                    .build()
+            }
+            .build()
     }
 
     // ---------------- 网络 ----------------
@@ -199,5 +235,11 @@ class AppContainer(private val appContext: Context) {
          * 本来就隔离，所以这里两种构建用同一个名字即可。
          */
         const val LIBRARY_DIR_NAME = "library"
+
+        /** 封面磁盘缓存上限：256MB 足够放下几万张缩略封面。 */
+        const val DISK_CACHE_BYTES = 256L * 1024 * 1024
+
+        /** 封面内存缓存上限（占可用内存比例）。 */
+        const val MEMORY_CACHE_PERCENT = 0.15
     }
 }

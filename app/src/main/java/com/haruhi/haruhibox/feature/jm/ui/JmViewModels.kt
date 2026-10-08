@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
+import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.core.network.NetworkError
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -252,9 +254,31 @@ data class OnlineSearchUiState(
     val searching: Boolean = false,
     val loadingMore: Boolean = false,
     val error: String? = null,
+    /** 一次性提示（例如"已加入书库"）。 */
+    val message: String? = null,
     /** 历史未开启时提示"搜索历史已关闭"。 */
     val historyEnabled: Boolean = true,
-)
+    /**
+     * **本次结果在 UI 上已展示的条数**。
+     *
+     * 用户反馈第 5 点：接口一页返回 80 条，一次性全部渲染会同时发起 80 个封面请求。
+     * 所以首屏只渲染 [INITIAL_VISIBLE_COUNT] 条，滚动到底部时追加一屏；
+     * 本页 80 条全部展示完之后，才显示"加载下一页"按钮。
+     */
+    val visibleCount: Int = INITIAL_VISIBLE_COUNT,
+) {
+    /** 本次结果里还剩多少条没展示。 */
+    val remainingCount: Int
+        get() = ((result?.items?.size ?: 0) - visibleCount).coerceAtLeast(0)
+
+    /** 本页是否已经全部展示完（决定"加载下一页"按钮是否出现）。 */
+    val allVisible: Boolean get() = remainingCount == 0
+
+    companion object {
+        /** 首屏渲染条数 / 每次追加条数。 */
+        const val INITIAL_VISIBLE_COUNT = 10
+    }
+}
 
 class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
 
@@ -287,7 +311,15 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
         }
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            _state.update { it.copy(searching = true, error = null, result = null) }
+            _state.update {
+                it.copy(
+                    searching = true,
+                    error = null,
+                    result = null,
+                    message = null,
+                    visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
+                )
+            }
             runCatching { repo.searchOnline(keyword, _state.value.sort, page = 1) }
                 .onSuccess { result -> _state.update { it.copy(result = result, searching = false) } }
                 .onFailure { e ->
@@ -298,10 +330,25 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
     }
 
     /**
-     * 加载下一页。
+     * 追加展示一屏（**不发网络请求**）。
      *
-     * 计划 §9 第 4 条要求"分页在 UI 表现为连续加载及失败重试"，
-     * 所以这里把新一页追加到已有结果上，失败只设置 error 不清空已有数据。
+     * 与 [loadMore] 的区别：这个是"把本页已拿到的结果多渲染一些"，
+     * 用户反馈第 5 点要求的"下滑继续追加显示"。
+     */
+    fun showMoreItems() {
+        _state.update {
+            if (it.remainingCount <= 0) {
+                it
+            } else {
+                it.copy(visibleCount = it.visibleCount + OnlineSearchUiState.INITIAL_VISIBLE_COUNT)
+            }
+        }
+    }
+
+    /**
+     * 加载下一页（**发网络请求**）。
+     *
+     * UI 上只在本页全部展示完之后才出现按钮（用户反馈第 5 点）。
      */
     fun loadMore() {
         val current = _state.value.result ?: return
@@ -332,7 +379,15 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
     fun openHistory(history: JmSearchHistoryEntity) {
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            _state.update { it.copy(searching = true, error = null, keyword = history.keyword) }
+            _state.update {
+                it.copy(
+                    searching = true,
+                    error = null,
+                    keyword = history.keyword,
+                    // 换了一批结果，展示条数从头开始
+                    visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
+                )
+            }
             val result = repo.searchHistorySnapshot(history.id)
             _state.update {
                 it.copy(
@@ -353,14 +408,19 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
         viewModelScope.launch { runCatching { repo.clearSearchHistory() } }
     }
 
-    /** 入库（不下载）。返回是否成功，供 UI 提示。 */
+    /** 加入书库（不下载）。已入库时是幂等操作，UI 只提示不报错。 */
     fun addToLibrary(item: OnlineSearchItem) {
         viewModelScope.launch {
-            runCatching { repo.fetchAndSaveAlbum(item.id) }
-                .onSuccess { markLocal(item.id) }
+            runCatching { repo.addToLibrary(item.id) }
+                .onSuccess {
+                    markLocal(item.id)
+                    _state.update { it.copy(message = "已加入书库") }
+                }
                 .onFailure { e -> _state.update { it.copy(error = e.toUserMessage()) } }
         }
     }
+
+    fun consumeMessage() = _state.update { it.copy(message = null) }
 
     private fun markLocal(albumId: Long) {
         _state.update { s ->
@@ -394,35 +454,41 @@ data class FavoritesUiState(
     )
 }
 
+/**
+ * 收藏夹列表。
+ *
+ * 数量来自 [JmRepository.observeFavoritesWithCount] 的 **Flow**：
+ * 之前用 `listFavoritesWithCount()` 一次性取值，收藏之后回到收藏页数量不更新
+ * （用户反馈第 1 点）。改成 Flow 后，关联表任何变动都会自动重发。
+ */
 class JmFavoritesViewModel(private val repo: JmRepository) : ViewModel() {
 
     private val _state = MutableStateFlow(FavoritesUiState())
     val state: StateFlow<FavoritesUiState> = _state.asStateFlow()
 
     init {
-        reload()
-    }
-
-    fun reload() {
         viewModelScope.launch {
-            runCatching {
-                repo.ensureDefaultFavorite()
-                repo.listFavoritesWithCount()
-            }.onSuccess { list ->
-                _state.value = FavoritesUiState(
-                    favorites = list.map {
-                        FavoritesUiState.FavoriteRow(
-                            id = it.id,
-                            name = it.name,
-                            albumCount = it.albumCount,
-                            isDefault = it.isDefault,
+            // 默认收藏夹必须存在（新建/删除/改名都依赖它做兜底）
+            runCatching { repo.ensureDefaultFavorite() }
+                .onFailure { e -> _state.update { it.copy(loading = false, error = e.toUserMessage()) } }
+
+            repo.observeFavoritesWithCount()
+                .catch { e -> Timber.tag("jm").w(e, "观察收藏夹失败") }
+                .collect { list ->
+                    _state.update { current ->
+                        current.copy(
+                            favorites = list.map {
+                                FavoritesUiState.FavoriteRow(
+                                    id = it.id,
+                                    name = it.name,
+                                    albumCount = it.albumCount,
+                                    isDefault = it.isDefault,
+                                )
+                            },
+                            loading = false,
                         )
-                    },
-                    loading = false,
-                )
-            }.onFailure { e ->
-                _state.update { it.copy(loading = false, error = e.toUserMessage()) }
-            }
+                    }
+                }
         }
     }
 
@@ -432,7 +498,6 @@ class JmFavoritesViewModel(private val repo: JmRepository) : ViewModel() {
             _state.update {
                 it.copy(message = if (created == null) "收藏夹名称已存在或为空" else "已创建「${created.name}」")
             }
-            reload()
         }
     }
 
@@ -441,7 +506,6 @@ class JmFavoritesViewModel(private val repo: JmRepository) : ViewModel() {
             val ok = runCatching { repo.renameFavorite(id, newName) }.getOrDefault(false)
             // 默认收藏夹不允许改名（参考实现语义）
             _state.update { it.copy(message = if (ok) "已重命名" else "默认收藏夹不支持重命名") }
-            reload()
         }
     }
 
@@ -451,11 +515,63 @@ class JmFavoritesViewModel(private val repo: JmRepository) : ViewModel() {
             _state.update {
                 it.copy(message = if (ok) "已删除收藏夹（不影响书库记录与本地文件）" else "默认收藏夹不支持删除")
             }
-            reload()
         }
     }
 
     fun consumeMessage() = _state.update { it.copy(message = null) }
+}
+
+// ======================================================================
+// 最近浏览
+// ======================================================================
+
+data class RecentUiState(
+    val albums: List<AlbumCard> = emptyList(),
+    val loading: Boolean = true,
+    val error: String? = null,
+) {
+    val isEmpty: Boolean get() = !loading && albums.isEmpty()
+}
+
+/**
+ * 最近浏览：按浏览时间倒序（用户要求）。
+ *
+ * 只展示、不统计章节：这张表的用途是"快速回到刚看过的本子"，
+ * 每次进来都为 60 条记录查一次章节会明显拖慢页面。
+ */
+class JmRecentViewModel(private val repo: JmRepository) : ViewModel() {
+
+    val state: StateFlow<RecentUiState> = repo.observeRecentAlbums()
+        .map { rows ->
+            RecentUiState(
+                albums = rows.map { row ->
+                    AlbumCard(
+                        album = row.toAlbumEntityForDisplay(),
+                        totalChapters = 0,
+                        downloadedChapters = 0,
+                        localSizeBytes = 0L,
+                    )
+                },
+                loading = false,
+            )
+        }
+        .catch { e ->
+            Timber.tag("jm").w(e, "最近浏览查询失败")
+            emit(RecentUiState(loading = false, error = e.toUserMessage()))
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = RecentUiState(),
+        )
+
+    fun remove(albumId: Long) {
+        viewModelScope.launch { runCatching { repo.removeRecent(albumId) } }
+    }
+
+    fun clearAll() {
+        viewModelScope.launch { runCatching { repo.clearRecent() } }
+    }
 }
 
 // ======================================================================
@@ -491,6 +607,11 @@ data class AlbumDetailUiState(
     val favoriteIds: List<Long> = emptyList(),
     val loading: Boolean = true,
     val refreshing: Boolean = false,
+    /**
+     * 数据来源：true = 已在书库；false = 只在最近浏览里（或刚从网络拿到）。
+     * 决定详情页显示「加入书库」还是「已在书库」。
+     */
+    val inLibrary: Boolean = false,
     /** 离线/刷新失败时的提示；**不清空本地数据**（计划 §9 第 7 条）。 */
     val refreshError: String? = null,
     val message: String? = null,
@@ -500,6 +621,25 @@ data class AlbumDetailUiState(
     val allFavorites: List<JmFavoriteEntity> = emptyList(),
 )
 
+/**
+ * 漫画详情。
+ *
+ * ## 数据读取顺序（用户要求第 4 点）
+ *
+ * 1. **先读本地**：书库表 → 最近浏览表；任一命中就直接渲染，不发网络请求；
+ * 2. 都没有才请求 `/album`，成功后写入最近浏览表（[JmRepository.fetchAlbumDetail]）；
+ * 3. 「刷新」按钮：请求成功后**更新书库记录（若已入库）与最近浏览记录，但不改浏览时间**。
+ *
+ * ## 浏览时间（用户要求第 3、4 点）
+ *
+ * 进入详情页时调 [JmRepository.touchRecent]，**无论从搜索、书库还是收藏夹进来**都走这里，
+ * 所以三种入口的浏览时间都会更新；刷新不会再动它。
+ *
+ * ## 点详情 ≠ 加入书库（用户要求第 2 点）
+ *
+ * 构造时只 [JmRepository.touchRecent]，不写 `t_jm_album`。
+ * 入书库只发生在用户点「加入书库」时。
+ */
 class JmAlbumDetailViewModel(
     private val repo: JmRepository,
     private val albumId: Long,
@@ -509,52 +649,90 @@ class JmAlbumDetailViewModel(
     val state: StateFlow<AlbumDetailUiState> = _state.asStateFlow()
 
     init {
+        // 1) 记一次浏览（三种入口共用这一条路径）
         viewModelScope.launch {
-            repo.observeAlbum(albumId)
-                .catch { e -> Timber.tag("jm").w(e, "观察本子失败") }
-                .collect { album ->
-                    _state.update { it.copy(album = album) }
-                    if (album != null) refreshLocalStats()
-                }
+            runCatching { repo.touchRecent(albumId) }
+                .onFailure { Timber.tag("jm").w(it, "记录最近浏览失败") }
         }
+
+        // 2) 本地优先：有本地数据就先渲染
+        viewModelScope.launch {
+            val local = runCatching { repo.localAlbumDetail(albumId) }.getOrNull()
+            if (local == null) {
+                // 本地没有 -> 必须联网
+                loadFromNetwork(initial = true)
+            } else {
+                _state.update {
+                    it.copy(album = local.album, inLibrary = local.fromLibrary, loading = false)
+                }
+                refreshLocalStats()
+            }
+        }
+
         viewModelScope.launch {
             repo.observeFavorites().collect { favorites ->
                 _state.update { it.copy(allFavorites = favorites) }
             }
         }
-        refresh(initial = true)
     }
 
     /**
-     * 在线刷新详情。
+     * 刷新详情。
      *
-     * **本地优先**：先展示已有的本地章节，联网只作为增强；
-     * 失败时把原因放进 [AlbumDetailUiState.refreshError]，不丢本地数据。
+     * 与"进入页面"的区别：这里**不改浏览时间**（[JmRepository.saveToRecent] 保留原值）。
      */
-    fun refresh(initial: Boolean = false) {
+    fun refresh() {
+        viewModelScope.launch { loadFromNetwork(initial = false) }
+    }
+
+    private suspend fun loadFromNetwork(initial: Boolean) {
+        val inLibrary = _state.value.inLibrary || runCatching { repo.findAlbum(albumId) }.getOrNull() != null
+        _state.update {
+            it.copy(refreshing = true, refreshError = null, loading = initial && it.album == null)
+        }
+        runCatching {
+            // 已在书库就一并更新书库记录；只算最近浏览的话不写书库
+            repo.fetchAlbumDetail(albumId, saveToLibrary = inLibrary)
+        }
+            .onSuccess { dto ->
+                val album = if (inLibrary) {
+                    repo.findAlbum(albumId)
+                } else {
+                    // 未入库：用最近浏览里的副本渲染（字段一致）
+                    repo.findRecent(albumId)?.toAlbumEntityForDisplay()
+                }
+                _state.update {
+                    it.copy(refreshing = false, loading = false, album = album ?: it.album, inLibrary = inLibrary)
+                }
+                refreshLocalStats()
+            }
+            .onFailure { e ->
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                _state.update {
+                    it.copy(
+                        refreshing = false,
+                        loading = false,
+                        // 离线时不阻断本地阅读，只提示（计划 §9 第 7 条）
+                        refreshError = e.toUserMessage(),
+                    )
+                }
+            }
+    }
+
+    /** 加入书库（用户要求第 2 点：只有点这里才真正入书库）。 */
+    fun addToLibrary() {
         viewModelScope.launch {
-            _state.update { it.copy(refreshing = true, refreshError = null, loading = initial && it.album == null) }
-            runCatching { repo.fetchAndSaveAlbum(albumId) }
+            runCatching { repo.addToLibrary(albumId) }
                 .onSuccess { album ->
-                    _state.update { it.copy(refreshing = false, loading = false, album = album) }
+                    _state.update { it.copy(album = album, inLibrary = true, message = "已加入书库") }
                     refreshLocalStats()
                 }
-                .onFailure { e ->
-                    if (e is kotlinx.coroutines.CancellationException) throw e
-                    _state.update {
-                        it.copy(
-                            refreshing = false,
-                            loading = false,
-                            // 离线时不阻断本地阅读，只提示
-                            refreshError = e.toUserMessage(),
-                        )
-                    }
-                }
+                .onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
         }
     }
 
     private suspend fun refreshLocalStats() {
-        val album = repo.findAlbum(albumId) ?: return
+        val album = _state.value.album ?: return
         val chapters = repo.chaptersOf(album)
         val rows = chapters.sortedBy { it.sort?.toIntOrNull() ?: Int.MAX_VALUE }.map { chapter ->
             val images = repo.imagesOf(album.id, chapter.chapterId)
@@ -589,14 +767,51 @@ class JmAlbumDetailViewModel(
 
     fun toggleDescription() = _state.update { it.copy(descriptionExpanded = !it.descriptionExpanded) }
 
+    /** 收藏/取消收藏。未入库时会先入库（收藏隐含入库，参考实现的 `collectAlbums` 语义）。 */
     fun toggleCollected() {
         viewModelScope.launch {
             val album = _state.value.album ?: return@launch
             val nowCollected = album.collected == true
             runCatching {
-                if (nowCollected) repo.uncollect(albumId) else repo.addToFavorite(albumId)
+                if (nowCollected) {
+                    repo.uncollect(albumId)
+                } else {
+                    if (!_state.value.inLibrary) repo.addToLibrary(albumId)
+                    repo.addToFavorite(albumId)
+                }
             }.onSuccess {
-                _state.update { it.copy(message = if (nowCollected) "已取消收藏" else "已加入收藏") }
+                val refreshed = repo.findAlbum(albumId)
+                _state.update {
+                    it.copy(
+                        album = refreshed ?: it.album,
+                        inLibrary = refreshed != null,
+                        message = if (nowCollected) "已取消收藏" else "已加入收藏",
+                    )
+                }
+                refreshLocalStats()
+            }.onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
+        }
+    }
+
+    /** 移动到指定收藏夹（用户要求第 6 点：支持修改收藏夹）。 */
+    fun moveToFavorite(favoriteId: Long) {
+        viewModelScope.launch {
+            runCatching {
+                if (!_state.value.inLibrary) repo.addToLibrary(albumId)
+                // 先移出其它夹再入目标夹，语义是"移动到"而不是"同时属于多个"
+                repo.favoriteIdsOf(albumId).forEach { old ->
+                    if (old != favoriteId) repo.removeFromFavorite(albumId, old)
+                }
+                repo.addToFavorite(albumId, favoriteId)
+            }.onSuccess {
+                val name = _state.value.allFavorites.firstOrNull { it.id == favoriteId }?.name
+                _state.update {
+                    it.copy(
+                        album = repo.findAlbum(albumId) ?: it.album,
+                        inLibrary = true,
+                        message = if (name != null) "已移动到「$name」" else "已移动收藏夹",
+                    )
+                }
                 refreshLocalStats()
             }.onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
         }
@@ -604,16 +819,33 @@ class JmAlbumDetailViewModel(
 
     fun addToFavorite(favoriteId: Long) {
         viewModelScope.launch {
-            runCatching { repo.addToFavorite(albumId, favoriteId) }
-                .onSuccess { refreshLocalStats() }
-                .onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
+            runCatching {
+                if (!_state.value.inLibrary) repo.addToLibrary(albumId)
+                repo.addToFavorite(albumId, favoriteId)
+            }.onSuccess {
+                val name = _state.value.allFavorites.firstOrNull { it.id == favoriteId }?.name
+                _state.update {
+                    it.copy(
+                        album = repo.findAlbum(albumId) ?: it.album,
+                        inLibrary = true,
+                        message = if (name != null) "已加入「$name」" else "已加入收藏夹",
+                    )
+                }
+                refreshLocalStats()
+            }.onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
         }
     }
 
     fun removeFromFavorite(favoriteId: Long) {
         viewModelScope.launch {
             runCatching { repo.removeFromFavorite(albumId, favoriteId) }
-                .onSuccess { refreshLocalStats() }
+                .onSuccess {
+                    val name = _state.value.allFavorites.firstOrNull { it.id == favoriteId }?.name
+                    _state.update {
+                        it.copy(message = if (name != null) "已移出「$name」" else "已移出收藏夹")
+                    }
+                    refreshLocalStats()
+                }
                 .onFailure { e -> _state.update { it.copy(message = e.toUserMessage()) } }
         }
     }
@@ -625,7 +857,11 @@ class JmAlbumDetailViewModel(
                 _state.update { it.copy(message = "收藏夹名称已存在或为空") }
                 return@launch
             }
+            if (!_state.value.inLibrary) runCatching { repo.addToLibrary(albumId) }
             repo.addToFavorite(albumId, created.id)
+            _state.update {
+                it.copy(album = repo.findAlbum(albumId) ?: it.album, inLibrary = true)
+            }
             refreshLocalStats()
         }
     }
@@ -655,13 +891,48 @@ class JmAlbumDetailViewModel(
         }
     }
 
+    /** 删除书库记录。**不动最近浏览**，也不动本地文件。 */
     fun deleteAlbumRecord() {
         viewModelScope.launch {
             runCatching { repo.deleteAlbums(listOf(albumId)) }
-            _state.update { it.copy(message = "已删除书库记录") }
+            _state.update { it.copy(inLibrary = false, message = "已从书库移除（仍保留在最近浏览）") }
         }
     }
 }
+
+/**
+ * 最近浏览记录 → 展示用的书库实体。
+ *
+ * 两张表字段一致，所以详情页与列表可以复用同一套渲染逻辑；
+ * `collected` 在最近浏览里没有语义，留 null。
+ */
+internal fun JmRecentAlbumEntity.toAlbumEntityForDisplay() = JmAlbumEntity(
+    id = id,
+    name = name,
+    albumFolderName = albumFolderName,
+    images = images,
+    addTime = addTime,
+    description = description,
+    totalViews = totalViews,
+    likes = likes,
+    series = series,
+    seriesId = seriesId,
+    commentTotal = commentTotal,
+    author = author,
+    tags = tags,
+    works = works,
+    actors = actors,
+    relatedList = relatedList,
+    liked = liked,
+    isFavorite = isFavorite,
+    collected = null,
+    isAids = isAids,
+    price = price,
+    purchased = purchased,
+    raw = raw,
+    createTime = createTime,
+    modifyTime = modifyTime,
+)
 
 /** 把异常翻译成可理解文案（计划 §9.1「失败重试不清空已有数据」+ 错误要能看懂）。 */
 fun Throwable.toUserMessage(): String = when (this) {

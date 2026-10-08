@@ -15,18 +15,20 @@ import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
+import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
 
 /**
  * 应用数据库。
  *
- * 表清单（业务表 5 张 + Android 侧新增 4 张）：
+ * 表清单（业务表 5 张 + Android 侧新增 5 张）：
  * - `t_jm_album` / `t_jm_chapter_image` / `t_jm_favorite` / `t_jm_favorite_album`
  * - `t_bilibili_video`
  * - `t_download_task` / `t_download_task_chapter`（持久化任务，§4.5）
  * - `t_playback_position`（阅读/播放位置，§4.5 末条）
  * - `t_jm_search_history`（在线搜索历史，§2.4 第 1 条）
+ * - `t_jm_recent_album`（最近浏览：点进过详情页的本子，按浏览时间倒序）
  *
  * 迁移策略：**唯一权威是 `@Database(version)` + 手写 `Migration`**，
  * 不使用 `fallbackToDestructiveMigration`——用户的下载记录与漫画库是真实资产，
@@ -38,6 +40,7 @@ import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
         JmChapterImageEntity::class,
         JmFavoriteEntity::class,
         JmFavoriteAlbumEntity::class,
+        JmRecentAlbumEntity::class,
         BilibiliVideoEntity::class,
         DownloadTaskEntity::class,
         DownloadTaskChapterEntity::class,
@@ -53,6 +56,7 @@ abstract class HaruhiBoxDatabase : RoomDatabase() {
     abstract fun jmAlbumDao(): JmAlbumDao
     abstract fun jmChapterDao(): JmChapterImageDao
     abstract fun jmFavoriteDao(): JmFavoriteDao
+    abstract fun jmRecentAlbumDao(): JmRecentAlbumDao
     abstract fun biliVideoDao(): BilibiliVideoDao
     abstract fun downloadTaskDao(): DownloadTaskDao
     abstract fun playbackPositionDao(): PlaybackPositionDao

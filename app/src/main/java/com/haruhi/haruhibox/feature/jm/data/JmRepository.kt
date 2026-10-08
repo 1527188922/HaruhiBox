@@ -3,11 +3,13 @@ package com.haruhi.haruhibox.feature.jm.data
 import com.haruhi.haruhibox.core.database.JmAlbumDao
 import com.haruhi.haruhibox.core.database.JmChapterImageDao
 import com.haruhi.haruhibox.core.database.JmFavoriteDao
+import com.haruhi.haruhibox.core.database.JmRecentAlbumDao
 import com.haruhi.haruhibox.core.database.JmSearchHistoryDao
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
+import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.jm.JmSearchSort
@@ -20,6 +22,7 @@ import com.haruhi.haruhibox.feature.jm.api.JmJson
 import com.haruhi.haruhibox.feature.jm.api.JmSearchItemDto
 import com.haruhi.haruhibox.feature.jm.api.JmSeriesDto
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import timber.log.Timber
@@ -56,6 +59,7 @@ class JmRepository(
     private val albumDao: JmAlbumDao,
     private val chapterDao: JmChapterImageDao,
     private val favoriteDao: JmFavoriteDao,
+    private val recentDao: JmRecentAlbumDao,
     private val searchHistoryDao: JmSearchHistoryDao,
     private val dirs: LibraryDirs,
     private val searchHistoryLimit: () -> Int = { JmDefaults.SEARCH_HISTORY_LIMIT },
@@ -165,54 +169,99 @@ class JmRepository(
     }
 
     // ------------------------------------------------------------------
-    // 本子入库与详情
+    // 本子入库、最近浏览与详情
     // ------------------------------------------------------------------
 
     /**
-     * 拉取本子详情并入库，返回本地实体。
+     * 点进详情页时调用：**只更新最近浏览的浏览时间**，不写书库。
      *
-     * 入库时会计算并写入 `albumFolderName`（`<清洗后标题>_JM<aid>`），
-     * 这是落盘路径的唯一来源。
+     * 用户明确要求「点详情不等于加入书库」，所以入书库只发生在
+     * [addToLibrary] / 搜索结果里的「加入书库」按钮。
+     *
+     * 三种进入路径（搜索、书库、收藏夹）都会走这里，所以浏览时间一致更新。
+     * 记录还不存在时先建一条骨架，等详情数据回来再补全（[saveToRecent]）。
      */
-    suspend fun fetchAndSaveAlbum(aid: Long): JmAlbumEntity {
+    suspend fun touchRecent(aid: Long) {
+        val now = System.currentTimeMillis()
+        val existing = recentDao.findById(aid)
+        if (existing == null) {
+            // 骨架行：只有 id 与浏览时间，字段随后由 saveToRecent 补齐
+            recentDao.upsert(
+                JmRecentAlbumEntity(
+                    id = aid,
+                    albumFolderName = FileNaming.albumFolderName(null, aid.toString(), albumNameMaxBytes()),
+                    createTime = nowText(),
+                    modifyTime = nowText(),
+                    viewedTime = now,
+                ),
+            )
+        } else {
+            recentDao.touch(aid, now)
+        }
+    }
+
+    /** 把在线详情写进最近浏览表，**保留原有的浏览时间**（刷新按钮用）。 */
+    suspend fun saveToRecent(dto: JmAlbumDto): JmRecentAlbumEntity {
+        val existing = recentDao.findById(dto.id)
+        val now = System.currentTimeMillis()
+        val entity = toRecentEntity(dto).copy(
+            viewedTime = existing?.viewedTime ?: now,
+            createTime = existing?.createTime ?: nowText(),
+            modifyTime = nowText(),
+        )
+        recentDao.upsert(entity)
+        return entity
+    }
+
+    /** 最近浏览列表（按浏览时间倒序）。 */
+    fun observeRecentAlbums(limit: Int = 60, offset: Int = 0): Flow<List<JmRecentAlbumEntity>> =
+        recentDao.observeRecent(limit, offset)
+
+    fun observeRecentCount(): Flow<Int> = recentDao.observeCount()
+
+    suspend fun findRecent(aid: Long): JmRecentAlbumEntity? = recentDao.findById(aid)
+
+    suspend fun removeRecent(aid: Long) = recentDao.delete(aid)
+
+    suspend fun clearRecent(): Int = recentDao.clear()
+
+    /**
+     * 详情页数据来源：**先本地（书库 → 最近浏览），都没有才请求网络**。
+     *
+     * `null` 表示两处都没有，调用方需要走一次网络。
+     */
+    suspend fun localAlbumDetail(aid: Long): LocalAlbumDetail? {
+        albumDao.findById(aid)?.let { return LocalAlbumDetail(it, fromLibrary = true) }
+        recentDao.findById(aid)?.let { return LocalAlbumDetail(it.toAlbumEntity(), fromLibrary = false) }
+        return null
+    }
+
+    /**
+     * 拉取本子详情。
+     *
+     * @param saveToLibrary 是否写入书库。点详情页时为 false（只进最近浏览）；
+     *        用户点「加入书库」或搜索结果点「加入书库」时为 true。
+     *
+     * 无论哪种情况都会写最近浏览表（用户要求"同时将请求结果存入最近浏览表"）。
+     */
+    suspend fun fetchAlbumDetail(aid: Long, saveToLibrary: Boolean): JmAlbumDto {
         val dto = api.album(aid)
+        saveToRecent(dto)
+        if (saveToLibrary) saveAlbum(dto)
+        return dto
+    }
+
+    /** 把本子加入书库（书库页的「加入书库」按钮 / 搜索结果按钮）。 */
+    suspend fun addToLibrary(aid: Long): JmAlbumEntity {
+        val dto = api.album(aid)
+        saveToRecent(dto)
         return saveAlbum(dto)
     }
 
     /** 把接口返回的本子写库（不请求网络）。 */
     suspend fun saveAlbum(dto: JmAlbumDto): JmAlbumEntity {
-        val aid = dto.id.toString()
-        val folderName = FileNaming.albumFolderName(dto.name, aid, albumNameMaxBytes())
         val now = nowText()
-        val incoming = JmAlbumEntity(
-            id = dto.id,
-            name = dto.name,
-            albumFolderName = folderName,
-            images = encodeStringList(dto.images),
-            addTime = dto.addTime,
-            description = dto.description,
-            totalViews = dto.totalViews,
-            likes = dto.likes,
-            // series 原样存 JSON 字符串：详情页的章节列表以它为准（见类注释第 2 条）
-            series = dto.series?.let { JmJson.encodeToString(ListSerializer(JmSeriesDto.serializer()), it) },
-            seriesId = dto.seriesId,
-            commentTotal = dto.commentTotal,
-            author = encodeStringList(dto.author),
-            tags = encodeStringList(dto.tags),
-            works = encodeStringList(dto.works),
-            actors = encodeStringList(dto.actors),
-            relatedList = dto.relatedList?.let {
-                JmJson.encodeToString(
-                    ListSerializer(com.haruhi.haruhibox.feature.jm.api.JmRelatedDto.serializer()),
-                    it,
-                )
-            },
-            liked = dto.liked,
-            isFavorite = dto.isFavorite,
-            isAids = dto.isAids,
-            price = dto.price,
-            purchased = dto.purchased,
-        )
+        val incoming = toAlbumEntity(dto)
 
         val existing = albumDao.findById(dto.id)
         if (existing == null) {
@@ -229,6 +278,67 @@ class JmRepository(
         }
         return albumDao.findById(dto.id) ?: error("本子入库失败：${dto.id}")
     }
+
+    /** 接口 DTO → 书库实体。 */
+    private fun toAlbumEntity(dto: JmAlbumDto) = JmAlbumEntity(
+        id = dto.id,
+        name = dto.name,
+        albumFolderName = FileNaming.albumFolderName(dto.name, dto.id.toString(), albumNameMaxBytes()),
+        images = encodeStringList(dto.images),
+        addTime = dto.addTime,
+        description = dto.description,
+        totalViews = dto.totalViews,
+        likes = dto.likes,
+        // series 原样存 JSON 字符串：详情页的章节列表以它为准（见类注释第 2 条）
+        series = dto.series?.let { JmJson.encodeToString(ListSerializer(JmSeriesDto.serializer()), it) },
+        seriesId = dto.seriesId,
+        commentTotal = dto.commentTotal,
+        author = encodeStringList(dto.author),
+        tags = encodeStringList(dto.tags),
+        works = encodeStringList(dto.works),
+        actors = encodeStringList(dto.actors),
+        relatedList = dto.relatedList?.let {
+            JmJson.encodeToString(
+                ListSerializer(com.haruhi.haruhibox.feature.jm.api.JmRelatedDto.serializer()),
+                it,
+            )
+        },
+        liked = dto.liked,
+        isFavorite = dto.isFavorite,
+        isAids = dto.isAids,
+        price = dto.price,
+        purchased = dto.purchased,
+    )
+
+    /** 接口 DTO → 最近浏览实体（字段与书库实体一致，只是多一个浏览时间）。 */
+    private fun toRecentEntity(dto: JmAlbumDto) = JmRecentAlbumEntity(
+        id = dto.id,
+        name = dto.name,
+        albumFolderName = FileNaming.albumFolderName(dto.name, dto.id.toString(), albumNameMaxBytes()),
+        images = encodeStringList(dto.images),
+        addTime = dto.addTime,
+        description = dto.description,
+        totalViews = dto.totalViews,
+        likes = dto.likes,
+        series = dto.series?.let { JmJson.encodeToString(ListSerializer(JmSeriesDto.serializer()), it) },
+        seriesId = dto.seriesId,
+        commentTotal = dto.commentTotal,
+        author = encodeStringList(dto.author),
+        tags = encodeStringList(dto.tags),
+        works = encodeStringList(dto.works),
+        actors = encodeStringList(dto.actors),
+        relatedList = dto.relatedList?.let {
+            JmJson.encodeToString(
+                ListSerializer(com.haruhi.haruhibox.feature.jm.api.JmRelatedDto.serializer()),
+                it,
+            )
+        },
+        liked = dto.liked,
+        isFavorite = dto.isFavorite,
+        isAids = dto.isAids,
+        price = dto.price,
+        purchased = dto.purchased,
+    )
 
     /** 拉取章节详情（图片清单）并入库。返回入库后的图片数。 */
     suspend fun fetchAndSaveChapter(albumId: Long, chapterId: Long): Int {
@@ -378,16 +488,21 @@ class JmRepository(
 
     suspend fun listFavorites(): List<JmFavoriteEntity> = favoriteDao.all()
 
-    /** 列出收藏夹并附带本子数量（参考实现 `listFavorites` 的 `albumCount`）。 */
-    suspend fun listFavoritesWithCount(): List<FavoriteSummary> =
-        favoriteDao.all().map { favorite ->
-            FavoriteSummary(
-                id = favorite.id,
-                name = favorite.name,
-                sortOrder = favorite.sortOrder,
-                albumCount = favoriteDao.albumCount(favorite.id),
-                isDefault = favorite.name == DEFAULT_FAVORITE_NAME,
-            )
+    /**
+     * 收藏夹列表 + 本子数量。**返回 Flow**：关联表任何变动都会重新发射，
+     * 收藏之后收藏页的数量会立刻更新（用户反馈的第 1 点）。
+     */
+    fun observeFavoritesWithCount(): Flow<List<FavoriteSummary>> =
+        favoriteDao.observeFavoritesWithCount().map { rows ->
+            rows.map { row ->
+                FavoriteSummary(
+                    id = row.id,
+                    name = row.name,
+                    sortOrder = row.sortOrder,
+                    albumCount = row.albumCount,
+                    isDefault = row.name == DEFAULT_FAVORITE_NAME,
+                )
+            }
         }
 
     /** 确保默认收藏夹存在（首次使用时创建，不允许删除/重命名）。 */
@@ -542,6 +657,36 @@ class JmRepository(
     fun localSize(albumFolderName: String?): Long =
         albumFolderName?.takeIf { it.isNotBlank() }?.let { dirs.sizeOf(dirs.albumDir(it)) } ?: 0L
 
+    /** 列表用：把最近浏览记录当作书库实体来渲染（字段一致，所以直接映射）。 */
+    private fun JmRecentAlbumEntity.toAlbumEntity() = JmAlbumEntity(
+        id = id,
+        name = name,
+        albumFolderName = albumFolderName,
+        images = images,
+        addTime = addTime,
+        description = description,
+        totalViews = totalViews,
+        likes = likes,
+        series = series,
+        seriesId = seriesId,
+        commentTotal = commentTotal,
+        author = author,
+        tags = tags,
+        works = works,
+        actors = actors,
+        relatedList = relatedList,
+        liked = liked,
+        isFavorite = isFavorite,
+        // 最近浏览里没有收藏语义，留空
+        collected = null,
+        isAids = isAids,
+        price = price,
+        purchased = purchased,
+        raw = raw,
+        createTime = createTime,
+        modifyTime = modifyTime,
+    )
+
     private fun nowText(): String = TEXT_FORMAT.format(LocalDateTime.now())
 
     private fun encodeStringList(list: List<String>?): String? =
@@ -586,6 +731,18 @@ data class ChapterSummary(
     val sort: String?,
     val name: String?,
     val title: String,
+)
+
+/**
+ * 详情页的本地数据。
+ *
+ * [fromLibrary] 区分数据来源：
+ * - true：来自书库表，详情页显示"已在书库"；
+ * - false：只来自最近浏览表，详情页显示「加入书库」按钮。
+ */
+data class LocalAlbumDetail(
+    val album: JmAlbumEntity,
+    val fromLibrary: Boolean,
 )
 
 /** 收藏夹 + 本子数量。 */

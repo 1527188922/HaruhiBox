@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "31e452937370c8d427b8d3c713dcba03",
+    "identityHash": "7ecd5cfc5dbc4abd9fd057a9eb84d90d",
     "entities": [
       {
         "tableName": "t_jm_album",
@@ -356,6 +356,156 @@
             ],
             "orders": [],
             "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_t_jm_favorite_album_favorite_id_album_id` ON `${TABLE_NAME}` (`favorite_id`, `album_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "t_jm_recent_album",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `name` TEXT, `album_folder_name` TEXT, `images` TEXT, `add_time` TEXT, `description` TEXT, `total_views` TEXT, `likes` TEXT, `series` TEXT, `series_id` TEXT, `comment_total` TEXT, `author` TEXT, `tags` TEXT, `works` TEXT, `actors` TEXT, `related_list` TEXT, `liked` INTEGER, `is_favorite` INTEGER, `is_aids` INTEGER, `price` TEXT, `purchased` TEXT, `raw` TEXT, `create_time` TEXT, `modify_time` TEXT, `viewed_time` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "albumFolderName",
+            "columnName": "album_folder_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "images",
+            "columnName": "images",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "addTime",
+            "columnName": "add_time",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "totalViews",
+            "columnName": "total_views",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "likes",
+            "columnName": "likes",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "series",
+            "columnName": "series",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "seriesId",
+            "columnName": "series_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "commentTotal",
+            "columnName": "comment_total",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "author",
+            "columnName": "author",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "tags",
+            "columnName": "tags",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "works",
+            "columnName": "works",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "actors",
+            "columnName": "actors",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "relatedList",
+            "columnName": "related_list",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "liked",
+            "columnName": "liked",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isFavorite",
+            "columnName": "is_favorite",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isAids",
+            "columnName": "is_aids",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "price",
+            "columnName": "price",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "purchased",
+            "columnName": "purchased",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "raw",
+            "columnName": "raw",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createTime",
+            "columnName": "create_time",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "modifyTime",
+            "columnName": "modify_time",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "viewedTime",
+            "columnName": "viewed_time",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_t_jm_recent_album_viewed_time",
+            "unique": false,
+            "columnNames": [
+              "viewed_time"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_t_jm_recent_album_viewed_time` ON `${TABLE_NAME}` (`viewed_time`)"
           }
         ]
       },
@@ -879,7 +1029,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '31e452937370c8d427b8d3c713dcba03')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '7ecd5cfc5dbc4abd9fd057a9eb84d90d')"
     ]
   }
 }

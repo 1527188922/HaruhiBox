@@ -118,3 +118,49 @@ data class JmFavoriteAlbumEntity(
     @ColumnInfo(name = "album_id") val albumId: Long,
     @ColumnInfo(name = "create_time") val createTime: String? = null,
 )
+
+/**
+ * `t_jm_recent_album`：**最近浏览**。凡是点进过详情页的本子都在这里，
+ * 再次进入只刷新 [viewedTime]，不新增行。
+ *
+ * 字段与 [JmAlbumEntity] 保持一致（详情页可以用同一套渲染逻辑，
+ * 也能在"没加入书库"的情况下完整展示在线信息），另外多一个 [viewedTime]。
+ *
+ * **为什么不复用 `t_jm_album` 加一列**：
+ * 书库与"最近浏览"是两个不同的集合。用户从搜索点进一本**不想入库**的本子看详情，
+ * 不应该污染书库列表（用户明确要求"点详情不等于加入书库"）；
+ * 而 `collected` 是书库语义，在最近浏览里没有意义。
+ * 两张表通过 `id`（JM 号）关联，不做外键：详情页要能在"只在最近浏览里"的状态下独立工作。
+ */
+@Entity(
+    tableName = "t_jm_recent_album",
+    indices = [Index(value = ["viewed_time"])],
+)
+data class JmRecentAlbumEntity(
+    @PrimaryKey @ColumnInfo(name = "id") val id: Long,
+    @ColumnInfo(name = "name") val name: String? = null,
+    @ColumnInfo(name = "album_folder_name") val albumFolderName: String? = null,
+    @ColumnInfo(name = "images") val images: String? = null,
+    @ColumnInfo(name = "add_time") val addTime: String? = null,
+    @ColumnInfo(name = "description") val description: String? = null,
+    @ColumnInfo(name = "total_views") val totalViews: String? = null,
+    @ColumnInfo(name = "likes") val likes: String? = null,
+    @ColumnInfo(name = "series") val series: String? = null,
+    @ColumnInfo(name = "series_id") val seriesId: String? = null,
+    @ColumnInfo(name = "comment_total") val commentTotal: String? = null,
+    @ColumnInfo(name = "author") val author: String? = null,
+    @ColumnInfo(name = "tags") val tags: String? = null,
+    @ColumnInfo(name = "works") val works: String? = null,
+    @ColumnInfo(name = "actors") val actors: String? = null,
+    @ColumnInfo(name = "related_list") val relatedList: String? = null,
+    @ColumnInfo(name = "liked") val liked: Boolean? = null,
+    @ColumnInfo(name = "is_favorite") val isFavorite: Boolean? = null,
+    @ColumnInfo(name = "is_aids") val isAids: Boolean? = null,
+    @ColumnInfo(name = "price") val price: String? = null,
+    @ColumnInfo(name = "purchased") val purchased: String? = null,
+    @ColumnInfo(name = "raw") val raw: String? = null,
+    @ColumnInfo(name = "create_time") val createTime: String? = null,
+    @ColumnInfo(name = "modify_time") val modifyTime: String? = null,
+    /** 浏览时间（毫秒）。**只在点进详情页时更新**；刷新详情不改它。 */
+    @ColumnInfo(name = "viewed_time") val viewedTime: Long = System.currentTimeMillis(),
+)
