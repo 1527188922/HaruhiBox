@@ -5,6 +5,7 @@ import com.haruhi.haruhibox.core.database.JmChapterImageDao
 import com.haruhi.haruhibox.core.database.JmFavoriteDao
 import com.haruhi.haruhibox.core.database.JmRecentAlbumDao
 import com.haruhi.haruhibox.core.database.JmSearchHistoryDao
+import com.haruhi.haruhibox.core.database.PlaybackPositionDao
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
@@ -62,6 +63,8 @@ class JmRepository(
     private val recentDao: JmRecentAlbumDao,
     private val searchHistoryDao: JmSearchHistoryDao,
     private val dirs: LibraryDirs,
+    /** 阅读位置表：从书库移除时要把这本的阅读记录一起删掉。 */
+    private val positionDao: PlaybackPositionDao? = null,
     private val searchHistoryLimit: () -> Int = { JmDefaults.SEARCH_HISTORY_LIMIT },
     private val saveSearchHistory: () -> Boolean = { true },
     private val albumNameMaxBytes: () -> Int = { FileNaming.DEFAULT_ALBUM_NAME_MAX_BYTES },
@@ -100,6 +103,52 @@ class JmRepository(
         )
         recordSearchHistory(result)
         return result
+    }
+
+    /**
+     * 用户要求第 3 点：关键词是**纯数字**时，同时查 `/search` 与 `/album`。
+     *
+     * 纯数字多数是直接贴 JM 号，但搜索接口不一定能命中（标题里不含这个数字），
+     * 而 `/album` 一定能查到。所以两边都发一次：
+     * - `/album` 成功 → 把详情**包装成一条搜索结果**放在最前面（标题后面标"精确匹配"）；
+     * - 搜索没结果但详情有 → 最终就只有这一条；
+     * - 两边都失败 → 按搜索的失败原因报错（详情失败不报错，它本来就是"试试看"）。
+     *
+     * 详情数据顺手写进"最近浏览"，所以点进详情页时**不用再联网**。
+     */
+    suspend fun searchOnlineByExactId(
+        query: String,
+        sort: JmSearchSort = JmSearchSort.DEFAULT,
+        page: Int = 1,
+    ): OnlineSearchResult {
+        val exactId = query.trim().toLongOrNull()
+        val base = searchOnline(query, sort, page)
+        if (exactId == null || exactId <= 0) return base
+
+        val dto = runCatching { api.album(exactId) }
+            .onSuccess { saveToRecent(it) }
+            .getOrNull()
+            ?: return base
+
+        val pinned = OnlineSearchItem(
+            id = exactId,
+            name = dto.name,
+            author = encodeStringList(dto.author),
+            description = dto.description,
+            coverUrl = JmDefaults.buildCoverUrl(exactId),
+            tags = dto.tags.orEmpty(),
+            updateAt = null,
+            existsLocal = albumDao.findById(exactId) != null,
+            isExactIdMatch = true,
+            raw = JmSearchItemDto(
+                id = exactId.toString(),
+                name = dto.name,
+                author = encodeStringList(dto.author),
+                description = dto.description,
+            ),
+        )
+
+        return mergeExactIdMatch(base, pinned)
     }
 
     private suspend fun recordSearchHistory(result: OnlineSearchResult) {
@@ -740,17 +789,35 @@ class JmRepository(
             .distinct()
             .joinToString(",")
 
-    /** 软删除：只删库记录，不动本地文件（计划 §9.1「删除确认明确区分」）。 */
+    /**
+     * 从书库移除：**删掉这本漫画在本地的所有数据库记录**（用户要求第 7 点）。
+     *
+     * 覆盖四张表：
+     * - `t_jm_album`（书库记录本身）
+     * - `t_jm_chapter_image`（章节图片清单）
+     * - `t_jm_favorite_album`（收藏夹关联）
+     * - `t_jm_recent_album`（最近浏览）+ `t_playback_position`（阅读位置）
+     *
+     * **本地文件不在这里删**：图片在本子目录、成品在系统下载目录、封面在 Coil 缓存，
+     * 三处都要清，由调用方（详情页 / 书库多选）统一编排。
+     */
     suspend fun deleteAlbums(ids: List<Long>) {
         if (ids.isEmpty()) return
         ids.forEach { id ->
             favoriteDao.deleteLinksOfAlbum(id)
             chapterDao.deleteByAlbum(id)
+            recentDao.delete(id)
+            positionDao?.delete(READING_KIND, id.toString())
         }
         albumDao.deleteByIds(ids)
     }
 
-    /** 删除本地文件（本子目录），**保留库记录**。 */
+    /**
+     * 删除本子目录（图片）。**保留库记录**，也**不动封面缓存**。
+     *
+     * 注意：导出成品（zip/pdf）落在系统下载目录，不在这里——调用方要另外删，
+     * 见 `JmExportManager.deleteOutputs`。
+     */
     suspend fun deleteAlbumFiles(albumFolderName: String?): Long {
         if (albumFolderName.isNullOrBlank()) return 0L
         val dir = dirs.albumDir(albumFolderName)
@@ -825,6 +892,9 @@ class JmRepository(
     companion object {
         const val DEFAULT_FAVORITE_NAME = "默认收藏夹"
 
+        /** `t_playback_position.kind`：JM 漫画。与 `JmReadingRepository.KIND` 一致。 */
+        const val READING_KIND = "JM"
+
         /**
          * 单话本子的章节标题（同时也是章节目录名）。
          *
@@ -869,7 +939,8 @@ enum class FavoriteWriteResult {
     NotFound,
 }
 
-/** 在线搜索的一条结果。 */data class OnlineSearchItem(
+/** 在线搜索的一条结果。 */
+data class OnlineSearchItem(
     val id: Long,
     val name: String?,
     val author: String?,
@@ -878,6 +949,12 @@ enum class FavoriteWriteResult {
     val tags: List<String>,
     val updateAt: Long?,
     val existsLocal: Boolean,
+    /**
+     * 是不是"用户输入纯数字、由 `/album` 详情包装出来"的那一条。
+     *
+     * 界面据此标一个"精确匹配"，与普通搜索结果区分开（用户要求第 3 点）。
+     */
+    val isExactIdMatch: Boolean = false,
     val raw: JmSearchItemDto,
 )
 
@@ -893,6 +970,28 @@ data class OnlineSearchResult(
     /** 是否来自历史快照（来自历史时不再请求 JM）。 */
     val fromHistory: Boolean = false,
 )
+
+/**
+ * 把"精确匹配"的那一条并进搜索结果（用户要求第 3 点）。
+ *
+ * 三条规则：
+ * 1. 精确匹配**置顶**——用户输入号码时想看的就是它；
+ * 2. 搜索里已经有同一 aid 的，摘掉后面那条，避免同一本出现两次；
+ * 3. 只在搜索结果里**没有**它时才把总数 +1，否则"共 N 条"会比卡片多一条。
+ *
+ * 抽成顶层纯函数是为了能单测：JM 的搜索响应是加密的，
+ * MockWebServer 造不出真实结果（见 `JmSearchMergeTest`）。
+ */
+internal fun mergeExactIdMatch(
+    base: OnlineSearchResult,
+    pinned: OnlineSearchItem,
+): OnlineSearchResult {
+    val alreadyThere = base.items.any { it.id == pinned.id }
+    return base.copy(
+        items = listOf(pinned) + base.items.filterNot { it.id == pinned.id },
+        total = base.total + if (alreadyThere) 0 else 1,
+    )
+}
 
 /** 详情页的章节条目。 */
 data class ChapterSummary(

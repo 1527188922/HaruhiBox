@@ -174,6 +174,49 @@ class JmExportManager(
         }
     }
 
+    // ------------------------------------------------------------------
+    // 成品查询 / 删除（打开至 / 发送至 / 删除文件都用得上）
+    // ------------------------------------------------------------------
+
+    /** 该本子这一种格式的成品文件名。 */
+    fun outputNameOf(album: JmAlbumEntity, format: JmExportFormat): String? =
+        album.albumFolderName?.let { "$it.${format.extension}" }
+
+    /**
+     * 这个成品现在还在不在（导出确认框用它提示"会覆盖已有文件"）。
+     *
+     * MediaStore 查询是 IO，所以放到 IO 线程上。
+     */
+    suspend fun outputExists(album: JmAlbumEntity, format: JmExportFormat): Boolean =
+        withContext(Dispatchers.IO) {
+            val name = outputNameOf(album, format) ?: return@withContext false
+            publisher.exists(name)
+        }
+
+    suspend fun outputUri(displayName: String): android.net.Uri? = withContext(Dispatchers.IO) {
+        publisher.uriOf(displayName)
+    }
+
+    /** 删除某一个成品文件（任务页的「删除文件」）。 */
+    suspend fun deleteOutput(displayName: String): Boolean = withContext(Dispatchers.IO) {
+        publisher.delete(displayName)
+    }
+
+    /**
+     * 删除该本子的导出成品（zip + pdf）。
+     *
+     * "删除本地文件"与"从书库移除"都要连导出成品一起清掉（用户要求第 6、7 点）——
+     * 成品在系统下载目录里，不在本子目录下，所以必须单独删。
+     *
+     * @return 删掉的文件个数
+     */
+    suspend fun deleteOutputs(album: JmAlbumEntity): Int = withContext(Dispatchers.IO) {
+        JmExportFormat.entries.count { format ->
+            val name = outputNameOf(album, format) ?: return@count false
+            publisher.exists(name) && publisher.delete(name)
+        }
+    }
+
     private fun start(taskId: Long) {
         if (jobs[taskId]?.isActive == true) return
         onTaskStarted()

@@ -37,6 +37,20 @@ interface ExportPublisher {
     )
 
     fun publish(source: File, displayName: String, mimeType: String): Published
+
+    /**
+     * 这个成品在不在？
+     *
+     * 用途有二：导出前提示"同名文件已存在，再次生成会覆盖"；
+     * 以及删除本地文件 / 从书库移除时把导出成品一并清掉。
+     */
+    fun exists(displayName: String): Boolean
+
+    /** 成品的内容 Uri（用于"打开至 / 发送至"）。找不到返回 null。 */
+    fun uriOf(displayName: String): Uri?
+
+    /** 删除成品。返回是否真的删掉了。 */
+    fun delete(displayName: String): Boolean
 }
 
 /** 真机实现（见接口注释里的版本分支）。 */
@@ -60,7 +74,14 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
         mimeType: String,
     ): ExportPublisher.Published {
         val resolver = context.contentResolver
-        // 同名文件会被系统自动改名（(1) 后缀），所以直接插一条新的
+        // **先删同名旧文件**：MediaStore 遇到重名会自动改名成"xxx (1).zip"，
+        // 那会留下两份内容不同的同名成品，而且 `findInMediaStore` 按确切文件名查，
+        // 之后"打开至 / 删除文件"就会指向旧的那一份。
+        // 用户已经在密码框里被告知"再次生成会覆盖"，所以这里就是覆盖。
+        findInMediaStore(displayName)?.let { old ->
+            runCatching { resolver.delete(old, null, null) }
+                .onFailure { Timber.tag("export").w(it, "覆盖旧成品失败：%s", displayName) }
+        }
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, displayName)
             put(MediaStore.Downloads.MIME_TYPE, mimeType)
@@ -92,9 +113,7 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
 
     private fun publishToExternalDir(source: File, displayName: String): ExportPublisher.Published {
         // 老系统不申请存储权限，退到应用外部私有目录；位置在文案里说清楚
-        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-            ?: context.filesDir
-        val target = File(dir, displayName)
+        val target = File(externalDir(), displayName)
         target.parentFile?.mkdirs()
         source.inputStream().use { input ->
             target.outputStream().use { output -> input.copyTo(output) }
@@ -106,6 +125,61 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
             uri = null,
         )
     }
+
+    override fun exists(displayName: String): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            findInMediaStore(displayName) != null
+        } else {
+            File(externalDir(), displayName).isFile
+        }
+
+    override fun uriOf(displayName: String): Uri? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            findInMediaStore(displayName)
+        } else {
+            // 老系统没有 content Uri；用 FileProvider 才能分享，这里直接给 file:// 之外的空值，
+            // 由界面按"位置说明"提示用户（见 Published.uri 的注释）
+            null
+        }
+
+    override fun delete(displayName: String): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val uri = findInMediaStore(displayName) ?: return false
+            runCatching { context.contentResolver.delete(uri, null, null) > 0 }
+                .onFailure { Timber.tag("export").w(it, "删除导出文件失败：%s", displayName) }
+                .getOrDefault(false)
+        } else {
+            File(externalDir(), displayName).delete()
+        }
+
+    /** 在下载目录里按文件名找。同名文件只会有一条（导出时先删旧的再写新的）。 */
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun findInMediaStore(displayName: String): Uri? = runCatching {
+        val projection = arrayOf(MediaStore.Downloads._ID)
+        val selection = "${MediaStore.Downloads.DISPLAY_NAME} = ? AND " +
+            "${MediaStore.Downloads.RELATIVE_PATH} LIKE ?"
+        val args = arrayOf(displayName, "%$SUBFOLDER%")
+        context.contentResolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            args,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                Uri.withAppendedPath(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    cursor.getLong(0).toString(),
+                )
+            } else {
+                null
+            }
+        }
+    }.onFailure { Timber.tag("export").w(it, "查询导出文件失败：%s", displayName) }
+        .getOrNull()
+
+    private fun externalDir(): File =
+        context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
 
     companion object {
         /** 下载目录下的子目录名，避免和用户自己的文件混在一起。 */

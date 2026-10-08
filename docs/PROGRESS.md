@@ -281,6 +281,21 @@ app/src/main/java/com/haruhi/haruhibox/
 > F2 的两条隐藏规则也写进了 `sortFavorites()` 并有用例锁定：
 > **默认收藏夹永远置顶**（换排序也不动它），以及同值时按 id 兜底（顺序不抖）。
 
+### 第七轮反馈修复（2026-10-09）
+
+| # | 反馈 | 落地方式 | 验证 |
+|---|---|---|---|
+| G1 | 书库/收藏夹要能一次处理多本（长按多选） | `JmScreens` 加本地 `selection: Set<Long>` + `MultiSelectBar`（全选 / 删除文件 / 移出书库 / 收藏夹）；卡片用 `combinedClickable`（长按进入多选、再点切换勾选），`BackHandler` 退出多选；最近页只读所以不接长按 | 模拟器截图：长按出现"已选 1 本 / 全选 / 三个批量操作"，选中卡片带勾 |
+| G2 | 搜 JM 号应该直接出那一本 | 关键词是**纯数字**时同时发 `/search` 与 `/album`，把详情包成一条结果**置顶**并标「精确匹配」；合并规则抽成纯函数 `mergeExactIdMatch`（置顶 / 去重 / 总数对得上） | `JmSearchMergeTest` 4 个用例；模拟器实测搜 `377531` → 置顶卡片带「精确匹配 · 已入库」 |
+| G3 | 下载面板里已在队列的章节不该还能再选 | 详情页观察 `observeQueuedChapters(aid)`（排队/下载中/暂停/等待网络/失败都算"在队列"），面板里这些行改成不可选并标「已在下载队列」，全不可选时按钮变"请选择章节" | 模拟器实测：提交后再开面板 → 第1话 灰掉并显示「已在下载队列」 |
+| G4 | 导出的 zip/PDF 要能打开、发送、删除 | 任务页导出任务加三颗按钮（`TaskRow.isExport`）：打开至 = `ACTION_VIEW`、发送至 = `ACTION_SEND` + 选择器、删除文件 = 二次确认后删 MediaStore 记录；文件名 → Uri 的解析在 `JmExportManager.outputUri` | 模拟器实测：发送至弹出系统分享面板（Sharing 1 file）；打开至在无对应 App 时提示"没有可以打开这个文件的应用" |
+| G5 | 同名文件已存在要提示"会覆盖" | 点导出时 `outputExists(album, format)`，密码框里橙色（深浅色各一个固定值，见 `ui/theme/Color.kt`）提示"下载目录里已经有同名文件，再次生成会直接覆盖它" | 模拟器截图；并且**真的覆盖**：`AndroidExportPublisher` 先删旧行再插入，避免 MediaStore 自动改名留下"xxx (1).zip"（否则"打开至/删除文件"会指向旧文件） |
+| G6 | 详情页「删除本地文件」漏了导出的 zip/PDF | 详情页改走 `JmAlbumCleaner.deleteFiles`（图片 + 导出成品 + 封面缓存，**保留记录**），提示语写清含几个成品 | `JmAlbumCleanerTest`；模拟器实测：删除后本子目录与 zip 都没了，书库记录与「已下载 0 话」状态还在 |
+| G7 | 「从书库移除」要连本地文件一起删 | 改走 `JmAlbumCleaner.removeFromLibrary`：先取消还在跑的任务，再删文件/成品/封面缓存，最后删五张表（书库/章节清单/收藏关联/最近浏览/阅读位置）。**页面等它做完再退**（原来点完立刻 `popBackStack` 会把协程一起取消，等于删一半），提示语也改成"本地文件与浏览记录一起删掉了" | `JmAlbumCleanerTest` 4 个用例；模拟器实测：确认后自动返回书库、列表少一本、最近页也没了、默认收藏夹少一本 |
+
+> G6/G7 的差别只有"删不删数据库记录"，所以两处都收敛到 `JmAlbumCleaner` 一个编排里；
+> 删除是不可撤销的重活，`deleteFiles` 整段跑在 `Dispatchers.IO`（约定见第五轮 E8/E9）。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |
@@ -434,7 +449,8 @@ Expected identity hash: 7ecd5cfc..., found: 31e452937...
 2. **JM 图片线路默认值**：参考实现硬编码 `IMAGE_DOMAIN`，App 侧作为可编辑线路列出，
    默认值沿用 `cdn-msp2.jmapiproxy2.cc`（见 `JmDefaults`）。这条只是记录，不是待确认项。
 3. **PDF 单页尺寸上限**：参考实现不处理 14400×14400 上限，JM 长图可能超。
-   P4 需要加校验并给出明确错误——届时应按"行为差异"再次确认处理方式（拒绝导出 / 按高度切片）。
+   P4 已按"**按高度均匀切片**"落地（理由与规则见上方 P4 明细），若你更希望"超限就拒绝导出"，
+   说一声即可改回；当前选择是保证导出一定能拿到文件。
 
 ## 真机验证记录
 
@@ -502,7 +518,7 @@ OK (11 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：228 个单元测试 + lint + 两种构建
+# 开发机：240 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF/zip 加密 + 长图切片）
@@ -510,33 +526,36 @@ $env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**228 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**240 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（release 5.6 MB）。
 
 ### 测试清单（单元测试）
 
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
-| `feature.jm.data.JmRepositoryTest` | 22 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底与标题归一化）/ 标签 OR / 删除语义 || `feature.jm.ui.JmReaderAndTaskLogicTest` | 22 | 任务状态与进度文案 / 下载面板默认勾选与"已在队列" / **底栏切换方向** / 阅读器进度条与"待取 vs 失败" / 阅读偏好编解码 |
+| `feature.jm.data.JmRepositoryTest` | 24 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底与标题归一化）/ 标签 OR / 删除语义 |
+| `feature.jm.ui.JmReaderAndTaskLogicTest` | 23 | 任务状态与进度文案 / 下载面板默认勾选与"已在队列" / **底栏切换方向** / 阅读器进度条与"待取 vs 失败" / 阅读偏好编解码 |
 | `feature.jm.data.JmRecentAndFavoriteTest` | 19 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / **骨架行不算本地数据** / 收藏夹数量与封面来源 Flow |
 | `core.jm.JmCryptoGoldenTest` | 14 | 签名 / AES-256 解密 / 块数，与参考实现逐值一致 |
 | `core.storage.FileNamingGoldenTest` | 14 | 文件名清洗 / 本子目录名 / 章节与图片排序 |
+| `core.database.JmDaoTest` | 14 | 书库分页排序（入库时间倒序）/ 标签 OR / 章节分组 / 收藏唯一索引 |
 | `feature.jm.data.JmDownloadManagerTest` | 13 | **下载编排**：逐字节一致（块数 0 不重编码）/ 跳过已存在 / 断点只补缺口 / 等待网络 / 取消 / 追加章节 / 重试 |
-| `core.database.JmDaoTest` | 13 | 书库分页排序（入库时间倒序）/ 标签 OR / 章节分组 / 收藏唯一索引 |
 | `core.database.DownloadTaskDaoTest` | 12 | 任务去重 / 恢复 / 章节计数幂等 / 历史裁剪 |
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
 | `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
+| `feature.jm.data.JmExportManagerTest` | 11 | **导出编排**：缺图预检 / zip 与 pdf 跑通并交付 / 重复提交复用 / 无图时给出可读失败原因 / **成品是否存在、按名查 Uri、删单个与删两个格式** |
 | `feature.jm.ui.JmDisplayLogicTest` | 8 | 书库状态文案 / 章节状态 / 体积格式 / 空态与错误文案 |
 | `core.codec.PdfPagePlanTest` | 8 | **PDF 切片**：未超限仍是一页 / 超限切片连续无重叠 / 宽度超限等比缩小 / 切片数上限 |
-| `feature.jm.data.JmImageStoreTest` | 7 | **本地优先取图**：命中不发请求 / 取回来就缓存 / 删掉后重新取 / 块数 0 原样保留 |
 | `feature.jm.ui.FavoriteSortTest` | 7 | **收藏页排序**：默认夹置顶 / 三种方式都是降序 / 空夹排最后 / 同值按 id 稳定 |
-| `feature.jm.data.JmExportManagerTest` | 7 | **导出编排**：缺图预检 / zip 与 pdf 跑通并交付 / 重复提交复用 / 无图时给出可读失败原因 |
-| `core.codec.ArchiveWriterTest` | 5 | zip 结构（不套本子目录）/ 顺序 / 进度 / 不加密码 / 重新生成覆盖 |
+| `feature.jm.data.JmImageStoreTest` | 7 | **本地优先取图**：命中不发请求 / 取回来就缓存 / 删掉后重新取 / 块数 0 原样保留 |
 | `feature.jm.data.JmReadingRepositoryTest` | 6 | 阅读位置读写与钳位 / "继续阅读"取最近一本 / 章节目录名规则 |
 | `feature.jm.ui.SearchRevealStateTest` | 6 | 搜索增量展示的推进与边界 |
-| `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
 | `core.download.DownloadGateTest` | 5 | 下载网络策略矩阵（仅 Wi-Fi / 允许移动网络） |
+| `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
+| `core.codec.ArchiveWriterTest` | 5 | zip 结构（不套本子目录）/ 顺序 / 进度 / 不加密码 / 重新生成覆盖 |
 | `core.codec.PdfWriterSpikeTest` | 4 | PDF 页面 / 书签 / `PageMode` / 不加密 |
+| `feature.jm.data.JmAlbumCleanerTest` | 4 | **删除编排**：只删文件保留记录 / 从书库移除连五张表与封面一起清 / 移除前先取消任务 / 只删文件时任务照跑 |
+| `feature.jm.data.JmSearchMergeTest` | 4 | **精确匹配合并**：置顶 / 同 aid 不重复 / 总数只在真的新增时 +1 / 搜索零结果也有它 |
 | `core.jm.CryptoProbeTest` | 2 | 环境回归：JCE 可用性 |
 | `core.codec.PixelProbeTest` | 2 | 环境回归：位图像素读写行为 |
 

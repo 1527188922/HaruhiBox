@@ -14,6 +14,7 @@ import com.haruhi.haruhibox.core.network.toUserMessage
 import com.haruhi.haruhibox.core.settings.SecretStore
 import com.haruhi.haruhibox.core.settings.SettingKeys
 import com.haruhi.haruhibox.feature.jm.data.FavoriteWriteResult
+import com.haruhi.haruhibox.feature.jm.data.JmAlbumCleaner
 import com.haruhi.haruhibox.feature.jm.data.JmDownloadManager
 import com.haruhi.haruhibox.feature.jm.data.JmExportFormat
 import com.haruhi.haruhibox.feature.jm.data.JmExportManager
@@ -81,6 +82,10 @@ data class LibraryUiState(
      * 「继续阅读」卡片（计划 §9 第 4 条：**有阅读记录时**显示，没有就不显示）。
      */
     val continueReading: ContinueReadingCard? = null,
+    /** 批量"更改收藏夹"要用的收藏夹列表。 */
+    val favorites: List<JmFavoriteEntity> = emptyList(),
+    /** 批量操作的一次性提示。 */
+    val message: String? = null,
 )
 
 /** 书库顶部"继续阅读"卡片的数据。 */
@@ -108,6 +113,7 @@ data class AlbumCard(
 class JmLibraryViewModel(
     private val repo: JmRepository,
     private val reading: JmReadingRepository,
+    private val cleaner: JmAlbumCleaner,
 ) : ViewModel() {
 
     private val filter = MutableStateFlow(LibraryFilter())
@@ -120,6 +126,9 @@ class JmLibraryViewModel(
         val summaries: Map<Long, ChapterStat> = emptyMap(),
         val loadingStat: Boolean = false,
         val continueReading: ContinueReadingCard? = null,
+        val favorites: List<JmFavoriteEntity> = emptyList(),
+        /** 批量操作的一次性提示。 */
+        val message: String? = null,
     )
 
     private data class ChapterStat(val total: Int, val downloaded: Int, val size: Long)
@@ -174,6 +183,8 @@ class JmLibraryViewModel(
             error = p.error,
             hasMore = albums.size >= PAGE_SIZE,
             continueReading = e.continueReading,
+            favorites = e.favorites,
+            message = e.message,
         )
     }.catch { e ->
         Timber.tag("jm").w(e, "书库查询失败")
@@ -193,6 +204,12 @@ class JmLibraryViewModel(
                 .collect { position ->
                     extra.update { it.copy(continueReading = resolveContinueReading(position)) }
                 }
+        }
+        // 批量"更改收藏夹"要用收藏夹列表，跟着数据库走
+        viewModelScope.launch {
+            repo.observeFavorites()
+                .catch { e -> Timber.tag("jm").w(e, "观察收藏夹失败") }
+                .collect { favorites -> extra.update { it.copy(favorites = favorites) } }
         }
     }
 
@@ -285,21 +302,70 @@ class JmLibraryViewModel(
         )
     }
 
-    fun deleteAlbums(ids: List<Long>) {
+    // ------------------------------------------------------------------
+    // 多选批量操作（用户要求第 1、2 点）
+    // ------------------------------------------------------------------
+
+    /** 批量删除本地文件：图片 + 导出成品，**不动记录与封面**。 */
+    fun deleteFiles(ids: List<Long>) {
         viewModelScope.launch {
-            runCatching { repo.deleteAlbums(ids) }
-                .onFailure { Timber.tag("jm").w(it, "删除记录失败") }
+            val albums = albumsByIds(ids)
+            runCatching { cleaner.deleteFiles(albums) }
+                .onSuccess { result ->
+                    postMessage(
+                        buildString {
+                            append("已删除 ${albums.size} 本的本地文件")
+                            if (result.removedExports > 0) append("（含 ${result.removedExports} 个导出文件）")
+                        },
+                    )
+                }
+                .onFailure { postMessage(it.toUserMessage()) }
             refreshStats()
         }
     }
 
-    fun deleteAlbumFiles(album: JmAlbumEntity) {
+    /** 批量从书库移除：记录 + 图片 + 成品 + 封面全清。 */
+    fun removeFromLibrary(ids: List<Long>) {
         viewModelScope.launch {
-            runCatching { repo.deleteAlbumFiles(album.albumFolderName) }
-                .onFailure { Timber.tag("jm").w(it, "删除文件失败") }
+            val albums = albumsByIds(ids)
+            runCatching { cleaner.removeFromLibrary(albums) }
+                .onSuccess { result ->
+                    postMessage(
+                        buildString {
+                            append("已移除 ${albums.size} 本")
+                            if (result.freedBytes > 0) append("，释放 ${formatBytes(result.freedBytes)}")
+                        },
+                    )
+                }
+                .onFailure { postMessage(it.toUserMessage()) }
             refreshStats()
         }
     }
+
+    /** 批量更改收藏夹：从原夹移出、加入目标夹（"移动"而不是"多属于一个"）。 */
+    fun moveToFavorite(ids: List<Long>, favoriteId: Long) {
+        viewModelScope.launch {
+            runCatching {
+                ids.forEach { id ->
+                    repo.favoriteIdsOf(id).forEach { old ->
+                        if (old != favoriteId) repo.removeFromFavorite(id, old)
+                    }
+                    repo.addToFavorite(id, favoriteId)
+                }
+            }.onSuccess {
+                val name = uiState.value.favorites.firstOrNull { it.id == favoriteId }?.name
+                postMessage(if (name != null) "已移动到「$name」" else "已移动收藏夹")
+            }.onFailure { postMessage(it.toUserMessage()) }
+            refreshStats()
+        }
+    }
+
+    fun consumeMessage() = extra.update { it.copy(message = null) }
+
+    private fun postMessage(text: String) = extra.update { it.copy(message = text) }
+
+    private suspend fun albumsByIds(ids: List<Long>): List<JmAlbumEntity> =
+        ids.mapNotNull { runCatching { repo.findAlbum(it) }.getOrNull() }
 
     fun setCollected(albumId: Long, collected: Boolean) {
         viewModelScope.launch {
@@ -410,7 +476,8 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
                     visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
                 )
             }
-            runCatching { repo.searchOnline(keyword, _state.value.sort, page = 1) }
+            // 纯数字关键词：同时查搜索与详情，把详情包装成第一条（用户要求第 3 点）
+            runCatching { repo.searchOnlineByExactId(keyword, _state.value.sort, page = 1) }
                 .onSuccess { result -> _state.update { it.copy(result = result, searching = false) } }
                 .onFailure { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
@@ -810,8 +877,22 @@ data class AlbumDetailUiState(
     val exportFormat: JmExportFormat? = null,
     /** 该格式的默认密码（来自设置/凭据存储），密码框预填它。 */
     val exportDefaultPassword: String = "",
+    /**
+     * 目标文件（系统下载目录里的同名 zip/pdf）**已经存在**。
+     *
+     * 再次生成会直接覆盖，所以在密码框里用醒目颜色提醒一句（用户要求第 5 点）。
+     */
+    val exportTargetExists: Boolean = false,
     /** 缺图预检结果；非 null 时展示"缺图"对话框而不是密码框。 */
     val exportPrecheck: JmExportManager.Precheck? = null,
+
+    /**
+     * 「从书库移除」已经**删干净**了，页面可以退出了。
+     *
+     * 删除是异步的（图片目录 + 下载目录里的成品 + 封面缓存 + 五张表），
+     * 点完立刻返回会把还在跑的协程一起取消，所以由这个标志通知上层再 pop。
+     */
+    val removedFromLibrary: Boolean = false,
 ) {
     /**
      * 下载面板的默认勾选：**没下完、也不在队列里**的章节。
@@ -850,6 +931,7 @@ class JmAlbumDetailViewModel(
     private val exports: JmExportManager,
     private val tasks: DownloadTaskRepository,
     private val secrets: SecretStore,
+    private val cleaner: JmAlbumCleaner,
     private val albumId: Long,
 ) : ViewModel() {
 
@@ -1229,10 +1311,13 @@ class JmAlbumDetailViewModel(
                 _state.update { it.copy(exportPrecheck = precheck) }
                 return@launch
             }
+            // 同名成品已存在时提醒"会覆盖"（用户要求第 5 点）
+            val exists = runCatching { exports.outputExists(album, format) }.getOrDefault(false)
             _state.update {
                 it.copy(
                     exportFormat = format,
                     exportDefaultPassword = defaultPasswordFor(format),
+                    exportTargetExists = exists,
                 )
             }
         }
@@ -1263,7 +1348,7 @@ class JmAlbumDetailViewModel(
     /** 密码框里点「确认」（密码留空等同「不设密码」）。 */
     fun confirmExport(password: String) {
         val format = _state.value.exportFormat ?: return
-        _state.update { it.copy(exportFormat = null) }
+        _state.update { it.copy(exportFormat = null, exportTargetExists = false) }
         viewModelScope.launch {
             runCatching {
                 val library = ensureInLibrary()
@@ -1285,7 +1370,7 @@ class JmAlbumDetailViewModel(
     /** 密码框里点「不设密码」。 */
     fun exportWithoutPassword() = confirmExport("")
 
-    fun cancelExport() = _state.update { it.copy(exportFormat = null) }
+    fun cancelExport() = _state.update { it.copy(exportFormat = null, exportTargetExists = false) }
 
     /** 默认密码来自凭据存储；没设过就用参考实现的默认值。 */
     private fun defaultPasswordFor(format: JmExportFormat): String {
@@ -1296,20 +1381,48 @@ class JmAlbumDetailViewModel(
         return secrets.get(key)?.takeIf { it.isNotEmpty() } ?: JmDefaults.DEFAULT_EXPORT_PASSWORD
     }
 
+    /**
+     * 「删除本地文件」：图片 + 导出成品 + 封面缓存，**保留书库记录**（用户要求第 6 点）。
+     *
+     * 导出成品放在系统下载目录，容易漏删，所以统一交给 [JmAlbumCleaner] 编排。
+     */
     fun deleteAlbumFiles() {
         viewModelScope.launch {
             val album = _state.value.album ?: return@launch
-            runCatching { repo.deleteAlbumFiles(album.albumFolderName) }
+            val result = runCatching { cleaner.deleteFiles(listOf(album)) }.getOrNull()
             refreshLocalStats()
-            _state.update { it.copy(message = "已删除本地文件") }
+            val text = if (result != null && result.removedExports > 0) {
+                "已删除本地文件（含 ${result.removedExports} 个导出成品）"
+            } else {
+                "已删除本地文件"
+            }
+            _state.update { it.copy(message = text) }
         }
     }
 
-    /** 删除书库记录。**不动最近浏览**，也不动本地文件。 */
-    fun deleteAlbumRecord() {
+    /**
+     * 「从书库移除」：记录 + 文件 + 成品 + 封面全清（用户要求第 7 点）。
+     *
+     * 与「删除本地文件」的差别只在于**要不要连记录一起删**；
+     * 最近浏览也会一起清掉——不然"移除了"却还在最近列表里，看着像没删掉。
+     */
+    fun removeFromLibrary() {
         viewModelScope.launch {
-            runCatching { repo.deleteAlbums(listOf(albumId)) }
-            _state.update { it.copy(inLibrary = false, message = "已从书库移除（仍保留在最近浏览）") }
+            val album = _state.value.album ?: return@launch
+            val result = runCatching { cleaner.removeFromLibrary(listOf(album)) }.getOrNull()
+            refreshLocalStats()
+            val suffix = if (result != null && result.removedExports > 0) {
+                "（含 ${result.removedExports} 个导出成品）"
+            } else {
+                ""
+            }
+            _state.update {
+                it.copy(
+                    inLibrary = false,
+                    removedFromLibrary = true,
+                    message = "已从书库移除，本地文件与浏览记录一起删掉了$suffix",
+                )
+            }
         }
     }
 }

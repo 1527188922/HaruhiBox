@@ -1,6 +1,10 @@
 package com.haruhi.haruhibox.feature.jm.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,7 +28,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
@@ -38,10 +45,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -63,6 +72,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import coil3.compose.AsyncImage
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.jm.JmSearchSort
@@ -105,35 +115,67 @@ fun JmLibraryScreen(
     showCollectedChip: Boolean = true,
     /** 「继续阅读」卡片被点击（计划 §9 第 4 条）。 */
     onContinueReading: ((Long) -> Unit)? = null,
+    /** 批量删除本地文件（图片 + zip/pdf，不动封面与记录）。 */
+    onDeleteFiles: ((List<Long>) -> Unit)? = null,
+    /** 批量从书库移除（记录 + 文件 + 成品 + 封面）。 */
+    onRemoveFromLibrary: ((List<Long>) -> Unit)? = null,
+    /** 批量更改收藏夹。 */
+    onMoveToFavorite: ((List<Long>, Long) -> Unit)? = null,
 ) {
-    Column(modifier = modifier.fillMaxSize()) {
-        if (title != null) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
-            )
-        }
+    // 多选状态是纯界面状态：长按进入、退出即清空，不需要活过页面重建
+    var selection by remember { mutableStateOf(emptySet<Long>()) }
+    var showMoveSheet by remember { mutableStateOf(false) }
+    var confirmDeleteFiles by remember { mutableStateOf(false) }
+    var confirmRemove by remember { mutableStateOf(false) }
+    val selecting = selection.isNotEmpty()
+    val selectedAlbums = state.albums.filter { it.album.id in selection }
 
-        // 有阅读记录时显示紧凑的"继续阅读"卡片（没有就不占地方）。
-        // 只在书库首页显示：收藏夹里是"这一夹有什么"，塞一张别的本子会让人困惑。
-        if (title == null) {
-            state.continueReading?.let { card ->
-                ContinueReadingCardRow(
-                    card = card,
-                    onOpen = { onContinueReading?.invoke(card.albumId) ?: onOpenAlbum(card.albumId) },
+    // 返回键先退出多选，而不是直接退出页面
+    BackHandler(enabled = selecting) { selection = emptySet() }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        if (selecting) {
+            MultiSelectBar(
+                selectedCount = selection.size,
+                totalCount = state.albums.size,
+                onSelectAll = { selection = state.albums.map { it.album.id }.toSet() },
+                onClear = { selection = emptySet() },
+                onDeleteFiles = { confirmDeleteFiles = true },
+                onRemoveFromLibrary = { confirmRemove = true },
+                onMoveToFavorite = { showMoveSheet = true },
+                canDeleteFiles = onDeleteFiles != null,
+                canRemove = onRemoveFromLibrary != null,
+                canMove = onMoveToFavorite != null,
+            )
+        } else {
+            if (title != null) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
                 )
             }
-        }
 
-        LibraryFilterBar(
-            filter = state.filter,
-            showCollectedChip = showCollectedChip,
-            onFilterChange = onFilterChange,
-            onClearFilter = onClearFilter,
-        )
+            // 有阅读记录时显示紧凑的"继续阅读"卡片（没有就不占地方）。
+            // 只在书库首页显示：收藏夹里是"这一夹有什么"，塞一张别的本子会让人困惑。
+            if (title == null) {
+                state.continueReading?.let { card ->
+                    ContinueReadingCardRow(
+                        card = card,
+                        onOpen = { onContinueReading?.invoke(card.albumId) ?: onOpenAlbum(card.albumId) },
+                    )
+                }
+            }
+
+            LibraryFilterBar(
+                filter = state.filter,
+                showCollectedChip = showCollectedChip,
+                onFilterChange = onFilterChange,
+                onClearFilter = onClearFilter,
+            )
+        }
 
         when {
             state.loading -> LoadingBox()
@@ -156,10 +198,158 @@ fun JmLibraryScreen(
                 items(state.albums, key = { it.album.id }) { card ->
                     AlbumGridCard(
                         card = card,
-                        onOpen = { onOpenAlbum(card.album.id) },
+                        selecting = selecting,
+                        selected = card.album.id in selection,
+                        onOpen = {
+                            // 多选模式下点击是"勾选/取消"，不再进详情
+                            if (selecting) {
+                                selection = selection.toggle(card.album.id)
+                            } else {
+                                onOpenAlbum(card.album.id)
+                            }
+                        },
+                        onLongPress = { selection = selection + card.album.id },
                         onToggleCollected = { onToggleCollected(card.album.id, card.album.collected != true) },
                     )
                 }
+            }
+        }
+    }
+
+    if (showMoveSheet) {
+        FavoritePickerForSelection(
+            favorites = state.favorites,
+            onPick = { favoriteId ->
+                onMoveToFavorite?.invoke(selection.toList(), favoriteId)
+                showMoveSheet = false
+                selection = emptySet()
+            },
+            onDismiss = { showMoveSheet = false },
+        )
+    }
+
+    if (confirmDeleteFiles) {
+        ConfirmDialog(
+            title = "删除这 ${selection.size} 本的本地文件？",
+            text = "会删除已下载的图片、导出的 zip/pdf（约 ${formatBytes(selectedAlbums.sumOf { it.localSizeBytes })}）。" +
+                "书库记录、收藏与封面都保留。",
+            confirmText = "删除文件",
+            onConfirm = {
+                confirmDeleteFiles = false
+                onDeleteFiles?.invoke(selection.toList())
+                selection = emptySet()
+            },
+            onDismiss = { confirmDeleteFiles = false },
+        )
+    }
+
+    if (confirmRemove) {
+        ConfirmDialog(
+            title = "从书库移除这 ${selection.size} 本？",
+            text = "会删除书库记录、章节清单、收藏关联、阅读位置、最近浏览记录，" +
+                "以及本地图片、导出的 zip/pdf 与封面缓存。此操作不可撤销。",
+            confirmText = "移除并删除",
+            onConfirm = {
+                confirmRemove = false
+                onRemoveFromLibrary?.invoke(selection.toList())
+                selection = emptySet()
+            },
+            onDismiss = { confirmRemove = false },
+        )
+    }
+}
+
+private fun Set<Long>.toggle(id: Long): Set<Long> = if (id in this) this - id else this + id
+
+/**
+ * 多选操作条。
+ *
+ * 放在原筛选栏的位置（不浮在列表上），所以不会挡住内容；
+ * 左侧显示已选数量与"全选/取消"，右侧是三个批量操作。
+ */
+@Composable
+private fun MultiSelectBar(
+    selectedCount: Int,
+    totalCount: Int,
+    onSelectAll: () -> Unit,
+    onClear: () -> Unit,
+    onDeleteFiles: () -> Unit,
+    onRemoveFromLibrary: () -> Unit,
+    onMoveToFavorite: () -> Unit,
+    canDeleteFiles: Boolean,
+    canRemove: Boolean,
+    canMove: Boolean,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onClear) {
+                Icon(Icons.Default.Close, contentDescription = "退出多选")
+            }
+            Text(
+                text = "已选 $selectedCount 本",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f),
+            )
+            if (selectedCount < totalCount) {
+                TextButton(onClick = onSelectAll) { Text("全选") }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (canDeleteFiles) {
+                TextButton(onClick = onDeleteFiles) { Text("删除文件") }
+            }
+            if (canRemove) {
+                TextButton(onClick = onRemoveFromLibrary) { Text("移出书库") }
+            }
+            if (canMove) {
+                TextButton(onClick = onMoveToFavorite) { Text("收藏夹") }
+            }
+        }
+    }
+}
+
+/** 批量"更改收藏夹"：列出所有收藏夹，选中即把勾选的本子移动过去。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FavoritePickerForSelection(
+    favorites: List<JmFavoriteEntity>,
+    onPick: (Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+            Text(
+                text = "移动到收藏夹",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+            Text(
+                text = "选中的漫画会从这个收藏夹移出（如果本来在里面），只保留在目标收藏夹里。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
+                items(favorites, key = { it.id }) { favorite ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(favorite.id) }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                    ) {
+                        Text(favorite.name, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+            TextButton(onClick = onDismiss, modifier = Modifier.padding(horizontal = 8.dp)) {
+                Text("取消")
             }
         }
     }
@@ -261,7 +451,11 @@ fun JmRecentScreen(
                 items(state.albums, key = { it.album.id }) { card ->
                     AlbumGridCard(
                         card = card,
+                        // 最近浏览页不做多选（它的用途是"回到刚看过的本子"）
+                        selecting = false,
+                        selected = false,
                         onOpen = { onOpenAlbum(card.album.id) },
+                        onLongPress = {},
                         // 最近浏览里没有收藏语义，不显示星标
                         onToggleCollected = null,
                     )
@@ -353,16 +547,34 @@ private fun LibraryFilterBar(
     }
 }
 
+/**
+ * 书库/收藏夹里的一张卡片。
+ *
+ * 交互：单击进详情；**长按进入多选**（用户要求第 1、2 点）。多选模式下单击变成勾选，
+ * 卡片右上角显示勾选标记、并整体加一层淡色底，一眼能看出"现在在选择"。
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AlbumGridCard(
     card: AlbumCard,
+    selecting: Boolean,
+    selected: Boolean,
     onOpen: () -> Unit,
+    onLongPress: () -> Unit,
     onToggleCollected: (() -> Unit)?,
 ) {
     Card(
-        onClick = onOpen,
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.secondaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = onOpen, onLongClick = onLongPress),
     ) {
         Box(
             modifier = Modifier
@@ -376,9 +588,23 @@ private fun AlbumGridCard(
                 contentDescription = card.displayName,
                 modifier = Modifier.fillMaxSize(),
             )
-            if (card.album.collected == true && onToggleCollected != null) {
-                IconButton(onClick = onToggleCollected, modifier = Modifier.align(Alignment.TopEnd)) {
-                    Text("★", style = MaterialTheme.typography.titleMedium)
+            when {
+                // 多选模式优先显示勾选状态，避免和"收藏星标"挤在一起
+                selecting -> Icon(
+                    imageVector = if (selected) Icons.Default.CheckCircle else Icons.Default.AddCircle,
+                    contentDescription = if (selected) "已选中" else "未选中",
+                    tint = if (selected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                )
+
+                card.album.collected == true && onToggleCollected != null -> {
+                    IconButton(onClick = onToggleCollected, modifier = Modifier.align(Alignment.TopEnd)) {
+                        Text("★", style = MaterialTheme.typography.titleMedium)
+                    }
                 }
             }
         }
@@ -751,6 +977,15 @@ private fun OnlineResultRow(
                 }
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 用户输入纯数字时由 /album 详情包装出来的那一条，标出来与普通搜索区分
+                    if (item.isExactIdMatch) {
+                        Text(
+                            text = "精确匹配",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
                     if (item.existsLocal) {
                         Text(
                             text = "已入库",

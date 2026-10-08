@@ -9,3 +9,13 @@ val Pink80 = Color(0xFFEFB8C8)
 val Purple40 = Color(0xFF6650a4)
 val PurpleGrey40 = Color(0xFF625b71)
 val Pink40 = Color(0xFF7D5260)
+
+/**
+ * 警示橙（"会覆盖文件"这类提醒）。
+ *
+ * 主题开了动态取色，`tertiary` 在真机上可能是粉的也可能是别的颜色，
+ * 承载不了"警告"这个语义，所以警示单独固定成橙色；深浅色各取一个值，
+ * 保证在白底和黑底上都看得清。
+ */
+val WarningOrangeLight = Color(0xFFB45309)
+val WarningOrangeDark = Color(0xFFFFB74D)

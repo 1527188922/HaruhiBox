@@ -1,5 +1,7 @@
 package com.haruhi.haruhibox.feature.jm.ui
 
+import android.content.Context
+import android.content.Intent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -30,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -42,6 +45,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.haruhi.haruhibox.core.di.AppContainer
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -134,6 +138,8 @@ fun JmModeRoot(
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    // 导出成品的「打开至 / 发送至」要发系统 Intent（计划 §8 第 10 条）
+    val context = LocalContext.current
 
     // 任务角标要在任意 tab 都显示，所以这个 ViewModel 挂在 Activity 上（不在 NavHost 内部），
     // 任务页复用同一个实例，两处看到的状态一定一致。
@@ -223,6 +229,12 @@ fun JmModeRoot(
                     val state by vm.uiState.collectAsStateWithLifecycle()
                     // 从详情页/阅读器回来时重算"已下载 x/y 话"（下载完成后数字必须跟着变）
                     OnResumeEffect { vm.onScreenResumed() }
+                    LaunchedEffect(state.message) {
+                        state.message?.let {
+                            snackbar.showSnackbar(it)
+                            vm.consumeMessage()
+                        }
+                    }
                     JmLibraryScreen(
                         state = state,
                         columns = 3,
@@ -232,6 +244,10 @@ fun JmModeRoot(
                         onToggleCollected = vm::setCollected,
                         // 「继续阅读」卡片（§9 第 4 条）：直接回到保存的位置
                         onContinueReading = { albumId -> navController.navigate(JmRoutes.reader(albumId)) },
+                        // 长按多选（用户要求第 1 点）
+                        onDeleteFiles = vm::deleteFiles,
+                        onRemoveFromLibrary = vm::removeFromLibrary,
+                        onMoveToFavorite = vm::moveToFavorite,
                     )
                 }
 
@@ -303,6 +319,14 @@ fun JmModeRoot(
                         onClearFinished = taskViewModel::clearFinished,
                         // 点封面进详情页（用户要求第 1 点）
                         onOpenAlbum = { albumId -> navController.navigate(JmRoutes.detail(albumId)) },
+                        // 导出成品的「打开至 / 发送至」（用户要求第 4 点）
+                        onOpenOutput = { name ->
+                            launchOutputIntent(context, taskViewModel, name, share = false, snackbar = snackbar, scope = scope)
+                        },
+                        onSendOutput = { name ->
+                            launchOutputIntent(context, taskViewModel, name, share = true, snackbar = snackbar, scope = scope)
+                        },
+                        onDeleteOutput = taskViewModel::deleteOutput,
                     )
                 }
 
@@ -325,6 +349,12 @@ fun JmModeRoot(
                         vm.updateFilter { it.copy(favoriteId = favoriteId) }
                     }
                     val state by vm.uiState.collectAsStateWithLifecycle()
+                    LaunchedEffect(state.message) {
+                        state.message?.let {
+                            snackbar.showSnackbar(it)
+                            vm.consumeMessage()
+                        }
+                    }
                     JmLibraryScreen(
                         state = state,
                         columns = 3,
@@ -336,6 +366,10 @@ fun JmModeRoot(
                         onClearFilter = { vm.updateFilter { it.copy(favoriteId = favoriteId) } },
                         onOpenAlbum = { navController.navigate(JmRoutes.detail(it)) },
                         onToggleCollected = vm::setCollected,
+                        // 夹内也要能长按多选（用户要求第 2 点）
+                        onDeleteFiles = vm::deleteFiles,
+                        onRemoveFromLibrary = vm::removeFromLibrary,
+                        onMoveToFavorite = vm::moveToFavorite,
                     )
                 }
 
@@ -351,6 +385,14 @@ fun JmModeRoot(
                     val state by vm.state.collectAsStateWithLifecycle()
                     // 从任务页/阅读器回来时重算章节状态（刚下完的章节要立刻显示"已下载"）
                     OnResumeEffect { vm.refreshLocalStats() }
+                    // 移除要删图片、导出成品、封面缓存和五张表，是异步的；
+                    // 立刻 pop 会把 ViewModel 的协程一起取消（删一半就没了），所以等它做完再退。
+                    // 还要等提示语被消费掉（state.message 变回 null），否则用户什么都看不到。
+                    LaunchedEffect(state.removedFromLibrary, state.message) {
+                        if (state.removedFromLibrary && state.message == null) {
+                            navController.popBackStack()
+                        }
+                    }
                     JmAlbumDetailScreen(
                         state = state,
                         onBack = { navController.popBackStack() },
@@ -382,10 +424,8 @@ fun JmModeRoot(
                         onCancelExport = vm::cancelExport,
                         // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）
                         onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
-                        onDeleteAlbumRecord = {
-                            vm.deleteAlbumRecord()
-                            navController.popBackStack()
-                        },
+                        // 页面在 state.removedFromLibrary 变 true 后自己退出（见上面的 LaunchedEffect）
+                        onDeleteAlbumRecord = vm::removeFromLibrary,
                         onConsumeMessage = vm::consumeMessage,
                     )
                 }
@@ -460,6 +500,55 @@ internal fun tabShift(fromRoute: String?, toRoute: String?): Int {
 }
 
 /**
+ * 导出成品的「打开至 / 发送至」。
+ *
+ * 不假设用户装了哪个阅读器：
+ * - 打开至 → `ACTION_VIEW`：系统自己弹"用什么打开"（有默认应用就直接开）；
+ * - 发送至 → `ACTION_SEND` + 选择器：分享给微信/邮箱等任意 App。
+ *
+ * Uri 要用 MediaStore 查（成品在系统下载目录，不是应用的私有文件），所以是挂起操作。
+ */
+private fun launchOutputIntent(
+    context: Context,
+    viewModel: JmTaskViewModel,
+    displayName: String,
+    share: Boolean,
+    snackbar: SnackbarHostState,
+    scope: CoroutineScope,
+) {
+    scope.launch {
+        val uri = viewModel.outputUri(displayName)
+        if (uri == null) {
+            snackbar.showSnackbar("找不到这个文件，可能已经被删除")
+            return@launch
+        }
+        val mime = if (displayName.endsWith(".pdf", ignoreCase = true)) {
+            "application/pdf"
+        } else {
+            "application/zip"
+        }
+        runCatching {
+            if (share) {
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = mime
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(Intent.createChooser(send, "发送至"))
+            } else {
+                val view = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(view)
+            }
+        }.onFailure {
+            snackbar.showSnackbar("没有可以打开这个文件的应用")
+        }
+    }
+}
+
+/**
  * 手写 ViewModel 工厂（P0 决策 D-3：不用 Hilt）。
  *
  * `albumId` / `chapterId` 只有详情页与阅读器需要，所以做成可选参数。
@@ -473,7 +562,7 @@ class JmViewModelFactory(
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T = when {
         modelClass.isAssignableFrom(JmLibraryViewModel::class.java) ->
-            JmLibraryViewModel(container.jmRepository, container.jmReading) as T
+            JmLibraryViewModel(container.jmRepository, container.jmReading, container.jmAlbumCleaner) as T
 
         modelClass.isAssignableFrom(JmRecentViewModel::class.java) ->
             JmRecentViewModel(container.jmRepository) as T
@@ -505,6 +594,7 @@ class JmViewModelFactory(
                 exports = container.jmExports,
                 tasks = container.downloadTasks,
                 secrets = container.secrets,
+                cleaner = container.jmAlbumCleaner,
                 albumId = albumId ?: error("详情页必须传 albumId"),
             ) as T
 

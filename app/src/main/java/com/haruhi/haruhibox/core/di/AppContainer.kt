@@ -222,6 +222,7 @@ class AppContainer(private val appContext: Context) {
             recentDao = database.jmRecentAlbumDao(),
             searchHistoryDao = database.jmSearchHistoryDao(),
             dirs = libraryDirs,
+            positionDao = database.playbackPositionDao(),
         )
     }
 
@@ -270,6 +271,34 @@ class AppContainer(private val appContext: Context) {
             onTaskStarted = {
                 com.haruhi.haruhibox.core.download.DownloadForegroundService.ensureRunning(appContext)
             },
+        )
+    }
+
+    /**
+     * 封面缓存的逐条失效。
+     *
+     * 封面走 Coil 的磁盘缓存（`files/covers` 里是按 URL 哈希命名的文件），
+     * 所以"删掉某一本的封面"只能按 key 失效，不能删文件名。
+     * 内存缓存也一并清掉，否则刚删完还会从内存里显示出来。
+     */
+    private val coverCache: com.haruhi.haruhibox.feature.jm.data.CoverCache =
+        object : com.haruhi.haruhibox.feature.jm.data.CoverCache {
+            override fun evict(albumId: Long) {
+                val url = JmDefaults.buildCoverUrl(albumId)
+                runCatching {
+                    imageLoader.diskCache?.remove(url)
+                    imageLoader.memoryCache?.remove(coil3.memory.MemoryCache.Key(url))
+                }.onFailure { Timber.tag("jm").w(it, "清理封面缓存失败：%d", albumId) }
+            }
+        }
+
+    /** "删除本地文件 / 从书库移除"的统一编排（记录 + 图片 + 成品 + 封面）。 */
+    val jmAlbumCleaner: com.haruhi.haruhibox.feature.jm.data.JmAlbumCleaner by lazy {
+        com.haruhi.haruhibox.feature.jm.data.JmAlbumCleaner(
+            repo = jmRepository,
+            exports = jmExports,
+            tasks = downloadTasks,
+            coverCache = coverCache,
         )
     }
 

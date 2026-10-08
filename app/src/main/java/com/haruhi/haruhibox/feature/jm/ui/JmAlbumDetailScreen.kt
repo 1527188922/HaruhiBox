@@ -2,6 +2,7 @@ package com.haruhi.haruhibox.feature.jm.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,6 +64,8 @@ import androidx.compose.ui.unit.dp
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.storage.FileNaming
 import com.haruhi.haruhibox.feature.jm.data.JmExportFormat
+import com.haruhi.haruhibox.ui.theme.WarningOrangeDark
+import com.haruhi.haruhibox.ui.theme.WarningOrangeLight
 
 /** 简介收起时显示的行数。 */
 private const val DESCRIPTION_COLLAPSED_LINES = 3
@@ -280,8 +283,8 @@ fun JmAlbumDetailScreen(
     if (showDeleteFilesDialog) {
         ConfirmDialog(
             title = "删除本地文件？",
-            text = "会删除这本漫画在本机的全部图片（约 ${formatBytes(state.localSizeBytes)}），" +
-                "书库记录与收藏会保留。",
+            text = "会删除这本漫画在本机的全部图片（约 ${formatBytes(state.localSizeBytes)}）" +
+                "以及已导出的 zip / PDF；书库记录与收藏会保留。",
             confirmText = "删除文件",
             onConfirm = { showDeleteFilesDialog = false; onDeleteAlbumFiles() },
             onDismiss = { showDeleteFilesDialog = false },
@@ -290,7 +293,8 @@ fun JmAlbumDetailScreen(
     if (showDeleteRecordDialog) {
         ConfirmDialog(
             title = "从书库移除？",
-            text = "只会移除书库中的这条记录与章节清单；本地已下载的图片与最近浏览记录都保留。",
+            text = "会删掉书库记录与章节清单，并连同本机图片、已导出的 zip / PDF、" +
+                "最近浏览记录一起清除；收藏夹里的关联也会取消。",
             confirmText = "移除",
             onConfirm = { showDeleteRecordDialog = false; onDeleteAlbumRecord() },
             onDismiss = { showDeleteRecordDialog = false },
@@ -337,6 +341,7 @@ fun JmAlbumDetailScreen(
         ExportPasswordDialog(
             format = format,
             defaultPassword = state.exportDefaultPassword,
+            targetExists = state.exportTargetExists,
             onConfirm = onConfirmExport,
             onWithoutPassword = onExportWithoutPassword,
             onDismiss = onCancelExport,
@@ -350,12 +355,14 @@ fun JmAlbumDetailScreen(
  * - 默认**预填**该格式的密码（来自凭据存储，没设过就用参考实现的默认值）；
  * - 有显示/隐藏切换；
  * - 底部是 **[确认] / [不设密码]**，留空等同不加密；
+ * - 同名成品已存在时，用橙色提醒"会被覆盖"（用户要求第 5 点）；
  * - 取消/返回不创建任务。
  */
 @Composable
 private fun ExportPasswordDialog(
     format: JmExportFormat,
     defaultPassword: String,
+    targetExists: Boolean,
     onConfirm: (String) -> Unit,
     onWithoutPassword: () -> Unit,
     onDismiss: () -> Unit,
@@ -374,6 +381,14 @@ private fun ExportPasswordDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (targetExists) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "⚠ 下载目录里已经有同名文件，再次生成会直接覆盖它。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isSystemInDarkTheme()) WarningOrangeDark else WarningOrangeLight,
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = password,

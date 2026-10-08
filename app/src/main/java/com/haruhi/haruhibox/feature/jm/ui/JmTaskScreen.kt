@@ -27,6 +27,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,8 +63,17 @@ fun JmTaskScreen(
     onClearFinished: () -> Unit,
     /** 点封面进这本漫画的详情页（只有漫画任务有封面）。 */
     onOpenAlbum: (Long) -> Unit,
+    /** 导出成品的「打开至」：用其他应用打开。 */
+    onOpenOutput: (String) -> Unit,
+    /** 导出成品的「发送至」：分享给别的 App。 */
+    onSendOutput: (String) -> Unit,
+    /** 导出成品的「删除文件」。 */
+    onDeleteOutput: (Long, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 删成品是不可撤销的（20MB 的 PDF 重新生成要花时间），所以先确认一次
+    var pendingDelete by remember { mutableStateOf<Pair<Long, String>?>(null) }
+
     Column(modifier = modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
@@ -107,6 +120,9 @@ fun JmTaskScreen(
                             onRetry = onRetry,
                             onRemove = onRemove,
                             onOpenAlbum = onOpenAlbum,
+                            onOpenOutput = onOpenOutput,
+                            onSendOutput = onSendOutput,
+                            onDeleteOutput = onDeleteOutput,
                         )
                     }
                 }
@@ -122,11 +138,27 @@ fun JmTaskScreen(
                             onRetry = onRetry,
                             onRemove = onRemove,
                             onOpenAlbum = onOpenAlbum,
+                            onOpenOutput = onOpenOutput,
+                            onSendOutput = onSendOutput,
+                            onDeleteOutput = { id, name -> pendingDelete = id to name },
                         )
                     }
                 }
             }
         }
+    }
+
+    pendingDelete?.let { (taskId, name) ->
+        ConfirmDialog(
+            title = "删除这个导出文件？",
+            text = "会从系统下载目录里删掉「$name」，已经发送或打开过的副本不受影响。",
+            confirmText = "删除",
+            onConfirm = {
+                pendingDelete = null
+                onDeleteOutput(taskId, name)
+            },
+            onDismiss = { pendingDelete = null },
+        )
     }
 }
 
@@ -150,6 +182,9 @@ private fun TaskCard(
     onRetry: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     onOpenAlbum: (Long) -> Unit,
+    onOpenOutput: (String) -> Unit,
+    onSendOutput: (String) -> Unit,
+    onDeleteOutput: (Long, String) -> Unit,
 ) {
     val task = row.task
     Card(
@@ -176,6 +211,14 @@ private fun TaskCard(
                     Spacer(Modifier.width(10.dp))
                 }
                 Column(modifier = Modifier.weight(1f)) {
+                    // 任务类型标签（用户要求第 4 点）：导出任务一眼看出是 zip 还是 pdf
+                    row.typeLabel?.let { label ->
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                     Text(
                         text = row.displayName,
                         style = MaterialTheme.typography.bodyLarge,
@@ -238,6 +281,15 @@ private fun TaskCard(
                     TextButton(onClick = { onCancel(task.id) }) { Text("取消") }
                 } else {
                     TextButton(onClick = { onRemove(task.id) }) { Text("删除记录") }
+                }
+            }
+
+            // 导出成品的三颗按钮（用户要求第 4 点）：用其他应用打开 / 发送 / 删除文件
+            row.outputName?.let { name ->
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { onOpenOutput(name) }) { Text("打开至") }
+                    TextButton(onClick = { onSendOutput(name) }) { Text("发送至") }
+                    TextButton(onClick = { onDeleteOutput(task.id, name) }) { Text("删除文件") }
                 }
             }
 

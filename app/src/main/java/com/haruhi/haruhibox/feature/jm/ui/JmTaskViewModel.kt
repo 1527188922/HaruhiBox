@@ -31,13 +31,35 @@ data class TaskRow(
         get() = task.displayName?.takeIf { it.isNotBlank() }
             ?: if (task.type.name.startsWith("JM")) "JM${task.bizKey}" else task.bizKey
 
-    /** 只有漫画任务有封面（`bizKey` 就是 JM 号）；导出等任务没有。 */
+    /** 只有漫画任务有封面（`bizKey` 就是 JM 号）；导出任务也是，**生成成品的那本**。 */
     val albumId: Long?
-        get() = if (task.type == DownloadType.JM_ALBUM) task.bizKey.toLongOrNull() else null
+        get() = when (task.type) {
+            DownloadType.JM_ALBUM, DownloadType.JM_EXPORT_ZIP, DownloadType.JM_EXPORT_PDF ->
+                task.bizKey.toLongOrNull()
+
+            else -> null
+        }
 
     /** 导出任务：**不能续做**，只能取消后重新生成（计划 §9 第 9 条），所以不给「重试」与「暂停」。 */
     val isExport: Boolean
         get() = task.type == DownloadType.JM_EXPORT_ZIP || task.type == DownloadType.JM_EXPORT_PDF
+
+    /**
+     * 任务类型标签（用户要求第 4 点）：导出任务要一眼看出是在生成 zip 还是 pdf。
+     *
+     * 普通下载任务不标——任务名本身（本子标题）已经说明了一切。
+     */
+    val typeLabel: String?
+        get() = when (task.type) {
+            DownloadType.JM_EXPORT_ZIP -> "生成 ZIP"
+            DownloadType.JM_EXPORT_PDF -> "生成 PDF"
+            DownloadType.BILI_VIDEO -> "下载视频"
+            else -> null
+        }
+
+    /** 导出完成的成品文件名（"打开至 / 发送至 / 删除文件"要用）。 */
+    val outputName: String?
+        get() = if (isExport && task.status == DownloadStatus.SUCCESS) task.displayName else null
 
     val statusText: String get() = taskStatusLabel(task)
     val progressText: String get() = taskProgressText(task)
@@ -171,6 +193,21 @@ class JmTaskViewModel(
             runCatching { tasks.delete(taskId) }
                 .onFailure { Timber.tag("dl").w(it, "删除任务失败") }
             message.value = "已删除任务记录（本地文件未动）"
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 导出成品的"打开至 / 发送至 / 删除文件"（用户要求第 4 点）
+    // ------------------------------------------------------------------
+
+    /** 成品的内容 Uri；界面用它构造 ACTION_VIEW / ACTION_SEND 的 Intent。 */
+    suspend fun outputUri(displayName: String): android.net.Uri? = exports.outputUri(displayName)
+
+    /** 删除成品文件本身（记录保留）。 */
+    fun deleteOutput(taskId: Long, displayName: String) {
+        viewModelScope.launch {
+            val ok = runCatching { exports.deleteOutput(displayName) }.getOrDefault(false)
+            message.value = if (ok) "已删除文件" else "文件已经不在了"
         }
     }
 

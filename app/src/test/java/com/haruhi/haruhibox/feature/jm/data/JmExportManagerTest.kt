@@ -225,6 +225,66 @@ class JmExportManagerTest {
     }
 
     // ------------------------------------------------------------------
+    // 成品查询 / 删除（"会覆盖"提示与"删除本地文件"都用得上，用户要求第 5、6、7 点）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `outputExists tells whether that format is already in the download folder`() {
+        seedAlbum()
+        seedChapter(1L, "第1话", "00001.webp", onDisk = 1)
+
+        assertThat(runBlocking { manager.outputExists(album(), JmExportFormat.ZIP) }).isFalse()
+
+        exportAndWait(JmExportFormat.ZIP, password = null)
+
+        assertThat(runBlocking { manager.outputExists(album(), JmExportFormat.ZIP) }).isTrue()
+        // 另一种格式没导出过，不能跟着一起说"已存在"
+        assertThat(runBlocking { manager.outputExists(album(), JmExportFormat.PDF) }).isFalse()
+    }
+
+    @Test
+    fun `outputUri finds the published file by its display name`() {
+        seedAlbum()
+        seedChapter(1L, "第1话", "00001.webp", onDisk = 1)
+        exportAndWait(JmExportFormat.ZIP, password = null)
+
+        // 假 publisher 的 uriOf 恒为 null（见 FakePublisher 注释），这里只验证名字对得上：
+        // 名字错了就不会去查（outputNameOf 返回 null 时直接给 null）
+        assertThat(manager.outputNameOf(album(), JmExportFormat.ZIP)).isEqualTo("$folderName.zip")
+        assertThat(runBlocking { manager.outputUri("$folderName.zip") }).isNull()
+    }
+
+    @Test
+    fun `deleting an album wipes both exported formats`() {
+        seedAlbum()
+        seedChapter(1L, "第1话", "00001.webp", onDisk = 1)
+        exportAndWait(JmExportFormat.ZIP, password = null)
+        exportAndWait(JmExportFormat.PDF, password = null)
+
+        val removed = runBlocking { manager.deleteOutputs(album()) }
+
+        assertThat(removed).isEqualTo(2)
+        assertThat(File(publisher.dir, "$folderName.zip").exists()).isFalse()
+        assertThat(File(publisher.dir, "$folderName.pdf").exists()).isFalse()
+        // 已经删干净之后再删一次不该报错，也不该数成"删掉了"
+        assertThat(runBlocking { manager.deleteOutputs(album()) }).isEqualTo(0)
+    }
+
+    @Test
+    fun `deleting a single output keeps the other format`() {
+        seedAlbum()
+        seedChapter(1L, "第1话", "00001.webp", onDisk = 1)
+        exportAndWait(JmExportFormat.ZIP, password = null)
+        exportAndWait(JmExportFormat.PDF, password = null)
+
+        val ok = runBlocking { manager.deleteOutput("$folderName.pdf") }
+
+        assertThat(ok).isTrue()
+        assertThat(File(publisher.dir, "$folderName.pdf").exists()).isFalse()
+        assertThat(File(publisher.dir, "$folderName.zip").exists()).isTrue()
+    }
+
+    // ------------------------------------------------------------------
     // 工具
     // ------------------------------------------------------------------
 
@@ -298,5 +358,12 @@ class JmExportManagerTest {
             publishedNames += displayName
             return ExportPublisher.Published(displayName, "下载/HaruHiBox", null)
         }
+
+        override fun exists(displayName: String): Boolean = File(dir, displayName).isFile
+
+        // 真机上这里给的是 content Uri；假实现不需要"打开至"，按注释约定返回 null
+        override fun uriOf(displayName: String): android.net.Uri? = null
+
+        override fun delete(displayName: String): Boolean = File(dir, displayName).delete()
     }
 }
