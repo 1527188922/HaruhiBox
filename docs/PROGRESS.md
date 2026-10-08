@@ -126,7 +126,7 @@ app/src/main/java/com/haruhi/haruhibox/
 
 ### P3 待验证（需要你在设备上确认）
 
-自动验证过的部分：**195 个单元测试 + 6 个真机测试**全绿，lint 0 error，debug/release 均可构建。
+自动验证过的部分：**199 个单元测试 + 6 个真机测试**全绿，lint 0 error，debug/release 均可构建。
 （真机 6 个用例是上一轮跑的：迁移 2 + PDF 加密 4；本轮没有改数据库结构，所以没有重跑。）
 
 | # | 请确认 | 期望 |
@@ -155,6 +155,20 @@ app/src/main/java/com/haruhi/haruhibox/
 | 详情页头部 | ✅ 阅读 / 下载 / 已收藏 三颗按钮，第二行是「已在书库 · 已加入 1 个收藏夹」 |
 | 点「已收藏」 | ✅ 直接弹出收藏夹面板（默认收藏夹已勾选 + 新建收藏夹） |
 | 边看边下 | ✅ 同一次操作里，下载任务的计数从 3/51 涨到 33/51——阅读器取回来的图就是下载任务认的那份文件 |
+
+### 第五轮反馈的模拟器实测记录（2026-10-09）
+
+| 步骤 | 结果 |
+|---|---|
+| 详情页标题 | ✅ 紧贴状态栏，留白消失 |
+| 打开一本未下载的漫画进阅读器 | ✅ 显示"正在加载第 1 页…"，底栏进度条 + 「第1话 · 1/40 页」+「加载中 40」 |
+| 该过程中的主线程 | ✅ logcat **没有任何 `Skipped N frames` / `Davey!`**（改之前实测同一动作会 `Skipped 72 frames!`） |
+| 阅读器点「收藏」→ 返回详情页 | ✅ 按钮立刻变「已收藏」，状态行变「已在书库 · 已加入 1 个收藏夹」 |
+| 详情页收藏夹面板里移出 | ✅ 按钮立刻变回「收藏」，状态行变「未收藏」，面板勾选同步取消 |
+| 章节行的 ⋮ | ✅ 菜单紧贴按钮右下弹出 |
+| 书库列表 | ✅ 最近加入的排在最前 |
+| 收藏夹删除 | ✅ 弹出「删除「X」？……漫画仍然留在书库，已下载的图片也不会被删掉」 |
+| 改名撞车 | ✅ 提示「已经有同名的收藏夹了，换个名字」（之前是"默认收藏夹不支持重命名"） |
 
 ### 用户提出的 8 点改动（2026-10-08 完成）
 
@@ -227,6 +241,26 @@ app/src/main/java/com/haruhi/haruhibox/
 1. **同一张图被两个调用方同时要**（一边看一边下载）会写同一个 `<图>.part`。
    现在 `FileDownloader` 对每个目标文件加锁，等锁期间会重新判断"是不是已经下好了"。
 2. **解扰不可逆**：`JmImageStore` 对每张图加锁，保证同一张只解扰一次。
+
+### 第五轮反馈修复（2026-10-09）
+
+**这一轮的主线是主线程阻塞**：用户报的三处"卡一下"其实是同一个根因——
+`viewModelScope` 用的是主线程调度器，而我在里面直接做了磁盘与解码的重活。
+
+| # | 反馈 | 根因 | 修复 |
+|---|---|---|---|
+| E1 | 收藏夹里全部移出后按钮还是"已收藏" | `removeFromFavorite` 只改了数据库，详情页的 `album` 是**进页面时读的一次性快照**，没人通知它 | 详情页改成**观察** `observeAlbum(aid)` 与 `observeFavoriteIdsOf(aid)`（新增 Dao Flow），谁改了都立刻反映 |
+| E2 | 书库要按入库时间降序 | 排序是 `collected DESC, COALESCE(modify_time, create_time) DESC`——收藏优先，而且刷新详情会改 `modify_time` 把顺序打乱 | 改成 `create_time DESC, id DESC`。`create_time` 才是"第一次进书库的时间" |
+| E3 | 阅读器里收藏后返回详情页仍显示"收藏" | 同 E1 | 同 E1（两个页面现在看同一份 Flow） |
+| E4 | 阅读器去掉"护眼暖色" | — | 删掉 `ReadingBackground.SEPIA` 与对应配色；历史数据里的编码 3 回落到"跟随主题"（有用例锁定） |
+| E5 | 详情页标题上方一大块留白 | edge-to-edge 下**两层 Scaffold 各加了一次状态栏内边距**：外层 `JmModeRoot` 的 Scaffold 已经把状态栏高度作为 `padding` 给了 NavHost，内层 Scaffold 与 TopAppBar 又各加了一遍 | 内层 `contentWindowInsets = WindowInsets(0,0,0,0)`，TopAppBar 同样置 0 |
+| E6 | 章节的"删除本话文件"菜单飘到别处 | `DropdownMenu` 直接当 `Row` 的子节点，锚点算在了整行上 | 把图标与菜单包进同一个 `Box`，锚点才是那颗按钮 |
+| E7 | 改名撞车时提示"默认收藏夹不支持重命名"；删除缺二次确认 | `renameFavorite` / `deleteFavorite` 只用 `Boolean` 表达结果，界面只能猜一个文案 | 改成 `FavoriteWriteResult`（Ok / DefaultFolder / NameTaken / NameBlank / NotFound），界面逐项给文案；删除加确认框并写清影响 |
+| E8 | **阅读器在线取图时 UI 卡住** | `JmImageStore.file()` 跑在 `viewModelScope`（主线程）上，而里面的**解扰是纯 CPU 重活**：JM 长图解码成 ARGB_8888 要几十 MB，还要逐行 `getPixels/setPixels` 再重新编码 | `file()` 与 `aspectRatioOf()` 整段 `withContext(Dispatchers.IO)` |
+| E9 | 进详情页、点进收藏夹各卡一下 | 同类问题：`downloadedImageCount` 逐张查文件、`localSize` 递归遍历目录、`readMeta` 读图片头，全在主线程 | `loadLocalStats` 与 `buildStat` 的整段计算切到 IO；阅读器的 `refreshFromDisk` 也切到 IO |
+
+> E8/E9 是同一类错误的三个出口。判断方法很简单：**`viewModelScope` 里没有 `withContext`
+> 的代码都在主线程上跑**。现在的约定是——凡是碰文件、解码、遍历目录的，一律先切 IO。
 
 ### 真机验证发现的一个严重 bug（已修）
 
@@ -397,14 +431,14 @@ OK (4 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：195 个单元测试 + lint + 两种构建
+# 开发机：199 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF 加密）
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**195 个单元测试 + 6 个真机用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**199 个单元测试 + 6 个真机用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（4.4 MB → 5.6 MB，新增阅读器与任务页）。
 
 ### 测试清单（单元测试）

@@ -7,8 +7,10 @@ import com.haruhi.haruhibox.core.download.DownloadOutcome
 import com.haruhi.haruhibox.core.download.FileDownloader
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.storage.LibraryDirs
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -84,6 +86,11 @@ class JmImageStore(
     /**
      * 取一张图：本地优先，没有就联网下载并**落盘缓存**。
      *
+     * **整段都在 [Dispatchers.IO] 上跑**：解扰是纯 CPU 的重活（JM 长图 800×12000，
+     * 解码成 ARGB_8888 就要 36MB，还要逐行 `getPixels/setPixels` 再重新编码）。
+     * 调用方是 `viewModelScope`（主线程调度器），如果这里不切线程，
+     * **每取一页就会把 UI 卡住一次**——用户反馈的"看漫画时 UI 卡住"正是这个原因。
+     *
      * @throws Exception 网络失败、解扰失败、写盘失败都会抛出来，由调用方转成用户文案
      */
     suspend fun file(
@@ -91,12 +98,12 @@ class JmImageStore(
         chapterId: Long,
         chapterFolder: String,
         imageFile: String,
-    ): File {
-        cachedFile(album, chapterFolder, imageFile)?.let { return it }
+    ): File = withContext(Dispatchers.IO) {
+        cachedFile(album, chapterFolder, imageFile)?.let { return@withContext it }
 
         val target = targetFile(album, chapterFolder, imageFile)
         val lock = locks.computeIfAbsent(target.absolutePath) { Mutex() }
-        return lock.withLock {
+        lock.withLock {
             // 等锁期间别人可能已经下好了（阅读器与下载任务抢同一张图是常态）
             cachedFile(album, chapterFolder, imageFile)?.let { return@withLock it }
 
@@ -125,8 +132,13 @@ class JmImageStore(
         }
     }
 
-    /** 图片宽高比（高/宽）。读不到时给占位值，保证长图滚动不跳。 */
-    fun aspectRatioOf(file: File, fallback: Float): Float =
+    /**
+     * 图片宽高比（高/宽）。读不到时给占位值，保证长图滚动不跳。
+     *
+     * 读文件头也是解码（`inJustDecodeBounds` 仍要打开并解析图片），所以**同样切到 IO**：
+     * 打开一章时要把每一页的比例都算一遍，放在主线程就是"进阅读器卡一下"。
+     */
+    suspend fun aspectRatioOf(file: File, fallback: Float): Float = withContext(Dispatchers.IO) {
         aspects.getOrPut("${file.absolutePath}:${file.length()}") {
             runCatching {
                 val meta = ImageCodec.readMeta(file)
@@ -137,6 +149,7 @@ class JmImageStore(
                 }
             }.getOrDefault(fallback)
         }
+    }
 
     /** 这一话的 `scramble_id`；取不到时用参考实现的兜底值。同一话只请求一次。 */
     private suspend fun scrambleIdOf(chapterId: Long): Long {

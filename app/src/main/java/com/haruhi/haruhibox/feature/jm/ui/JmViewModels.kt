@@ -10,12 +10,14 @@ import com.haruhi.haruhibox.core.download.DownloadTaskRepository
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.core.network.NetworkError
 import com.haruhi.haruhibox.core.network.toUserMessage
+import com.haruhi.haruhibox.feature.jm.data.FavoriteWriteResult
 import com.haruhi.haruhibox.feature.jm.data.JmDownloadManager
 import com.haruhi.haruhibox.feature.jm.data.JmReadingRepository
 import com.haruhi.haruhibox.feature.jm.data.JmRepository
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchItem
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchResult
 import com.haruhi.haruhibox.feature.jm.data.ReadingPosition
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -29,6 +31,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 // ======================================================================
@@ -251,7 +254,7 @@ class JmLibraryViewModel(
      */
     fun onScreenResumed() = refreshStats()
 
-    private suspend fun buildStat(album: JmAlbumEntity): ChapterStat {
+    private suspend fun buildStat(album: JmAlbumEntity): ChapterStat = withContext(Dispatchers.IO) {
         val chapters = repo.chaptersOf(album)
         var downloaded = 0
         var totalImages = 0
@@ -270,7 +273,7 @@ class JmLibraryViewModel(
         }
         // 没有任何章节记录时，用 album.images 的数量近似"总章节数"是不可靠的；
         // 这里只在有章节数据时给出统计（0 表示"未刷新过详情"）。
-        return ChapterStat(
+        ChapterStat(
             total = chapters.size,
             downloaded = downloaded,
             size = repo.localSize(album.albumFolderName),
@@ -576,26 +579,54 @@ class JmFavoritesViewModel(private val repo: JmRepository) : ViewModel() {
 
     fun create(name: String) {
         viewModelScope.launch {
-            val created = runCatching { repo.createFavorite(name) }.getOrNull()
+            val result = runCatching { repo.createFavorite(name) }
+                .getOrDefault(FavoriteWriteResult.NameBlank)
             _state.update {
-                it.copy(message = if (created == null) "收藏夹名称已存在或为空" else "已创建「${created.name}」")
+                it.copy(
+                    message = when (result) {
+                        FavoriteWriteResult.Ok -> "已创建「${name.trim()}」"
+                        FavoriteWriteResult.NameTaken -> "已经有同名的收藏夹了"
+                        FavoriteWriteResult.NameBlank -> "请输入收藏夹名称"
+                        FavoriteWriteResult.DefaultFolder -> "默认收藏夹已存在"
+                        FavoriteWriteResult.NotFound -> "收藏夹不存在"
+                    },
+                )
             }
         }
     }
 
     fun rename(id: Long, newName: String) {
         viewModelScope.launch {
-            val ok = runCatching { repo.renameFavorite(id, newName) }.getOrDefault(false)
-            // 默认收藏夹不允许改名（参考实现语义）
-            _state.update { it.copy(message = if (ok) "已重命名" else "默认收藏夹不支持重命名") }
+            val result = runCatching { repo.renameFavorite(id, newName) }
+                .getOrDefault(FavoriteWriteResult.NotFound)
+            // 每种失败原因分开提示（用户反馈第 7 点：撞名被说成了"默认收藏夹不支持重命名"）
+            _state.update {
+                it.copy(
+                    message = when (result) {
+                        FavoriteWriteResult.Ok -> "已重命名为「${newName.trim()}」"
+                        FavoriteWriteResult.DefaultFolder -> "默认收藏夹不支持重命名"
+                        FavoriteWriteResult.NameTaken -> "已经有同名的收藏夹了，换个名字"
+                        FavoriteWriteResult.NameBlank -> "名称不能为空"
+                        FavoriteWriteResult.NotFound -> "收藏夹不存在"
+                    },
+                )
+            }
         }
     }
 
     fun delete(id: Long) {
         viewModelScope.launch {
-            val ok = runCatching { repo.deleteFavorite(id) }.getOrDefault(false)
+            val result = runCatching { repo.deleteFavorite(id) }
+                .getOrDefault(FavoriteWriteResult.NotFound)
             _state.update {
-                it.copy(message = if (ok) "已删除收藏夹（不影响书库记录与本地文件）" else "默认收藏夹不支持删除")
+                it.copy(
+                    message = when (result) {
+                        FavoriteWriteResult.Ok -> "已删除收藏夹（书库记录与本地文件都保留）"
+                        FavoriteWriteResult.DefaultFolder -> "默认收藏夹不支持删除"
+                        FavoriteWriteResult.NotFound -> "收藏夹不存在"
+                        else -> "删除失败"
+                    },
+                )
             }
         }
     }
@@ -786,6 +817,26 @@ class JmAlbumDetailViewModel(
                     _state.update { it.copy(queuedChapterIds = queued) }
                 }
         }
+
+        // 4) 收藏状态跟着数据库走（用户反馈第 1、3 点）：
+        //    "在收藏夹面板里全部移出"或"在阅读器里点了收藏"之后回到详情页，
+        //    必须立刻看到正确的按钮状态。之前只在页面加载时读一次，所以看不到变化。
+        viewModelScope.launch {
+            repo.observeAlbum(albumId)
+                .catch { e -> Timber.tag("jm").w(e, "观察本子失败") }
+                .collect { album ->
+                    if (album != null) {
+                        _state.update { it.copy(album = album, inLibrary = true) }
+                    }
+                }
+        }
+        viewModelScope.launch {
+            repo.observeFavoriteIdsOf(albumId)
+                .catch { e -> Timber.tag("jm").w(e, "观察收藏夹关联失败") }
+                .collect { ids ->
+                    _state.update { it.copy(favoriteIds = ids) }
+                }
+        }
     }
 
     /**
@@ -867,32 +918,41 @@ class JmAlbumDetailViewModel(
         viewModelScope.launch { loadLocalStats() }
     }
 
+    /**
+     * 重算章节状态与本地占用。
+     *
+     * **必须切到 IO**：`downloadedImageCount` 要逐张看文件在不在，`localSize` 要递归遍历
+     * 整个本子目录。放在主线程就是"进详情页卡一下"（用户反馈第 9 点）。
+     */
     private suspend fun loadLocalStats() {
         val album = _state.value.album ?: return
-        val chapters = repo.chaptersOf(album)
-        val rows = chapters.sortedBy { it.sort?.toIntOrNull() ?: Int.MAX_VALUE }.map { chapter ->
-            val images = repo.imagesOf(album.id, chapter.chapterId)
-            val folder = repo.chapterFolderName(chapter)
-            val have = repo.downloadedImageCount(
-                album.albumFolderName,
-                folder,
-                images.map { it.imageFile },
-            )
-            ChapterRow(
-                chapterId = chapter.chapterId,
-                title = chapter.title,
-                sortIndex = chapter.sort?.toIntOrNull() ?: 0,
-                totalImages = images.size,
-                downloadedImages = have,
-            )
+        val (rows, localSize, favoriteIds) = withContext(Dispatchers.IO) {
+            val chapters = repo.chaptersOf(album)
+            val rows = chapters.sortedBy { it.sort?.toIntOrNull() ?: Int.MAX_VALUE }.map { chapter ->
+                val images = repo.imagesOf(album.id, chapter.chapterId)
+                val folder = repo.chapterFolderName(chapter)
+                val have = repo.downloadedImageCount(
+                    album.albumFolderName,
+                    folder,
+                    images.map { it.imageFile },
+                )
+                ChapterRow(
+                    chapterId = chapter.chapterId,
+                    title = chapter.title,
+                    sortIndex = chapter.sort?.toIntOrNull() ?: 0,
+                    totalImages = images.size,
+                    downloadedImages = have,
+                )
+            }
+            Triple(rows, repo.localSize(album.albumFolderName), repo.favoriteIdsOf(albumId))
         }
         _state.update {
             it.copy(
                 chapters = if (it.reversed) rows.reversed() else rows,
                 totalChapters = rows.size,
                 downloadedChapters = rows.count { row -> row.isDownloaded },
-                localSizeBytes = repo.localSize(album.albumFolderName),
-                favoriteIds = repo.favoriteIdsOf(albumId),
+                localSizeBytes = localSize,
+                favoriteIds = favoriteIds,
             )
         }
     }
@@ -988,11 +1048,21 @@ class JmAlbumDetailViewModel(
 
     fun createFavoriteAndAdd(name: String) {
         viewModelScope.launch {
-            val created = runCatching { repo.createFavorite(name) }.getOrNull()
-            if (created == null) {
-                _state.update { it.copy(message = "收藏夹名称已存在或为空") }
+            val result = runCatching { repo.createFavorite(name) }
+                .getOrDefault(FavoriteWriteResult.NameBlank)
+            if (result != FavoriteWriteResult.Ok) {
+                _state.update {
+                    it.copy(
+                        message = when (result) {
+                            FavoriteWriteResult.NameTaken -> "已经有同名的收藏夹了"
+                            FavoriteWriteResult.NameBlank -> "请输入收藏夹名称"
+                            else -> "创建收藏夹失败"
+                        },
+                    )
+                }
                 return@launch
             }
+            val created = repo.listFavorites().firstOrNull { it.name == name.trim() } ?: return@launch
             if (!_state.value.inLibrary) runCatching { ensureInLibrary() }
             repo.addToFavorite(albumId, created.id)
             _state.update {

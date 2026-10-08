@@ -42,17 +42,23 @@ class JmDaoTest {
     @After
     fun tearDown() = db.close()
 
+    /**
+     * 书库分页：**按入库时间倒序**（用户要求第 2 点）。
+     *
+     * `create_time` 才是"入库时间"——刷新详情只会改 `modify_time`，
+     * 所以排序不再看收藏标记，也不再被刷新动作影响。
+     */
     @Test
-    fun `library pagination returns stable slices ordered by collected then time`() = runTest {
+    fun `library pagination returns stable slices ordered by added time`() = runTest {
         val dao = db.jmAlbumDao()
-        // 5 本：id 1..5，收藏的是 2 和 4
+        // 5 本：id 1..5，入库时间递增（id 5 最新）
         (1L..5L).forEach { id ->
             dao.insertIgnore(
                 JmAlbumEntity(
                     id = id,
                     name = "本子$id",
                     collected = id % 2 == 0L,
-                    modifyTime = "2026-01-0$id",
+                    createTime = "2026-01-0$id",
                 ),
             )
         }
@@ -61,9 +67,22 @@ class JmDaoTest {
         val secondPage = dao.observeLibrary(null, null, null, "", null, limit = 2, offset = 2).first()
         val thirdPage = dao.observeLibrary(null, null, null, "", null, limit = 2, offset = 4).first()
 
-        assertThat(firstPage.map { it.id }).containsExactly(4L, 2L).inOrder()
-        assertThat(secondPage.map { it.id }).containsExactly(5L, 3L).inOrder()
+        assertThat(firstPage.map { it.id }).containsExactly(5L, 4L).inOrder()
+        assertThat(secondPage.map { it.id }).containsExactly(3L, 2L).inOrder()
         assertThat(thirdPage.map { it.id }).containsExactly(1L)
+    }
+
+    @Test
+    fun `refreshing an album does not change its place in the library`() = runTest {
+        val dao = db.jmAlbumDao()
+        dao.insertIgnore(JmAlbumEntity(id = 1, name = "旧的", createTime = "2026-01-01"))
+        dao.insertIgnore(JmAlbumEntity(id = 2, name = "新的", createTime = "2026-01-02"))
+
+        // 刷新旧的那本：只改 modify_time
+        dao.update(JmAlbumEntity(id = 1, name = "旧的", createTime = "2026-01-01", modifyTime = "2026-06-01"))
+
+        val page = dao.observeLibrary(null, null, null, "", null, limit = 10, offset = 0).first()
+        assertThat(page.map { it.id }).containsExactly(2L, 1L).inOrder()
     }
 
     @Test

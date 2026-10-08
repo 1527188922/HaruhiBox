@@ -44,19 +44,22 @@ fun ReadingDirection.toCode(): Int = if (this == ReadingDirection.RTL) {
     SettingDefaults.JM_READING_DIRECTION_LTR
 }
 
-/** 阅读背景（计划 §9.3 的"阅读背景"）。 */
+/**
+ * 阅读背景（计划 §9.3 的"阅读背景"）。
+ *
+ * **不含"护眼暖色"**（用户要求第 4 点：观看漫画界面去掉它）。
+ */
 enum class ReadingBackground(val label: String) {
     THEME("跟随主题"),
     LIGHT("浅色"),
     DARK("深色"),
-    SEPIA("护眼暖色"),
     ;
 
     companion object {
         fun fromCode(code: Int) = when (code) {
             SettingDefaults.JM_READING_BACKGROUND_LIGHT -> LIGHT
             SettingDefaults.JM_READING_BACKGROUND_DARK -> DARK
-            SettingDefaults.JM_READING_BACKGROUND_SEPIA -> SEPIA
+            // 包括历史数据里可能存在的"护眼暖色"（3）：已经不支持，回到跟随主题
             else -> THEME
         }
     }
@@ -66,7 +69,6 @@ fun ReadingBackground.toCode(): Int = when (this) {
     ReadingBackground.THEME -> SettingDefaults.JM_READING_BACKGROUND_THEME
     ReadingBackground.LIGHT -> SettingDefaults.JM_READING_BACKGROUND_LIGHT
     ReadingBackground.DARK -> SettingDefaults.JM_READING_BACKGROUND_DARK
-    ReadingBackground.SEPIA -> SettingDefaults.JM_READING_BACKGROUND_SEPIA
 }
 
 /**
@@ -94,14 +96,13 @@ data class ReaderPreferences(
         }
 }
 
-/** 阅读器背景色。`THEME` 用主题背景，其余是固定的护眼配色。 */
+/** 阅读器背景色。`THEME` 用主题背景，其余是固定配色。 */
 @Composable
 @ReadOnlyComposable
 fun readerBackgroundColor(background: ReadingBackground): Color = when (background) {
     ReadingBackground.THEME -> MaterialTheme.colorScheme.background
     ReadingBackground.LIGHT -> Color(0xFFF7F5F2)
     ReadingBackground.DARK -> Color(0xFF121212)
-    ReadingBackground.SEPIA -> Color(0xFFF2E8D5)
 }
 
 /** 该背景下文字应该用的颜色（控件栏在深色背景上不能用主题的 onBackground）。 */
@@ -109,6 +110,6 @@ fun readerBackgroundColor(background: ReadingBackground): Color = when (backgrou
 @ReadOnlyComposable
 fun readerContentColor(background: ReadingBackground): Color = when (background) {
     ReadingBackground.THEME -> MaterialTheme.colorScheme.onBackground
-    ReadingBackground.LIGHT, ReadingBackground.SEPIA -> Color(0xFF1B1B1B)
+    ReadingBackground.LIGHT -> Color(0xFF1B1B1B)
     ReadingBackground.DARK -> Color(0xFFE6E6E6)
 }

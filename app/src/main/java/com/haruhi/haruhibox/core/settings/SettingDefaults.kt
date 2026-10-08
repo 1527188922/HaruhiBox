@@ -54,10 +54,17 @@ object SettingDefaults {
     /** [计划 §9.3] 阅读背景：跟随主题。 */
     const val JM_READING_BACKGROUND_THEME = 0
 
-    /** [计划 §9.3] 阅读背景：浅色 / 深色 / 护眼暖色。 */
+    /** [计划 §9.3] 阅读背景：浅色 / 深色。 */
     const val JM_READING_BACKGROUND_LIGHT = 1
     const val JM_READING_BACKGROUND_DARK = 2
-    const val JM_READING_BACKGROUND_SEPIA = 3
+
+    /**
+     * 历史值：护眼暖色。
+     *
+     * 阅读界面已经去掉这个选项（用户要求第 4 点），保留常量只为了说明编码 3 曾经存在——
+     * 读到它时一律回落到"跟随主题"。
+     */
+    const val JM_READING_BACKGROUND_SEPIA_LEGACY = 3
 
     /** [计划 §9.3] 阅读方式：横向分页。 */
     const val JM_READING_MODE_HORIZONTAL = 1

@@ -600,37 +600,52 @@ class JmRepository(
             ?: error("创建默认收藏夹失败(id=$id)")
     }
 
-    /** 新建收藏夹。重名时返回 null（`name` 上有唯一索引）。 */
-    suspend fun createFavorite(name: String): JmFavoriteEntity? {
+    /**
+     * 新建收藏夹。
+     *
+     * 重名与空名都要**分别**告诉用户，不能都回一个 null
+     * （用户反馈第 7 点：改名撞名时提示成了"默认收藏夹不支持重命名"）。
+     */
+    suspend fun createFavorite(name: String): FavoriteWriteResult {
         val trimmed = name.trim()
-        if (trimmed.isEmpty()) return null
-        val id = favoriteDao.insert(JmFavoriteEntity(name = trimmed, sortOrder = nextSortOrder(), createTime = nowText()))
-        if (id <= 0) return null
-        return favoriteDao.findByName(trimmed)
+        if (trimmed.isEmpty()) return FavoriteWriteResult.NameBlank
+        if (favoriteDao.findByName(trimmed) != null) return FavoriteWriteResult.NameTaken
+        val id = favoriteDao.insert(
+            JmFavoriteEntity(name = trimmed, sortOrder = nextSortOrder(), createTime = nowText()),
+        )
+        return if (id > 0) FavoriteWriteResult.Ok else FavoriteWriteResult.NameTaken
     }
 
     private suspend fun nextSortOrder(): Int =
         (favoriteDao.all().maxOfOrNull { it.sortOrder } ?: 0) + 1
 
-    /** 重命名。默认收藏夹不允许改名（参考实现直接抛业务异常）。 */
-    suspend fun renameFavorite(id: Long, newName: String): Boolean {
-        val favorite = favoriteDao.all().firstOrNull { it.id == id } ?: return false
-        if (favorite.name == DEFAULT_FAVORITE_NAME) return false
+    /**
+     * 重命名收藏夹。
+     *
+     * 三种失败原因必须分开：默认夹不允许改名、新名字已被占用、夹不存在。
+     * 之前统一返回 false，界面只能猜一个文案，于是"撞名"被说成了"默认收藏夹不支持重命名"。
+     */
+    suspend fun renameFavorite(id: Long, newName: String): FavoriteWriteResult {
+        val favorite = favoriteDao.all().firstOrNull { it.id == id } ?: return FavoriteWriteResult.NotFound
+        if (favorite.name == DEFAULT_FAVORITE_NAME) return FavoriteWriteResult.DefaultFolder
         val trimmed = newName.trim()
-        if (trimmed.isEmpty()) return false
+        if (trimmed.isEmpty()) return FavoriteWriteResult.NameBlank
+        if (trimmed == favorite.name) return FavoriteWriteResult.Ok
+        // 唯一索引也会拦，但提前查一次才能给出准确原因
+        if (favoriteDao.findByName(trimmed) != null) return FavoriteWriteResult.NameTaken
         favoriteDao.rename(id, trimmed, nowText())
-        return true
+        return FavoriteWriteResult.Ok
     }
 
     /**
      * 删除收藏夹：只删夹与关联，**不动书库记录和本地文件**（计划 §9 第 6 条）。
      * 默认收藏夹不允许删除。
      */
-    suspend fun deleteFavorite(id: Long): Boolean {
-        val favorite = favoriteDao.all().firstOrNull { it.id == id } ?: return false
-        if (favorite.name == DEFAULT_FAVORITE_NAME) return false
+    suspend fun deleteFavorite(id: Long): FavoriteWriteResult {
+        val favorite = favoriteDao.all().firstOrNull { it.id == id } ?: return FavoriteWriteResult.NotFound
+        if (favorite.name == DEFAULT_FAVORITE_NAME) return FavoriteWriteResult.DefaultFolder
         favoriteDao.deleteWithLinks(id)
-        return true
+        return FavoriteWriteResult.Ok
     }
 
     /**
@@ -662,6 +677,9 @@ class JmRepository(
     }
 
     suspend fun favoriteIdsOf(albumId: Long): List<Long> = favoriteDao.favoriteIdsOf(albumId)
+
+    /** 观察本子所属的收藏夹（详情页与阅读器共用，跨页面同步）。 */
+    fun observeFavoriteIdsOf(albumId: Long): Flow<List<Long>> = favoriteDao.observeFavoriteIdsOf(albumId)
 
     suspend fun setCollected(albumId: Long, collected: Boolean) =
         albumDao.setCollected(albumId, collected, nowText())
@@ -826,8 +844,29 @@ class JmRepository(
     }
 }
 
-/** 在线搜索的一条结果。 */
-data class OnlineSearchItem(
+/**
+ * 收藏夹写操作的结果。
+ *
+ * 每种失败都有独立取值，界面才能给出**准确**的提示——
+ * 之前用 Boolean/null 表达，导致"改名撞车"被说成"默认收藏夹不支持重命名"。
+ */
+enum class FavoriteWriteResult {
+    Ok,
+
+    /** 默认收藏夹不可改名/删除。 */
+    DefaultFolder,
+
+    /** 名称已被占用（`name` 上有唯一索引）。 */
+    NameTaken,
+
+    /** 名称为空。 */
+    NameBlank,
+
+    /** 收藏夹不存在。 */
+    NotFound,
+}
+
+/** 在线搜索的一条结果。 */data class OnlineSearchItem(
     val id: Long,
     val name: String?,
     val author: String?,

@@ -3,10 +3,12 @@ package com.haruhi.haruhibox.feature.jm.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -128,11 +130,14 @@ fun JmAlbumDetailScreen(
 
     Scaffold(
         modifier = modifier,
+        // **不要再套一层系统栏内边距**：本页在 `JmModeRoot` 的 Scaffold 内容里，
+        // 外层已经把状态栏高度作为 padding 给了 NavHost。这里若再让 Scaffold 与
+        // TopAppBar 各加一次 windowInsets，标题上方就会空出约两倍状态栏的高度
+        // （用户反馈第 5 点）。所以内层全部声明成 0。
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
-                // 显式声明 windowInsets：edge-to-edge 下如果让它与 Scaffold 的
-                // 内容内边距叠加，标题下面会出现一大块空白（用户反馈）。
-                windowInsets = TopAppBarDefaults.windowInsets,
+                windowInsets = WindowInsets(0, 0, 0, 0),
                 title = {
                     Text(
                         text = state.album?.name?.takeIf { it.isNotBlank() }
@@ -573,14 +578,19 @@ private fun ChapterRowItem(
                 )
             }
             if (chapter.downloadedImages > 0) {
-                IconButton(onClick = { menuExpanded = true }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "章节操作")
-                }
-                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-                    DropdownMenuItem(
-                        text = { Text("删除本话文件") },
-                        onClick = { menuExpanded = false; confirmDelete = true },
-                    )
+                // 图标与菜单放在同一个 Box 里：DropdownMenu 是相对**它所在的父布局**定位的，
+                // 直接放在 Row 里当兄弟节点时锚点会落到整行上，菜单看起来"飘"到了别处
+                // （用户反馈第 6 点）。包一层 Box 之后锚点才是那颗按钮。
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "章节操作")
+                    }
+                    DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        DropdownMenuItem(
+                            text = { Text("删除本话文件") },
+                            onClick = { menuExpanded = false; confirmDelete = true },
+                        )
+                    }
                 }
             }
         }

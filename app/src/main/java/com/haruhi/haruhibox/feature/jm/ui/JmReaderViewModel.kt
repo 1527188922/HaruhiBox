@@ -150,6 +150,7 @@ class JmReaderViewModel(
 
     private var loadJob: Job? = null
     private var positionJob: Job? = null
+    private var scanJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -256,7 +257,6 @@ class JmReaderViewModel(
                     )
                 }
             }
-
             val startPage = position?.imageFile
                 ?.let { name -> pages.indexOfFirst { it.imageFile == name } }
                 ?.takeIf { it >= 0 }
@@ -301,10 +301,12 @@ class JmReaderViewModel(
         fetching[page.imageFile] = viewModelScope.launch {
             try {
                 val file = store.file(album, chapter.chapterId, folder, page.imageFile)
+                // 量比例也要读文件头，先在 IO 上算完再更新状态
+                val aspect = store.aspectRatioOf(file, ReaderPage.DEFAULT_ASPECT)
                 updatePage(pageIndex) {
                     it.copy(
                         file = file,
-                        aspectRatio = store.aspectRatioOf(file, ReaderPage.DEFAULT_ASPECT),
+                        aspectRatio = aspect,
                         state = ReaderPage.PageState.Ready,
                         error = null,
                     )
@@ -340,9 +342,11 @@ class JmReaderViewModel(
         val album = current.album ?: return
         val chapter = current.currentChapter ?: return
         val folder = repo.chapterFolderName(chapter)
-        _state.update { state ->
-            state.copy(
-                pages = state.pages.map { page ->
+        scanJob?.cancel()
+        scanJob = viewModelScope.launch {
+            // 逐页核对磁盘：读文件头也算解码，全部放到 IO 上做（用户要求第 9 点）
+            val scanned = withContext(Dispatchers.IO) {
+                current.pages.map { page ->
                     val cached = store.cachedFile(album, folder, page.imageFile)
                     when {
                         cached != null -> page.copy(
@@ -355,8 +359,9 @@ class JmReaderViewModel(
                         page.available -> page.copy(file = null, state = ReaderPage.PageState.Pending)
                         else -> page
                     }
-                },
-            )
+                }
+            }
+            _state.update { it.copy(pages = scanned) }
         }
     }
 

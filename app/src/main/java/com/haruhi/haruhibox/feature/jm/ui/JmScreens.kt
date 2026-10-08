@@ -780,6 +780,8 @@ fun JmFavoritesScreen(
     var showCreate by remember { mutableStateOf(false) }
     var newName by remember { mutableStateOf("") }
     var renameTarget by remember { mutableStateOf<FavoritesUiState.FavoriteRow?>(null) }
+    // 删除要二次确认，并在确认框里写清影响（计划 §9 第 6 条）
+    var deleteTarget by remember { mutableStateOf<FavoritesUiState.FavoriteRow?>(null) }
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(
@@ -825,7 +827,7 @@ fun JmFavoritesScreen(
                             }
                             if (!row.isDefault) {
                                 TextButton(onClick = { renameTarget = row }) { Text("改名") }
-                                TextButton(onClick = { onDelete(row.id) }) { Text("删除") }
+                                TextButton(onClick = { deleteTarget = row }) { Text("删除") }
                             }
                         }
                     }
@@ -852,6 +854,17 @@ fun JmFavoritesScreen(
             initial = target.name,
             onConfirm = { name -> onRename(target.id, name); renameTarget = null },
             onDismiss = { renameTarget = null },
+        )
+    }
+
+    deleteTarget?.let { target ->
+        ConfirmDialog(
+            title = "删除「${target.name}」？",
+            text = "只会删除这个收藏夹和里面的归类（当前 ${target.albumCount} 本）。" +
+                "漫画仍然留在书库，已下载的图片也不会被删掉。",
+            confirmText = "删除收藏夹",
+            onConfirm = { onDelete(target.id); deleteTarget = null },
+            onDismiss = { deleteTarget = null },
         )
     }
 }

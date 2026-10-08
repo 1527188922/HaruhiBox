@@ -378,7 +378,8 @@ class JmRepositoryTest {
         repo.saveAlbum(albumFixture())
 
         val first = repo.ensureDefaultFavorite()
-        val second = repo.createFavorite("第二夹")!!
+        assertThat(repo.createFavorite("第二夹")).isEqualTo(FavoriteWriteResult.Ok)
+        val second = repo.listFavorites().first { it.name == "第二夹" }
 
         repo.addToFavorite(480854L, first.id)
         repo.addToFavorite(480854L, second.id)
@@ -402,9 +403,38 @@ class JmRepositoryTest {
     fun `default favorite cannot be renamed or deleted`() = runTest {
         val default = repo.ensureDefaultFavorite()
 
-        assertThat(repo.renameFavorite(default.id, "新名字")).isFalse()
-        assertThat(repo.deleteFavorite(default.id)).isFalse()
+        assertThat(repo.renameFavorite(default.id, "新名字")).isEqualTo(FavoriteWriteResult.DefaultFolder)
+        assertThat(repo.deleteFavorite(default.id)).isEqualTo(FavoriteWriteResult.DefaultFolder)
         assertThat(repo.findAlbum(0)).isNull()
+    }
+
+    /**
+     * 用户反馈第 7 点：改名撞上已有名字时提示成了"默认收藏夹不支持重命名"。
+     * 现在每种失败都有独立结果，界面才能给准确文案。
+     */
+    @Test
+    fun `renaming to an existing name reports a conflict not a default folder error`() = runTest {
+        repo.ensureDefaultFavorite()
+        repo.createFavorite("第一夹")
+        repo.createFavorite("第二夹")
+        val first = repo.listFavorites().first { it.name == "第一夹" }
+
+        assertThat(repo.renameFavorite(first.id, "第二夹")).isEqualTo(FavoriteWriteResult.NameTaken)
+        assertThat(repo.renameFavorite(first.id, "   ")).isEqualTo(FavoriteWriteResult.NameBlank)
+        assertThat(repo.renameFavorite(9999L, "随便")).isEqualTo(FavoriteWriteResult.NotFound)
+        // 改成自己原来的名字是幂等的，不算冲突
+        assertThat(repo.renameFavorite(first.id, "第一夹")).isEqualTo(FavoriteWriteResult.Ok)
+        assertThat(repo.renameFavorite(first.id, "新名字")).isEqualTo(FavoriteWriteResult.Ok)
+        assertThat(repo.listFavorites().map { it.name }).contains("新名字")
+    }
+
+    @Test
+    fun `creating a duplicate favorite reports the conflict`() = runTest {
+        repo.ensureDefaultFavorite()
+
+        assertThat(repo.createFavorite("同一夹")).isEqualTo(FavoriteWriteResult.Ok)
+        assertThat(repo.createFavorite("同一夹")).isEqualTo(FavoriteWriteResult.NameTaken)
+        assertThat(repo.createFavorite("  ")).isEqualTo(FavoriteWriteResult.NameBlank)
     }
 
     @Test

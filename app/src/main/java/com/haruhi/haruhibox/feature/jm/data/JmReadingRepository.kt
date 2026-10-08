@@ -3,16 +3,13 @@ package com.haruhi.haruhibox.feature.jm.data
 import com.haruhi.haruhibox.core.database.JmChapterImageDao
 import com.haruhi.haruhibox.core.database.JmRecentAlbumDao
 import com.haruhi.haruhibox.core.database.PlaybackPositionDao
-import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
-import com.haruhi.haruhibox.core.storage.LibraryDirs
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import java.io.File
 
 /**
- * 阅读位置与"这一话能不能离线读"的查询（计划 §9 第 8 条）。
+ * 阅读位置与章节清单的查询（计划 §9 第 8 条）。
  *
  * ## 位置用什么定位
  *
@@ -23,13 +20,13 @@ import java.io.File
  *
  * [JmRepository] 已经承担了在线接口、入库、收藏、书库筛选；
  * 阅读位置属于"阅读器"这条线，混进去只会让它更难读。
- * 两者的边界很清楚：**这个类不联网**。
+ * 两者的边界很清楚：**这个类不联网、不碰文件**——
+ * 图片在不在磁盘上、要不要联网取，全部由 [JmImageStore] 负责。
  */
 class JmReadingRepository(
     private val positionDao: PlaybackPositionDao,
     private val chapterDao: JmChapterImageDao,
     private val recentDao: JmRecentAlbumDao,
-    private val dirs: LibraryDirs,
 ) {
 
     // ------------------------------------------------------------------

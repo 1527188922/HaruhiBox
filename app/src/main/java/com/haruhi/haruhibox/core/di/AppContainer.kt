@@ -158,13 +158,12 @@ class AppContainer(private val appContext: Context) {
             override val networkState = networkMonitor.state
         }
 
-    /** 阅读位置与离线可读性查询（阅读器与"继续阅读"入口）。 */
+    /** 阅读位置与章节清单查询（阅读器与"继续阅读"入口）。 */
     val jmReading: com.haruhi.haruhibox.feature.jm.data.JmReadingRepository by lazy {
         com.haruhi.haruhibox.feature.jm.data.JmReadingRepository(
             positionDao = database.playbackPositionDao(),
             chapterDao = database.jmChapterDao(),
             recentDao = database.jmRecentAlbumDao(),
-            dirs = libraryDirs,
         )
     }
 

@@ -4,20 +4,15 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
-import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
-import com.haruhi.haruhibox.core.storage.LibraryDirs
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
-import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.io.File
 
 /**
  * 阅读位置仓库的语义验收（计划 §9 第 8 条）：
@@ -25,23 +20,20 @@ import java.io.File
  *
  * 关键点：
  * - 位置用**图片文件名**定位，不用页码（章节重新拉清单时页数可能变）；
- * - 「继续阅读」入口取的是**最近一次读过位置的本子**；
- * - 磁盘上只有"存在且非空"的图片才算可读（0 字节残留不算，与下载层判定一致）。
+ * - 「继续阅读」入口取的是**最近一次读过位置的本子**。
+ *
+ * > 图片"在不在磁盘上、要不要联网取"已经移到 `JmImageStore`，由
+ * > `JmImageStoreTest` 覆盖；这个类现在只关心位置与清单。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class JmReadingRepositoryTest {
 
-    @get:Rule
-    val temp = TemporaryFolder()
-
     private lateinit var db: HaruhiBoxDatabase
-    private lateinit var dirs: LibraryDirs
     private lateinit var reading: JmReadingRepository
 
     private val albumId = 480854L
     private val chapterId = 123456L
-    private val folderName = "测试本子_JM480854"
 
     @Before
     fun setUp() {
@@ -49,12 +41,10 @@ class JmReadingRepositoryTest {
             ApplicationProvider.getApplicationContext(),
             HaruhiBoxDatabase::class.java,
         ).allowMainThreadQueries().build()
-        dirs = LibraryDirs(temp.newFolder("library")).ensureAll()
         reading = JmReadingRepository(
             positionDao = db.playbackPositionDao(),
             chapterDao = db.jmChapterDao(),
             recentDao = db.jmRecentAlbumDao(),
-            dirs = dirs,
         )
     }
 
@@ -134,10 +124,4 @@ class JmReadingRepositoryTest {
         )
         assertThat(reading.chapterFolderName(albumId, chapterId)).isEqualTo(chapterId.toString())
     }
-
-    private fun album() = JmAlbumEntity(
-        id = albumId,
-        name = "测试本子",
-        albumFolderName = folderName,
-    )
 }

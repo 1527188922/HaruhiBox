@@ -246,7 +246,8 @@ class JmRecentAndFavoriteTest {
     fun `favorite count flow emits after removing and deleting`() = runTest {
         repo.saveAlbum(albumFixture(480854, "本子"))
         val defaultId = repo.ensureDefaultFavorite().id
-        val secondId = repo.createFavorite("第二夹")!!.id
+        repo.createFavorite("第二夹")
+        val secondId = repo.listFavorites().first { it.name == "第二夹" }.id
 
         repo.addToFavorite(480854L, defaultId)
         repo.addToFavorite(480854L, secondId)

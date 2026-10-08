@@ -4,6 +4,7 @@ import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.entity.DownloadStatus
 import com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import com.haruhi.haruhibox.core.settings.SettingDefaults
 import org.junit.Test
 
 /**
@@ -245,9 +246,17 @@ class JmReaderAndTaskLogicTest {
     @Test
     fun `reading option labels are the user facing wording`() {
         assertThat(ReadingMode.entries.map { it.label }).containsExactly("纵向连续", "横向分页")
+        // "护眼暖色"已按用户要求从阅读界面去掉
         assertThat(ReadingBackground.entries.map { it.label })
-            .containsExactly("跟随主题", "浅色", "深色", "护眼暖色")
+            .containsExactly("跟随主题", "浅色", "深色")
         assertThat(ReadingDirection.entries.map { it.label }).containsExactly("从左到右", "从右到左")
+    }
+
+    /** 历史数据里可能存着"护眼暖色"（编码 3），现在要回落到跟随主题而不是崩掉。 */
+    @Test
+    fun `the removed sepia background falls back to following the theme`() {
+        assertThat(ReadingBackground.fromCode(SettingDefaults.JM_READING_BACKGROUND_SEPIA_LEGACY))
+            .isEqualTo(ReadingBackground.THEME)
     }
 
     // ---------------- 工具 ----------------

@@ -48,6 +48,10 @@ interface JmAlbumDao {
     /**
      * 书库列表（含筛选与排序）。
      *
+     * **排序：入库时间倒序**（用户要求第 2 点）——`create_time` 是本子第一次进书库的时间，
+     * 之后刷新详情只会改 `modify_time`，所以用 `create_time` 才是"入库顺序"。
+     * 时间戳是 `yyyy-MM-dd HH:mm:ss` 文本，字典序即时间序；同一秒内用 id 兜底。
+     *
      * 筛选条件全部用 `(:param IS NULL OR ...)` 形式，避免为每个组合写一条 SQL。
      *
      * **标签多选是 OR 语义**，与参考实现 `applyTagFilter` 一致：
@@ -81,7 +85,7 @@ interface JmAlbumDao {
                 ) WHERE hit = 1))
           AND (:favoriteId IS NULL OR id IN (
                 SELECT album_id FROM t_jm_favorite_album WHERE favorite_id = :favoriteId))
-        ORDER BY collected DESC, COALESCE(modify_time, create_time, '') DESC, id DESC
+        ORDER BY COALESCE(create_time, '') DESC, id DESC
         LIMIT :limit OFFSET :offset
         """,
     )
@@ -294,6 +298,15 @@ interface JmFavoriteDao {
 
     @Query("SELECT favorite_id FROM t_jm_favorite_album WHERE album_id = :albumId")
     suspend fun favoriteIdsOf(albumId: Long): List<Long>
+
+    /**
+     * 观察一个本子所属的收藏夹（详情页的收藏夹面板与"收藏"按钮靠它保持同步）。
+     *
+     * 之前只在页面加载时查一次，于是"在阅读器里收藏 → 返回详情页"看到的还是旧状态；
+     * 改成 Flow 之后，无论谁改了关联表，界面都会跟着变。
+     */
+    @Query("SELECT favorite_id FROM t_jm_favorite_album WHERE album_id = :albumId")
+    fun observeFavoriteIdsOf(albumId: Long): Flow<List<Long>>
 
     @Query("SELECT COUNT(*) FROM t_jm_favorite_album WHERE favorite_id = :favoriteId")
     suspend fun albumCount(favoriteId: Long): Int
