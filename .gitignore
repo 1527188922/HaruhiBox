@@ -22,6 +22,7 @@ bin-release/
 .externalNativeBuild
 .cxx
 local.properties
+*.log
 
 # Room exported schema is part of the repo (migration tests depend on it)
 !app/schemas
