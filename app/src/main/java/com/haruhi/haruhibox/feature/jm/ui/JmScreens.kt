@@ -78,6 +78,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -86,6 +87,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
@@ -866,6 +868,18 @@ private fun AlbumGridCard(
  *
  * 走应用级 ImageLoader 的关键原因是网络层：JM 的封面域名对 UA 有校验，
  * 必须复用带正确 UA / 代理的 OkHttp。
+ *
+ * ## 为什么固定解码尺寸 + 固定内存缓存 key（用户反馈第 1 点）
+ *
+ * 默认情况下 Coil 会**按每个调用点的尺寸各解码一份**：搜索结果是缩略图、
+ * 书库格子稍大、详情页又是另一个尺寸。于是"列表里已经显示过的封面，
+ * 点进详情页要再解码一次"，中间会闪一下占位块——看起来就像又联网加载了一遍
+ * （实测没有任何网络请求，是解码，但用户的观感一样）。
+ *
+ * 这里把尺寸**下限**抬到 [COVER_MIN_WIDTH_PX]（够详情页与三列书库用），
+ * 并用 [coverMemoryCacheKey] 覆盖内存缓存 key：同一本漫画在哪一页显示都命中同一份解码结果，
+ * 列表 → 详情是内存命中，不会再解码也不会闪。上限仍由调用点约束，
+ * 大屏格子比这个下限大时 Coil 还是按自己的尺寸解码（清晰度不受影响）。
  */
 @Composable
 fun JmCover(
@@ -874,7 +888,16 @@ fun JmCover(
     modifier: Modifier = Modifier,
 ) {
     val imageLoader = currentImageLoader()
-    val model = remember(albumId) { JmDefaults.buildCoverUrl(albumId) }
+    val context = LocalContext.current
+    val model = remember(albumId, context) {
+        ImageRequest.Builder(context)
+            .data(JmDefaults.buildCoverUrl(albumId))
+            .memoryCacheKey(coverMemoryCacheKey(albumId))
+            // 尺寸不匹配时（例如详情页比列表大）先把已有的那份顶上，避免闪白
+            .placeholderMemoryCacheKey(coverMemoryCacheKey(albumId))
+            .size(COVER_MIN_WIDTH_PX, COVER_MIN_HEIGHT_PX)
+            .build()
+    }
     // imageLoader 为 null（Preview / 测试未安装）时交给 Coil 的单例加载器
     if (imageLoader != null) {
         AsyncImage(
@@ -893,6 +916,19 @@ fun JmCover(
         )
     }
 }
+
+/** 同一本漫画的封面在哪一页都是同一个内存缓存 key（与调用点的尺寸无关）。 */
+internal fun coverMemoryCacheKey(albumId: Long): String = "jm-cover-$albumId"
+
+/**
+ * 封面解码的下限尺寸（像素）。
+ *
+ * 取详情页封面（110×150dp）与三列书库格子（约 125×167dp）里较大的那个，
+ * 按 xxhdpi（3x）算大约 375×500，往上留一点余量。
+ * 比这更小的调用点（搜索结果缩略图、任务页小封面）直接复用这一份解码结果。
+ */
+private const val COVER_MIN_WIDTH_PX = 400
+private const val COVER_MIN_HEIGHT_PX = 540
 
 /**
  * 书库卡片的状态文案。

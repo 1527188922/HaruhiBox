@@ -339,6 +339,17 @@ app/src/main/java/com/haruhi/haruhibox/
 | K2 | 「继续阅读 / 下载 / 已收藏」在窄屏又会掉行 | 三颗按钮从"封面右边的窄栏"移到**整宽一行**：主按钮 `weight(1f)` 吃掉剩余宽度、文字单行省略，两颗次要按钮自己定宽。这一行最宽也就 继续阅读(104dp)+下载(76)+已收藏(90)+间距 ≈ 286dp，320dp 屏也放得下 | 模拟器截图（411dp）：按钮与卡片左右对齐、无掉行；`wm size/density` 模拟 360dp 同样一行 |
 | K3 | 点导出后、以及导出完成后，「导出文件」都要立刻更新，不能等重进页面 | 详情页观察两个格式的**活跃导出任务**（`tasks.observeActiveTask(type, albumId)`）：<br>① 任务一出现 → 折叠栏自动展开一次并多一行「PDF 导出中 74%」+ 进度条，折叠状态下标题也会写「ZIP · PDF · PDF 导出中」；<br>② 任务从有变无（成功/失败/取消都算）→ 立刻重算成品列表，所以跑完当场就能看到新的文件名/大小/时间，不用退出页面 | 模拟器实测：确认导出后**当场**出现"导出中 74%"与进度条（截图）→ 12 秒后同一页面上进度行消失、PDF 行刷新成 `20.2 MB · 生成于 10-09 15:30`（与磁盘上的文件一致） |
 
+### 第十二轮反馈修复（2026-10-09）
+
+| # | 反馈 | 结论 / 落地方式 | 验证 |
+|---|---|---|---|
+| L1 | 精确匹配结果点「加入书库」特别慢（怀疑又请求了一次详情接口）；而且列表里已经加载过封面，点进详情"似乎又请求了一次" | **前半段确实是多余的请求**：搜索页走 `repo.addToLibrary(aid)` → `api.album(aid)`，而精确匹配那条的详情**搜索时就已经拉过并写进最近浏览表**了。改成 `addToLibraryLocalFirst(aid)`：本地（书库或最近浏览）有完整数据就直接落库，只有"普通搜索结果且从没点进去过"才回落网络。<br>**后半段实测没有网络请求**（debug 版 HTTP 日志：书库网格 → 详情页零请求），那是 Coil **按调用点尺寸各解码一份**造成的闪一下。现在封面固定用同一个内存缓存 key（`jm-cover-<id>`）+ 解码下限尺寸（400×540），列表 → 详情是内存命中，不再重解码也不闪 | `JmRepositoryTest` 新增 3 个用例（本地有数据时**不联网**——该测试的 api 客户端一被调用就抛异常，能跑通即证明没联网；已在书库时幂等；本地没有才回落网络）；模拟器实测：网格 → 详情 `adb logcat -s http:*` 无任何请求 |
+| L2 | 导出文件区加一个「打开文件夹」，直接唤起文件管理器并定位到目录（做不到就先不做） | **能做到，而且不需要任何存储权限**——读目录的是文件管理器自己，我们只是把位置告诉它。<br>实现：`ExportPublisher.folderUri()` 给出 `com.android.externalstorage.documents` 的目录文档 URI（`primary:Download/HaruHiBox`），按钮发 `ACTION_VIEW` + `vnd.android.document/directory`；老系统（API 26～28）成品在应用私有目录里、别的应用根本看不到，这时返回 null、按钮不显示。<br>**两个坑**：① 文档 id 必须带 `primary:` 卷名前缀，少了它文件管理器只会停在"下载"根目录；② Android 11+ 的**软件包可见性**会把 DocumentsUI 判成"看不见的应用"，`startActivity` 直接抛异常——要在 manifest 里声明 `<queries>`（实测日志 `AppsFilter: interaction ... documentsui BLOCKED`）。没有任何文件管理器能处理时给一句"成品在 下载/HaruHiBox"兜底 | `ExportPublisherFolderTest` 5 个用例（API 34 给出正确 docId／API 28 返回 null／位置文案一致／多次调用稳定）；模拟器实测：点按钮 → 系统文件管理器**直接打开 `Download/HaruHiBox`**（面包屑 sdk_gphone16k_x86_64 › Download › HaruHiBox） |
+
+> L1 的封面处理值得记一笔：Coil 的内存缓存条目**带尺寸**，列表里那份比详情页小的话，
+> 详情页会重新解码（不是重新联网）。除了共享 key，这里还把请求尺寸抬到两者中较大的那个，
+> 所以"网格里看过的封面，点进详情立刻就在"。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |
@@ -561,7 +572,7 @@ OK (11 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：263 个单元测试 + lint + 两种构建
+# 开发机：271 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF/zip 加密 + 长图切片）
@@ -569,7 +580,7 @@ $env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**263 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**271 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（release 5.6 MB）。
 
 ### 测试清单（单元测试）
@@ -597,6 +608,7 @@ debug / release APK 均可构建（release 5.6 MB）。
 | `feature.jm.ui.LibraryExportFilterTest` | 6 | **「有 ZIP / 有 PDF」筛选**：单条件 / 两条件要同时满足 / 快照未就绪时放行 / 「清除 N 项」只数用户加的条件 |
 | `feature.jm.ui.LibraryPagingTest` | 3 | **书库分页拼页**：后续页追加在后面 / 跨页重复的 id 只留一条（重复 key 会崩）/ 没有后续页时走快路径 |
 | `feature.jm.ui.ReadingProgressLabelTest` | 4 | **「继续阅读」那行小字 + "导出中"状态文案**：有页码 / 只记到章节 / 章节名缺失 / 排队中·导出中 45%·等待网络 |
+| `core.storage.ExportPublisherFolderTest` | 5 | **「打开文件夹」的目录 URI**：API 34 给出带 `primary:` 卷名的正确文档 id / API 28 返回 null（私有目录别人看不到）/ 位置文案一致 / 多次调用稳定 |
 | `core.download.DownloadGateTest` | 5 | 下载网络策略矩阵（仅 Wi-Fi / 允许移动网络） |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
 | `core.codec.ArchiveWriterTest` | 5 | zip 结构（不套本子目录）/ 顺序 / 进度 / 不加密码 / 重新生成覆盖 |

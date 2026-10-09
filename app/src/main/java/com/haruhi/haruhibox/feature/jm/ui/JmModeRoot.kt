@@ -449,6 +449,10 @@ fun JmModeRoot(
                             }
                         },
                         onDeleteExport = vm::deleteExport,
+                        // 「打开文件夹」：把系统文件管理器拉到成品目录（用户反馈第 2 点）
+                        onOpenFolder = {
+                            openExportFolder(context, vm.outputFolderUri(), snackbar, scope)
+                        },
                         // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）；
                         // 页面内部的 MessageEffect 会先把消息消费掉，所以切页不会重放
                         onMessage = showMessage,
@@ -569,6 +573,35 @@ private fun launchOutputIntent(
             snackbar.showSnackbar("没有可以打开这个文件的应用")
         }
     }
+}
+
+/**
+ * 「打开文件夹」：让系统文件管理器直接定位到成品目录（用户反馈第 2 点）。
+ *
+ * 用的是文档提供者的目录 URI（`com.android.externalstorage.documents` 的
+ * `primary:Download/HaruHiBox`）+ `ACTION_VIEW`：**不需要任何存储权限**——
+ * 读目录的是系统文件管理器自己，我们只是把位置告诉它。
+ *
+ * 系统里没有能处理目录 URI 的文件管理器（部分定制 ROM）时会抛
+ * `ActivityNotFoundException`，那时退回一句"文件在哪"的提示，至少让用户找得到。
+ */
+private fun openExportFolder(
+    context: Context,
+    folderUri: android.net.Uri?,
+    snackbar: SnackbarHostState,
+    scope: CoroutineScope,
+) {
+    val message = "没有可以打开文件夹的应用，成品在 下载/HaruHiBox"
+    if (folderUri == null) {
+        scope.launch { snackbar.showSnackbar(message) }
+        return
+    }
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(folderUri, "vnd.android.document/directory")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    runCatching { context.startActivity(intent) }
+        .onFailure { scope.launch { snackbar.showSnackbar(message) } }
 }
 
 /**

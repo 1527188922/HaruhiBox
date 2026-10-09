@@ -465,6 +465,43 @@ class JmRepositoryTest {
         assertThat(repo.findAlbum(480854L)).isNotNull()
     }
 
+    // ---------------- 搜索结果「加入书库」（用户反馈第 1 点） ----------------
+
+    @Test
+    fun `adding to library from a search result does not hit the network when local data exists`() = runTest {
+        // 精确匹配那一条：搜索时已经请求过 /album 并写进最近浏览表
+        repo.saveToRecent(albumFixture())
+
+        // 本测试的 api 客户端**一被调用就抛异常**，所以能跑通就说明没有联网
+        val album = repo.addToLibraryLocalFirst(480854L)
+
+        assertThat(album.id).isEqualTo(480854L)
+        assertThat(repo.findAlbum(480854L)).isNotNull()
+        // 最近浏览里的那份也还在（两条来源并存）
+        assertThat(repo.findRecent(480854L)).isNotNull()
+    }
+
+    @Test
+    fun `adding to library from a search result is instant when the album is already in the library`() = runTest {
+        repo.saveAlbum(albumFixture())
+
+        val album = repo.addToLibraryLocalFirst(480854L)
+
+        assertThat(album.id).isEqualTo(480854L)
+        // 幂等：不会多出一条
+        assertThat(repo.findAlbum(480854L)?.id).isEqualTo(480854L)
+    }
+
+    @Test
+    fun `adding to library falls back to the network when nothing is cached locally`() = runTest {
+        // 普通搜索结果：本地既没有书库记录也没有最近浏览记录
+        val result = runCatching { repo.addToLibraryLocalFirst(111111L) }
+
+        // 回落到了网络，而本测试的客户端禁止联网，所以必然是失败
+        assertThat(result.isFailure).isTrue()
+        assertThat(repo.findAlbum(111111L)).isNull()
+    }
+
     // ------------------------------------------------------------------
 
     private fun repoApi() = JmApiClient(

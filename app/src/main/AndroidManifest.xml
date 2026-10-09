@@ -15,6 +15,39 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!--
+      「打开文件夹」要跳到系统的文件管理器（DocumentsUI 或第三方文件管理器）。
+      Android 11+ 有**软件包可见性**过滤：不声明这一段的话，系统会把文件管理器
+      判定成"看不见的应用"，startActivity 直接抛 ActivityNotFoundException
+      （模拟器实测：`AppsFilter: interaction ... documentsui BLOCKED`，
+      表现成"点了没反应，只弹一句没有可以打开文件夹的应用"）。
+      这只是"允许查找"，**不需要任何存储权限**——读目录的是文件管理器自己。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="vnd.android.document/directory" />
+        </intent>
+        <!-- 打开单个成品（zip / pdf）时用的两个 MIME 也一并声明 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/zip" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/pdf" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="application/zip" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="application/pdf" />
+        </intent>
+    </queries>
+
+
     <application
         android:name=".HaruhiBoxApp"
         android:allowBackup="true"

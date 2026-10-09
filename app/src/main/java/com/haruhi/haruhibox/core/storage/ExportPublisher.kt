@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.annotation.RequiresApi
 import timber.log.Timber
@@ -57,6 +58,20 @@ interface ExportPublisher {
     /** 成品放在哪（给用户看的短文案），详情页用它说明"文件在哪儿"。 */
     val locationLabel: String
 
+    /**
+     * 成品所在**文件夹**的 URI，用来"打开文件夹"（用户反馈第 2 点）。
+     *
+     * 能打开的前提是文件落在**公共下载目录**里、且系统有文档提供者（DocumentsUI）：
+     * - API 29+ 走 MediaStore 下载目录，返回 `com.android.externalstorage.documents`
+     *   的 `primary:Download/HaruHiBox` 文档 URI，系统文件管理器（DocumentsUI / 文件）
+     *   会直接定位到该目录；
+     * - API 26～28 那一档成品在应用外部私有目录（`Android/data/<pkg>/files/...`），
+     *   **别的应用无权浏览**，所以返回 null——界面据此不显示按钮。
+     *
+     * 注意这是"让系统去打开"，不是我们自己去读目录：本 App 不需要任何存储权限。
+     */
+    fun folderUri(): Uri?
+
     fun publish(source: File, displayName: String, mimeType: String): Published
 
     /** 查一个成品，不存在返回 null。导出前的"会覆盖"提示、详情页的文件信息都用它。 */
@@ -89,6 +104,24 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
             publishToMediaStore(source, displayName, mimeType)
         } else {
             publishToExternalDir(source, displayName)
+        }
+
+    /**
+     * API 29+ 才有公共下载目录这条路径（老系统在应用私有目录里，别的应用看不到），
+     * 所以只在 Q 以上给 URI。
+     *
+     * 文档 id 必须是 **`primary:Download/HaruHiBox`** 这种带卷名的形式：
+     * 少了 `primary:` 前缀时 DocumentsUI 解析不出这个文档，会退回到"下载"根目录
+     * （实测如此），那就等于没定位到成品文件夹。
+     */
+    override fun folderUri(): Uri? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            DocumentsContract.buildDocumentUri(
+                EXTERNAL_STORAGE_PROVIDER,
+                "$PRIMARY_VOLUME:${Environment.DIRECTORY_DOWNLOADS}/$SUBFOLDER",
+            )
+        } else {
+            null
         }
 
     /**
@@ -250,5 +283,11 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
     companion object {
         /** 下载目录下的子目录名，避免和用户自己的文件混在一起。 */
         const val SUBFOLDER = "HaruHiBox"
+
+        /** 系统"外部存储"文档提供者；`primary:` 就是主共享存储，覆盖绝大多数机器。 */
+        const val EXTERNAL_STORAGE_PROVIDER = "com.android.externalstorage.documents"
+
+        /** 主共享存储的卷名。 */
+        const val PRIMARY_VOLUME = "primary"
     }
 }

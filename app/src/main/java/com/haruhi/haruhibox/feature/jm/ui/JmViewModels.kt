@@ -760,10 +760,16 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
         viewModelScope.launch { runCatching { repo.clearSearchHistory() } }
     }
 
-    /** 加入书库（不下载）。已入库时是幂等操作，UI 只提示不报错。 */
+    /**
+     * 加入书库（不下载）。已入库时是幂等操作，UI 只提示不报错。
+     *
+     * 走 `addToLibraryLocalFirst`：精确匹配那一条的详情**搜索时就已经拿到了**
+     * （存在最近浏览表里），这里不必再请求一次 `/album`——用户反馈的"点一下特别慢"
+     * 就是那次多余的网络往返。只有本地完全没有数据时才回落到网络。
+     */
     fun addToLibrary(item: OnlineSearchItem) {
         viewModelScope.launch {
-            runCatching { repo.addToLibrary(item.id) }
+            runCatching { repo.addToLibraryLocalFirst(item.id) }
                 .onSuccess {
                     markLocal(item.id)
                     _state.update { it.copy(message = "已加入书库") }
@@ -1113,6 +1119,14 @@ data class AlbumDetailUiState(
     val activeExports: List<ActiveExport> = emptyList(),
 
     /**
+     * 系统能不能打开成品所在的文件夹（用户反馈第 2 点）。
+     *
+     * 公共下载目录（API 29+）可以，老系统上成品在应用私有目录里、别人的文件管理器看不到，
+     * 这时为 false，界面不显示「打开文件夹」。
+     */
+    val canOpenFolder: Boolean = false,
+
+    /**
      * 「从书库移除」已经**删干净**了，页面可以退出了。
      *
      * 删除是异步的（图片目录 + 下载目录里的成品 + 封面缓存 + 五张表），
@@ -1450,6 +1464,7 @@ class JmAlbumDetailViewModel(
         // 导出成品也要跟着重算：刚导出完回到这个页面，区块里必须马上多一行；
         // 在任务页删掉文件再回来，那一行也要消失（用户第九轮要求第 2 点）
         val exportedFiles = runCatching { exports.exportsOf(album) }.getOrDefault(emptyList())
+        val folderUri = runCatching { exports.outputFolderUri() }.getOrNull()
         _state.update {
             it.copy(
                 chapters = if (it.reversed) rows.reversed() else rows,
@@ -1458,9 +1473,13 @@ class JmAlbumDetailViewModel(
                 localSizeBytes = localSize,
                 favoriteIds = favoriteIds,
                 exports = exportedFiles,
+                canOpenFolder = folderUri != null,
             )
         }
     }
+
+    /** 「打开文件夹」用的目录 URI；系统不支持时返回 null（界面据此提示）。 */
+    fun outputFolderUri(): android.net.Uri? = runCatching { exports.outputFolderUri() }.getOrNull()
 
     /**
      * 成品的「打开至 / 发送至」要拿内容 Uri。

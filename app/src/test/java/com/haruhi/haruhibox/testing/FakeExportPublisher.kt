@@ -20,6 +20,11 @@ class FakeExportPublisher(val dir: File) : ExportPublisher {
 
     override val locationLabel: String = "下载/HaruHiBox"
 
+    /** 假实现默认"打不开文件夹"（真机上只有公共下载目录那条路能打开）。 */
+    var folder: android.net.Uri? = null
+
+    override fun folderUri(): android.net.Uri? = folder
+
     override fun publish(source: File, displayName: String, mimeType: String): ExportPublisher.Published {
         source.copyTo(File(dir, displayName), overwrite = true)
         publishedNames += displayName

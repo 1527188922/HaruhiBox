@@ -126,6 +126,8 @@ fun JmAlbumDetailScreen(
     onSendOutput: (String) -> Unit,
     /** 导出成品的「删除」：删系统下载目录里的那个文件。 */
     onDeleteExport: (String) -> Unit,
+    /** 「打开文件夹」：让系统文件管理器定位到成品目录（用户反馈第 2 点）。 */
+    onOpenFolder: () -> Unit,
     /**
      * 提示文案的**上层**回调。
      *
@@ -239,9 +241,11 @@ fun JmAlbumDetailScreen(
                         ExportSection(
                             exports = state.exports,
                             active = state.activeExports,
+                            canOpenFolder = state.canOpenFolder,
                             onOpen = onOpenOutput,
                             onSend = onSendOutput,
                             onDelete = { name -> pendingDeleteExport = name },
+                            onOpenFolder = onOpenFolder,
                         )
                     }
                 }
@@ -402,9 +406,11 @@ fun JmAlbumDetailScreen(
 private fun ExportSection(
     exports: List<ExportedFormat>,
     active: List<ActiveExport>,
+    canOpenFolder: Boolean,
     onOpen: (String) -> Unit,
     onSend: (String) -> Unit,
     onDelete: (String) -> Unit,
+    onOpenFolder: () -> Unit,
 ) {
     // 展开状态是纯界面状态：默认收起，退出页面即忘（下次进来还是收起）。
     // 但**正在导出时会自动展开一次**，让用户马上看到进度（用户第十一轮要求第 3 点）。
@@ -473,6 +479,16 @@ private fun ExportSection(
                 active.forEach { row ->
                     if (exports.isNotEmpty()) HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     ActiveExportRow(row)
+                }
+                // 「打开文件夹」（用户反馈第 2 点）：让系统文件管理器直接定位到成品目录。
+                // 老系统上成品在应用私有目录里、别的应用看不到，这时整条不显示
+                // （由 canOpenFolder 控制，见 ExportPublisher.folderUri 的注释）。
+                if (canOpenFolder) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    TextButton(
+                        onClick = onOpenFolder,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("打开文件夹") }
                 }
                 Spacer(Modifier.height(4.dp))
             }

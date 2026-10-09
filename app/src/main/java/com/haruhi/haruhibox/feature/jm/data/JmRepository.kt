@@ -382,6 +382,23 @@ class JmRepository(
         return albumDao.findById(album.id) ?: album
     }
 
+    /**
+     * 搜索结果点「加入书库」：**本地已经有完整详情就不联网**。
+     *
+     * 精确匹配那一条本来就是 `/album` 的结果（`searchOnlineByExactId` 已经把它写进最近浏览表），
+     * 再走一遍 [addToLibrary] 会重新请求一次详情接口——用户看到的就是"点一下卡住"
+     * （第十一轮之后的反馈第 1 点）。用户之前看过的本子也一样，最近浏览里就有完整数据。
+     *
+     * 只有"本地真的没有"（普通搜索结果、且从没点进去过）才回落到网络。
+     */
+    suspend fun addToLibraryLocalFirst(aid: Long): JmAlbumEntity {
+        // localAlbumDetail 会先看书库、再看最近浏览；两处都没有才返回 null
+        localAlbumDetail(aid)?.let { local ->
+            return addToLibrary(local.album)
+        }
+        return addToLibrary(aid)
+    }
+
     /** 把接口返回的本子写库（不请求网络）。 */
     suspend fun saveAlbum(dto: JmAlbumDto): JmAlbumEntity {
         val now = nowText()

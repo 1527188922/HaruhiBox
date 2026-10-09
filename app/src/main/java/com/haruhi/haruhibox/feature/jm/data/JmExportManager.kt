@@ -195,6 +195,14 @@ class JmExportManager(
         album.albumFolderName?.let { "$it.${format.extension}" }
 
     /**
+     * 成品所在文件夹的 URI（详情页「打开文件夹」用）。
+     *
+     * 老系统上成品在应用私有目录里、别的应用浏览不了，这时返回 null，
+     * 界面就不显示那颗按钮（用户反馈第 2 点）。
+     */
+    fun outputFolderUri(): android.net.Uri? = publisher.folderUri()
+
+    /**
      * 这个成品现在还在不在（导出确认框用它提示"会覆盖已有文件"）。
      *
      * MediaStore 查询是 IO，所以放到 IO 线程上。
