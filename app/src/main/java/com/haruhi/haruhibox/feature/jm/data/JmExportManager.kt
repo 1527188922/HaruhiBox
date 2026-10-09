@@ -194,9 +194,6 @@ class JmExportManager(
     fun outputNameOf(album: JmAlbumEntity, format: JmExportFormat): String? =
         album.albumFolderName?.let { "$it.${format.extension}" }
 
-    /** 成品放在哪（详情页显示"文件在哪儿"）。 */
-    val outputLocation: String get() = publisher.locationLabel
-
     /**
      * 这个成品现在还在不在（导出确认框用它提示"会覆盖已有文件"）。
      *

@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,11 +25,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -58,6 +61,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,10 +72,15 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -106,6 +115,21 @@ import java.time.format.DateTimeFormatter
 // 书库
 // ======================================================================
 
+/**
+ * 客户端筛选后**不足这么多条就继续翻页**（大约半屏，3 列时是两行）。
+ *
+ * 取半屏而不是"一条都没有才翻"：只显示一两条时页面下半部分是空的，
+ * 看着像"就这些了"，而实际上后面几页还有。
+ */
+private const val AUTO_FILL_MIN_ITEMS = 6
+
+/**
+ * 加载多少条之后才值得显示"没有更多了"。
+ *
+ * 书库只有几本时一直在底部写一句"没有更多了"很多余；翻过一页（≥60）之后再提示才有意义。
+ */
+private const val LOADED_ENOUGH_TO_SAY_END = 60
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun JmLibraryScreen(
@@ -137,6 +161,8 @@ fun JmLibraryScreen(
     moveFavoriteLabel: String = "收藏夹",
     /** 打开"修改收藏夹"面板时预先勾上的收藏夹（收藏夹内打开时把当前夹勾上）。 */
     preselectedFavoriteIds: Set<Long> = emptySet(),
+    /** 往下翻一页（用户第十轮要求第 4 点：筛选也要能翻到后面的页）。 */
+    onLoadMore: () -> Unit = {},
 ) {
     // 多选状态是纯界面状态：长按进入、退出即清空，不需要活过页面重建
     var selection by remember { mutableStateOf(emptySet<Long>()) }
@@ -148,6 +174,15 @@ fun JmLibraryScreen(
 
     // 返回键先退出多选，而不是直接退出页面
     BackHandler(enabled = selecting) { selection = emptySet() }
+
+    // 自动填充：筛选条件（"有 ZIP / 有 PDF"、"已下载"）是在客户端算的，
+    // 一页可能一条都不匹配。**显示不足半屏就继续翻页**，直到凑够或翻到底，
+    // 否则用户看到的是"空列表"，会误以为一本都没导出过（用户第十轮要求第 4 点）。
+    LoadMoreOnScroll(
+        shouldLoadMore = state.hasMore && !state.loadingMore && !state.loading &&
+            state.albums.size < AUTO_FILL_MIN_ITEMS,
+        onLoadMore = onLoadMore,
+    )
 
     Column(modifier = modifier.fillMaxSize()) {
         if (selecting) {
@@ -228,6 +263,38 @@ fun JmLibraryScreen(
                         onLongPress = { selection = selection + card.album.id },
                         onToggleCollected = { onToggleCollected(card.album.id, card.album.collected != true) },
                     )
+                }
+                // 分页页脚：横跨整行（用户第十轮要求第 4 点）
+                if (state.loadingMore) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                        }
+                    }
+                } else if (state.hasMore) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        TextButton(
+                            onClick = onLoadMore,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("加载更多") }
+                    }
+                } else if (state.reachedEnd && state.loadedCount >= LOADED_ENOUGH_TO_SAY_END) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Text(
+                            text = "没有更多了",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                        )
+                    }
                 }
             }
         }
@@ -582,58 +649,96 @@ private fun LibraryFilterBar(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        // 条件会换行（窄屏上"已下载/未下载/收藏/有 ZIP/有 PDF"一行放不下），
-        // 所以用 FlowRow：全部条件都看得见，不需要横向滚才知道还有筛选
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        // 五个条件在小屏上排不进一行（用户第十轮要求第 3 点）。
+        // 方案：**条件一行横向滚动**，行尾固定放「清除 N 项」——
+        // 不再出现"第五个掉到第二行"的孤儿按钮，也不会因为条件再多几个就爆版。
+        // 右边加一层渐隐，提示"还能往右滑"。
+        val chipScroll = rememberScrollState()
+        val canScrollForward by remember {
+            derivedStateOf { chipScroll.canScrollForward }
+        }
+        // 画渐变要用，得先在组合里取出来（drawWithContent 的 lambda 不是 @Composable）
+        val fadeTo = MaterialTheme.colorScheme.background
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(top = 8.dp),
         ) {
-            FilterChip(
-                selected = filter.downloadedOnly == true,
-                onClick = {
-                    onFilterChange {
-                        it.copy(downloadedOnly = if (it.downloadedOnly == true) null else true)
+            Box(modifier = Modifier.weight(1f)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.horizontalScroll(chipScroll),
+                ) {
+                    FilterChip(
+                        selected = filter.downloadedOnly == true,
+                        onClick = {
+                            onFilterChange {
+                                it.copy(downloadedOnly = if (it.downloadedOnly == true) null else true)
+                            }
+                        },
+                        label = { Text("已下载") },
+                    )
+                    FilterChip(
+                        selected = filter.downloadedOnly == false,
+                        onClick = {
+                            onFilterChange {
+                                it.copy(downloadedOnly = if (it.downloadedOnly == false) null else false)
+                            }
+                        },
+                        label = { Text("未下载") },
+                    )
+                    // 收藏夹内不需要这个按钮（用户要求第 7 点：夹内只留已下载/未下载）
+                    if (showCollectedChip) {
+                        FilterChip(
+                            selected = filter.collectedOnly == true,
+                            onClick = {
+                                onFilterChange {
+                                    it.copy(collectedOnly = if (it.collectedOnly == true) null else true)
+                                }
+                            },
+                            label = { Text("收藏") },
+                        )
                     }
-                },
-                label = { Text("已下载") },
-            )
-            FilterChip(
-                selected = filter.downloadedOnly == false,
-                onClick = {
-                    onFilterChange {
-                        it.copy(downloadedOnly = if (it.downloadedOnly == false) null else false)
-                    }
-                },
-                label = { Text("未下载") },
-            )
-            // 收藏夹内不需要这个按钮（用户要求第 7 点：夹内只留已下载/未下载）
-            if (showCollectedChip) {
-                FilterChip(
-                    selected = filter.collectedOnly == true,
-                    onClick = {
-                        onFilterChange {
-                            it.copy(collectedOnly = if (it.collectedOnly == true) null else true)
-                        }
-                    },
-                    label = { Text("收藏") },
-                )
+                    // 按"系统下载目录里有没有这本的成品"筛选（用户第九轮要求第 1 点）。
+                    // 两个条件互相独立，都选上就是"两种都导出过"。
+                    FilterChip(
+                        selected = filter.hasZipOnly,
+                        onClick = { onFilterChange { it.copy(hasZipOnly = !it.hasZipOnly) } },
+                        label = { Text("有 ZIP") },
+                    )
+                    FilterChip(
+                        selected = filter.hasPdfOnly,
+                        onClick = { onFilterChange { it.copy(hasPdfOnly = !it.hasPdfOnly) } },
+                        label = { Text("有 PDF") },
+                    )
+                }
+                if (canScrollForward) {
+                    // 渐隐提示"右边还有条件"。**必须用 matchParentSize + drawWithContent**：
+                    // 直接 `fillMaxHeight()` 会按外层最大高度测量，把这一行撑成整屏高，
+                    // 底下的列表就一格都画不出来（踩过一次）。
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .drawWithContent {
+                                drawContent()
+                                val fade = 24.dp.toPx()
+                                drawRect(
+                                    brush = Brush.horizontalGradient(
+                                        colors = listOf(Color.Transparent, fadeTo),
+                                        startX = size.width - fade,
+                                        endX = size.width,
+                                    ),
+                                    topLeft = Offset(size.width - fade, 0f),
+                                    size = Size(fade, size.height),
+                                )
+                            },
+                    )
+                }
             }
-            // 按"系统下载目录里有没有这本的成品"筛选（用户第九轮要求第 1 点）。
-            // 两个条件互相独立，都选上就是"两种都导出过"。
-            FilterChip(
-                selected = filter.hasZipOnly,
-                onClick = { onFilterChange { it.copy(hasZipOnly = !it.hasZipOnly) } },
-                label = { Text("有 ZIP") },
-            )
-            FilterChip(
-                selected = filter.hasPdfOnly,
-                onClick = { onFilterChange { it.copy(hasPdfOnly = !it.hasPdfOnly) } },
-                label = { Text("有 PDF") },
-            )
             // 生效条件数量 + 清除（计划 §9.1「筛选生效后显示条件标签或数量，支持清除」）。
             // 只数**用户自己加的**条件：收藏夹内的 favoriteId 是页面上下文，
             // 算进去会一直显示"清除 1 项"（用户反馈）。
+            // 固定在行尾（不跟着滚），保证任何时候都点得到。
             if (filter.hasUserFilter) {
                 TextButton(onClick = onClearFilter) {
                     Text("清除 ${filter.userActiveCount} 项")

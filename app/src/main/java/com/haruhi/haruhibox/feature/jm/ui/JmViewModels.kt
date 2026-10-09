@@ -108,6 +108,24 @@ internal fun matchesExportFilter(
     return true
 }
 
+/**
+ * 拼「第一页（数据库实时）+ 后续页（快照）」。
+ *
+ * **必须按 id 去重**：第一页是活的 Flow，用户翻到第 3 页时如果有新本子入库，
+ * 后面的条目会整体后移一位，第 2 页的第一条就会和第 1 页的最后一条重复；
+ * 而列表用 `key = { it.album.id }` 渲染，重复 key 会直接抛
+ * `IllegalArgumentException: Key was already used`（白屏崩溃）。
+ * 顺序保持"第一页在前、后续页依次在后"，重复的以先出现的为准。
+ */
+internal fun mergeLibraryPages(
+    firstPage: List<JmAlbumEntity>,
+    extraPages: List<JmAlbumEntity>,
+): List<JmAlbumEntity> {
+    if (extraPages.isEmpty()) return firstPage
+    val seen = HashSet<Long>(firstPage.size + extraPages.size)
+    return (firstPage + extraPages).filter { seen.add(it.id) }
+}
+
 data class LibraryUiState(
     val albums: List<AlbumCard> = emptyList(),
     val total: Int = 0,
@@ -117,6 +135,10 @@ data class LibraryUiState(
     val error: String? = null,
     /** 还有没有下一页（连续加载用）。 */
     val hasMore: Boolean = false,
+    /** 已经翻过页并且翻到底了（界面上显示"没有更多了"）。 */
+    val reachedEnd: Boolean = false,
+    /** 已经加载了多少本（含筛选前的），"没有更多了"的显示条件要用。 */
+    val loadedCount: Int = 0,
     /**
      * 「继续阅读」卡片（计划 §9 第 4 条：**有阅读记录时**显示，没有就不显示）。
      */
@@ -160,7 +182,20 @@ class JmLibraryViewModel(
     private val paging = MutableStateFlow(PagingState())
     private val extra = MutableStateFlow(ExtraState())
 
-    private data class PagingState(val loadingMore: Boolean = false, val error: String? = null, val page: Int = 0)
+    /**
+     * 分页状态。
+     *
+     * **第一页**来自数据库的 Flow（`observeLibrary(offset = 0)`），所以新增/删除本子会立刻反映；
+     * 第二页起是**快照**（[extra]），追加式加载——再查一次数据库会把已经看过的条目再取一遍，
+     * 而且深翻时容易和变化中的第一页错位，所以只在用户往下翻时追加，并按 id 去重。
+     */
+    private data class PagingState(
+        val extra: List<JmAlbumEntity> = emptyList(),
+        val loadingMore: Boolean = false,
+        val error: String? = null,
+        /** 已经查到最后一页（再问一次数据库也不会多出条目）。 */
+        val endReached: Boolean = false,
+    )
 
     private data class ExtraState(
         val summaries: Map<Long, ChapterStat> = emptyMap(),
@@ -206,7 +241,8 @@ class JmLibraryViewModel(
         paging,
         extra,
     ) { albums, total, f, p, e ->
-        val cards = albums.map { album ->
+        val loaded = mergeLibraryPages(albums, p.extra)
+        val cards = loaded.map { album ->
             val stat = e.summaries[album.id]
             AlbumCard(
                 album = album,
@@ -234,7 +270,10 @@ class JmLibraryViewModel(
             loading = e.loadingStat && e.summaries.isEmpty(),
             loadingMore = p.loadingMore,
             error = p.error,
-            hasMore = albums.size >= PAGE_SIZE,
+            // 第一页满就说明"可能还有"；翻到底之后一律 false
+            hasMore = !p.endReached && albums.size >= PAGE_SIZE,
+            reachedEnd = p.endReached,
+            loadedCount = loaded.size,
             continueReading = e.continueReading,
             favorites = e.favorites,
             message = e.message,
@@ -290,6 +329,8 @@ class JmLibraryViewModel(
 
     fun updateFilter(transform: (LibraryFilter) -> LibraryFilter) {
         filter.update(transform)
+        // 换了筛选条件就是换了一份列表：之前翻过的页全部作废，从第一页重新来
+        paging.update { PagingState() }
         // 筛选变化后章节统计要跟着重算（下载筛选用得到）
         refreshStats()
     }
@@ -297,24 +338,81 @@ class JmLibraryViewModel(
     fun clearFilter() = updateFilter { LibraryFilter() }
 
     /**
-     * 拉取每个本子的章节数 / 已下载章节数 / 占用，顺带取一份导出成品快照。
+     * 往下翻一页（用户第十轮要求第 4 点）。
      *
-     * 列表不大（分页 60 条）时够用；"有 ZIP / 有 PDF"筛选靠的就是这一次查询的结果，
-     * 所以两者一起刷新——分开刷新会出现"筛选了但快照还是旧的"。
+     * 第一页之外的条目是**追加**进来的：数据库那边仍然只用第一页的 Flow 保证"新增/删除立刻可见"，
+     * 深翻时再整段重查既浪费又容易与变化中的第一页错位。
+     *
+     * 两种触发方式：
+     * - 列表滚到底（底部那颗「加载更多」/ 自动触发）；
+     * - **筛选之后显示不足一屏**时自动连翻（见 `JmLibraryScreen` 的自动填充）——
+     *   "有 ZIP"这类条件在数据库里查不了，只能在客户端过滤，不自动连翻的话
+     *   第一页没有匹配项就会显示成空列表，看起来像"一本都没导出过"。
+     */
+    fun loadMore() {
+        val current = paging.value
+        if (current.loadingMore || current.endReached) return
+        // **同步**置位"正在加载"：连点两下「加载更多」时，两次调用会先后进入这里，
+        // 放到协程里再置位就晚了，同一页会被追加两遍。
+        paging.update { it.copy(loadingMore = true, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                val f = filter.value
+                val offset = PAGE_SIZE + current.extra.size
+                val next = repo.observeLibrary(
+                    keyword = f.keyword.takeIf { it.isNotBlank() },
+                    collected = f.collectedOnly,
+                    favoriteId = f.favoriteId,
+                    tags = f.tags,
+                    author = f.author,
+                    limit = PAGE_SIZE,
+                    offset = offset,
+                ).first()
+                val stats = next.associate { album -> album.id to buildStat(album) }
+                val formats = exports.presentFormats(next)
+                extra.update {
+                    it.copy(
+                        summaries = it.summaries + stats,
+                        exportFormats = it.exportFormats + formats,
+                    )
+                }
+                paging.update {
+                    it.copy(
+                        extra = it.extra + next,
+                        loadingMore = false,
+                        // 取回来的不足一页 -> 后面没有了
+                        endReached = next.size < PAGE_SIZE,
+                    )
+                }
+            }.onFailure { e ->
+                Timber.tag("jm").w(e, "加载下一页失败")
+                paging.update { it.copy(loadingMore = false, error = e.toUserMessage()) }
+            }
+        }
+    }
+
+    /**
+     * 拉取**已经加载的全部**本子的章节数 / 已下载章节数 / 占用，顺带取一份导出成品快照。
+     *
+     * "有 ZIP / 有 PDF"筛选靠的就是这份快照，所以两者一起刷新——
+     * 分开刷新会出现"筛选了但快照还是旧的"。
      */
     fun refreshStats() {
         viewModelScope.launch {
             extra.update { it.copy(loadingStat = true) }
             runCatching {
-                val albums = repo.observeLibrary(
-                    keyword = filter.value.keyword.takeIf { it.isNotBlank() },
-                    collected = filter.value.collectedOnly,
-                    favoriteId = filter.value.favoriteId,
-                    tags = filter.value.tags,
-                    author = filter.value.author,
+                val f = filter.value
+                val first = repo.observeLibrary(
+                    keyword = f.keyword.takeIf { it.isNotBlank() },
+                    collected = f.collectedOnly,
+                    favoriteId = f.favoriteId,
+                    tags = f.tags,
+                    author = f.author,
                     limit = PAGE_SIZE,
                     offset = 0,
                 ).first()
+                // 翻过页的话，把已加载的后续页一起重算（否则它们的状态会停在加载那一刻）
+                val albums = mergeLibraryPages(first, paging.value.extra)
                 val stats = albums.associate { album ->
                     album.id to buildStat(album)
                 }
@@ -992,8 +1090,6 @@ data class AlbumDetailUiState(
      * （用户第九轮要求第 2 点）。空列表 = 还没导出过，此时详情页不显示这个区块。
      */
     val exports: List<ExportedFormat> = emptyList(),
-    /** 成品放在哪（"下载/HaruHiBox"），区块标题里说明位置。 */
-    val exportLocation: String = "",
 
     /**
      * 「从书库移除」已经**删干净**了，页面可以退出了。
@@ -1215,7 +1311,6 @@ class JmAlbumDetailViewModel(
         // 导出成品也要跟着重算：刚导出完回到这个页面，区块里必须马上多一行；
         // 在任务页删掉文件再回来，那一行也要消失（用户第九轮要求第 2 点）
         val exportedFiles = runCatching { exports.exportsOf(album) }.getOrDefault(emptyList())
-        val location = exports.outputLocation
         _state.update {
             it.copy(
                 chapters = if (it.reversed) rows.reversed() else rows,
@@ -1224,7 +1319,6 @@ class JmAlbumDetailViewModel(
                 localSizeBytes = localSize,
                 favoriteIds = favoriteIds,
                 exports = exportedFiles,
-                exportLocation = location,
             )
         }
     }

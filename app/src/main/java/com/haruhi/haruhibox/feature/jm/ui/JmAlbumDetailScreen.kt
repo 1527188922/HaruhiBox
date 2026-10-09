@@ -22,6 +22,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -235,7 +237,6 @@ fun JmAlbumDetailScreen(
                     item {
                         ExportSection(
                             exports = state.exports,
-                            location = state.exportLocation,
                             onOpen = onOpenOutput,
                             onSend = onSendOutput,
                             onDelete = { name -> pendingDeleteExport = name },
@@ -384,22 +385,25 @@ fun JmAlbumDetailScreen(
  * 「导出文件」区块：这本漫画已经导出到系统下载目录的 zip / pdf（用户第九轮要求第 2 点）。
  *
  * 设计取舍：
- * - **一个卡片装下所有成品**，每行一个格式：最多两行，比两张卡片省一半纵向空间，
- *   视觉上也更像"这本的成品清单"而不是两条互不相干的记录；
- * - 行内三段式（格式徽标 → 文件名+大小+生成时间 → 三个操作），
+ * - **默认折叠**（用户第十轮要求第 1 点）：这一块是"补充信息"，不是每次进详情页都要看的，
+ *   展开着会白占掉半屏、把章节列表挤到下面；折叠后只留一行标题，
+ *   标题右侧直接写明"ZIP · PDF"，不展开也知道有哪些成品；
+ * - 点头部整行展开/收起（"能点的是一整行"，不用瞄准小箭头）；
+ * - 展开后**一个卡片装下所有成品**，每行一个格式：最多两行，
+ *   行内三段式（格式徽标 → 文件名+大小+生成时间 → 三个操作），
  *   左到右正好是"是什么 → 什么状态 → 能对它做什么"，与任务页的成品行一致；
- * - 标题右侧写明**文件在哪儿**：成品在系统下载目录，用户拿文件管理器就能找到，
- *   不写位置的话"导出了但找不到"是必然的疑问；
  * - 一个成品都没有时整块不显示（章节列表直接跟在封面后面，不留空壳）。
  */
 @Composable
 private fun ExportSection(
     exports: List<ExportedFormat>,
-    location: String,
     onOpen: (String) -> Unit,
     onSend: (String) -> Unit,
     onDelete: (String) -> Unit,
 ) {
+    // 展开状态是纯界面状态：默认收起，退出页面即忘（下次进来还是收起）
+    var expanded by remember { mutableStateOf(false) }
+
     Card(
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -407,27 +411,44 @@ private fun ExportSection(
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(vertical = 10.dp),
+            ) {
                 Text("导出文件", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.width(8.dp))
+                // 折叠状态下也能一眼看到有哪几种成品
+                Text(
+                    text = exports.joinToString(" · ") { it.format.label },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
                 Spacer(Modifier.weight(1f))
-                if (location.isNotBlank()) {
-                    Text(
-                        text = "在 $location",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Icon(
+                    imageVector = if (expanded) {
+                        Icons.Default.KeyboardArrowUp
+                    } else {
+                        Icons.Default.KeyboardArrowDown
+                    },
+                    contentDescription = if (expanded) "收起导出文件" else "展开导出文件",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) {
+                exports.forEachIndexed { index, exported ->
+                    if (index > 0) HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    ExportedFileRow(
+                        exported = exported,
+                        onOpen = { onOpen(exported.file.displayName) },
+                        onSend = { onSend(exported.file.displayName) },
+                        onDelete = { onDelete(exported.file.displayName) },
                     )
                 }
-            }
-            exports.forEachIndexed { index, exported ->
-                if (index > 0) HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                else Spacer(Modifier.height(8.dp))
-                ExportedFileRow(
-                    exported = exported,
-                    onOpen = { onOpen(exported.file.displayName) },
-                    onSend = { onSend(exported.file.displayName) },
-                    onDelete = { onDelete(exported.file.displayName) },
-                )
+                Spacer(Modifier.height(4.dp))
             }
         }
     }

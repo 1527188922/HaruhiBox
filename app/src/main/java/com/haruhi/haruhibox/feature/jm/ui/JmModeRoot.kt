@@ -249,6 +249,8 @@ fun JmModeRoot(
                         // 批量"修改收藏夹"：多选 + 就地新建，点确认才执行（用户要求第 3 点）
                         onModifyFavorites = vm::modifyFavorites,
                         onCreateFavorite = vm::createFavoriteForSelection,
+                        // 往下翻页（用户第十轮要求第 4 点：筛选也要能翻到后面的页）
+                        onLoadMore = vm::loadMore,
                     )
                 }
 
@@ -371,6 +373,7 @@ fun JmModeRoot(
                         preselectedFavoriteIds = setOf(favoriteId),
                         onModifyFavorites = vm::modifyFavorites,
                         onCreateFavorite = vm::createFavoriteForSelection,
+                        onLoadMore = vm::loadMore,
                     )
                 }
 

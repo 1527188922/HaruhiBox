@@ -318,6 +318,19 @@ app/src/main/java/com/haruhi/haruhibox/
 > I1 顺带修掉一处旧问题：「清除 N 项」以前只在书库页显示，夹内因为 `favoriteId` 也算一个条件而永远看不到。
 > 现在只数**用户自己加的**条件（`userActiveCount`），夹内筛选后同样能一键清掉。
 
+### 第十轮反馈修复（2026-10-09）
+
+| # | 反馈 | 落地方式 | 验证 |
+|---|---|---|---|
+| J1 | 详情页「导出文件」太占空间，要能折叠、默认折叠 | 整块改成**可折叠卡片**：默认收起，只占一行；点**整行**都能展开/收起（不用瞄准小箭头）。收起时标题右侧写"ZIP · PDF"，不展开也知道有哪些成品；展开后才显示文件名、大小、生成时间与三个操作 | 模拟器截图：收起时章节列表紧跟在封面下；展开后成品行与按钮都在 |
+| J2 | 去掉「在 下载/HaruHiBox」 | 直接删掉这段文案，连同只为它存在的 `AlbumDetailUiState.exportLocation` 与 `JmExportManager.outputLocation`。位置信息在**导出完成的任务提示**里仍然会说（任务页 `stageText` = "已保存到 下载/HaruHiBox"），不算丢失 | 模拟器截图；`outputLocation` 已无引用 |
+| J3 | 5 个筛选按钮小屏放不下一行，第五个掉到第二行不好看 | 筛选条件改成**一行横向滚动**，行尾**固定**放「清除 N 项」（不跟着滚，任何时候都点得到），右缘加 24dp 渐隐提示"右边还有"。不再有"孤儿按钮"，条件以后再加也不会爆版 | 模拟器实测（`wm size 720x1600` + `wm density 320` ≈ 360dp 宽）：一行放下 已下载/未下载/收藏/有 ZIP，横滑后 有 PDF 完整可见 |
+| J4 | 筛选 zip/pdf 能不能翻页？书库是分页加载的吗？ | **原来不是**：书库只查第一页（60 条）且**没有"加载更多"**，第 61 本起根本看不到（这次一并补上）。现在：第一页仍是数据库实时 Flow（新增/删除立刻可见）＋后续页追加，`mergeLibraryPages` 按 id 去重（重复 key 会让 `LazyVerticalGrid` 直接崩），页脚给「加载更多」/进度条/"没有更多了"。**筛选是客户端算的，所以显示不足半屏会自动连翻**，直到凑够或翻到底——这样"有 ZIP / 有 PDF"能翻出后面几页里符合条件的本子 | `LibraryPagingTest` 3 个用例；模拟器实测：临时把 `PAGE_SIZE` 调成 2 后——页脚「加载更多」点一下多一本；把 ZIP 导出给**第 2 页**那本后点「有 ZIP」，自动翻页把它筛了出来（已恢复 60） |
+
+> J3 踩到的坑记一笔：渐隐那层**不要**用 `fillMaxHeight()`。它在按内容高度测量的 Row 里会去要"外层最大高度"，
+> 于是整行被撑成整屏高、底下的列表一格都画不出来（看着就像"筛选后一本都没有"）。
+> 正确做法是 `matchParentSize()` + `drawWithContent` 画一小块渐变：尺寸完全跟随内容，不参与测量。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |
@@ -540,7 +553,7 @@ OK (11 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：256 个单元测试 + lint + 两种构建
+# 开发机：259 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF/zip 加密 + 长图切片）
@@ -548,7 +561,7 @@ $env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**256 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**259 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（release 5.6 MB）。
 
 ### 测试清单（单元测试）
@@ -574,6 +587,7 @@ debug / release APK 均可构建（release 5.6 MB）。
 | `feature.jm.data.JmReadingRepositoryTest` | 6 | 阅读位置读写与钳位 / "继续阅读"取最近一本 / 章节目录名规则 |
 | `feature.jm.ui.SearchRevealStateTest` | 6 | 搜索增量展示的推进与边界 |
 | `feature.jm.ui.LibraryExportFilterTest` | 6 | **「有 ZIP / 有 PDF」筛选**：单条件 / 两条件要同时满足 / 快照未就绪时放行 / 「清除 N 项」只数用户加的条件 |
+| `feature.jm.ui.LibraryPagingTest` | 3 | **书库分页拼页**：后续页追加在后面 / 跨页重复的 id 只留一条（重复 key 会崩）/ 没有后续页时走快路径 |
 | `core.download.DownloadGateTest` | 5 | 下载网络策略矩阵（仅 Wi-Fi / 允许移动网络） |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
 | `core.codec.ArchiveWriterTest` | 5 | zip 结构（不套本子目录）/ 顺序 / 进度 / 不加密码 / 重新生成覆盖 |
