@@ -51,6 +51,7 @@ class JmAlbumCleanerTest {
     private lateinit var db: HaruhiBoxDatabase
     private lateinit var dirs: LibraryDirs
     private lateinit var repo: JmRepository
+    private lateinit var reading: JmReadingRepository
     private lateinit var tasks: DownloadTaskRepository
     private lateinit var publisher: FakeExportPublisher
     private lateinit var covers: RecordingCoverCache
@@ -78,6 +79,11 @@ class JmAlbumCleanerTest {
             positionDao = db.playbackPositionDao(),
         )
         tasks = DownloadTaskRepository(dao = db.downloadTaskDao(), dirs = dirs)
+        reading = JmReadingRepository(
+            positionDao = db.playbackPositionDao(),
+            chapterDao = db.jmChapterDao(),
+            recentDao = db.jmRecentAlbumDao(),
+        )
         publisher = FakeExportPublisher(temp.newFolder("downloads"))
         covers = RecordingCoverCache()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -125,7 +131,7 @@ class JmAlbumCleanerTest {
     }
 
     @Test
-    fun `removing from library wipes records favorites but keeps recent and therefore the cover`() {
+    fun `removing from library wipes records favorites progress but keeps recent and therefore the cover`() {
         seedAlbum()
         seedChapter()
         publish("$folderName.zip")
@@ -133,8 +139,17 @@ class JmAlbumCleanerTest {
         runBlocking {
             repo.addToFavorite(albumId)
             repo.touchRecent(albumId)
+            // 读到第 1 话第 3 张：移出书库后这条进度必须消失（用户第十一轮要求第 1 点）
+            reading.savePosition(
+                albumId = albumId,
+                chapterId = 1L,
+                imageFile = "00001.webp",
+                imageIndex = 2,
+                offsetRatio = 0.5f,
+            )
         }
         assertThat(runBlocking { repo.favoriteIdsOf(albumId) }).isNotEmpty()
+        assertThat(runBlocking { reading.positionOf(albumId) }).isNotNull()
 
         val result = runBlocking { cleaner.removeFromLibrary(listOf(album())) }
 
@@ -148,6 +163,7 @@ class JmAlbumCleanerTest {
         assertThat(runBlocking { repo.findAlbum(albumId) }).isNull()
         assertThat(runBlocking { db.jmChapterDao().chapterList(albumId) }).isEmpty()
         assertThat(runBlocking { repo.favoriteIdsOf(albumId) }).isEmpty()
+        assertThat(runBlocking { reading.positionOf(albumId) }).isNull()
         assertThat(runBlocking { db.playbackPositionDao().find(READING_KIND, albumId.toString()) }).isNull()
         // 但最近浏览**必须保留**（用户第八轮要求第 5 点）：移出书库不影响"刚看过什么"
         assertThat(runBlocking { repo.findRecent(albumId) }).isNotNull()

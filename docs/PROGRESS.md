@@ -331,6 +331,14 @@ app/src/main/java/com/haruhi/haruhibox/
 > 于是整行被撑成整屏高、底下的列表一格都画不出来（看着就像"筛选后一本都没有"）。
 > 正确做法是 `matchParentSize()` + `drawWithContent` 画一小块渐变：尺寸完全跟随内容，不参与测量。
 
+### 第十一轮反馈修复（2026-10-09）
+
+| # | 反馈 | 落地方式 | 验证 |
+|---|---|---|---|
+| K1 | 读过的漫画要有阅读进度：有进度时「阅读」变「继续阅读」；点章节仍然从那话第一张开始，但要**覆盖**进度；从书库移除要连进度一起删 | 进度本来就有（`t_playback_position`，本子+章节+图片名+页内比例），这次把详情页接上去：<br>① 观察 `reading.observePosition(albumId)`，有可用进度时主按钮显示**「继续阅读」**、并按存下来的位置续读（`JmRoutes.reader(albumId)` 不带章节号 = 续读）；<br>② 没进度才是「阅读」= 第一话第一张；<br>③ 点章节行先调 `onChapterOpened(chapterId)` 把进度改写成"这一话、第一张"（`imageFile = null` 的语义就是"从这话开头读"），再进阅读器——所以点第 1 话看一半退出，"继续阅读"指向的是第 1 话而不是上次的第 3 话；<br>④ 按钮下面补一行小字"上次读到 第2话 · 第 15 页"，只说"继续阅读"用户不知道继续到哪；<br>⑤ 从书库移除本来就会删 `t_playback_position`（`deleteAlbums` 里那句），这次补了**真的种了一条进度**的用例，避免断言空过 | `ReadingProgressLabelTest` 4 个用例；`JmAlbumCleanerTest` 改为先写进度再移除并断言进度消失；模拟器实测：详情页显示「继续阅读」+「上次读到 第1话 · 第 3 页」→ 点章节进阅读器从 **1/51 页**开始 → 返回后小字变成「第 1 页」（进度被覆盖）→ 从书库移除后书库页的「继续阅读」卡片一起消失（= 进度已删） |
+| K2 | 「继续阅读 / 下载 / 已收藏」在窄屏又会掉行 | 三颗按钮从"封面右边的窄栏"移到**整宽一行**：主按钮 `weight(1f)` 吃掉剩余宽度、文字单行省略，两颗次要按钮自己定宽。这一行最宽也就 继续阅读(104dp)+下载(76)+已收藏(90)+间距 ≈ 286dp，320dp 屏也放得下 | 模拟器截图（411dp）：按钮与卡片左右对齐、无掉行；`wm size/density` 模拟 360dp 同样一行 |
+| K3 | 点导出后、以及导出完成后，「导出文件」都要立刻更新，不能等重进页面 | 详情页观察两个格式的**活跃导出任务**（`tasks.observeActiveTask(type, albumId)`）：<br>① 任务一出现 → 折叠栏自动展开一次并多一行「PDF 导出中 74%」+ 进度条，折叠状态下标题也会写「ZIP · PDF · PDF 导出中」；<br>② 任务从有变无（成功/失败/取消都算）→ 立刻重算成品列表，所以跑完当场就能看到新的文件名/大小/时间，不用退出页面 | 模拟器实测：确认导出后**当场**出现"导出中 74%"与进度条（截图）→ 12 秒后同一页面上进度行消失、PDF 行刷新成 `20.2 MB · 生成于 10-09 15:30`（与磁盘上的文件一致） |
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |
@@ -553,7 +561,7 @@ OK (11 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：259 个单元测试 + lint + 两种构建
+# 开发机：263 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF/zip 加密 + 长图切片）
@@ -561,7 +569,7 @@ $env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**259 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**263 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（release 5.6 MB）。
 
 ### 测试清单（单元测试）
@@ -588,6 +596,7 @@ debug / release APK 均可构建（release 5.6 MB）。
 | `feature.jm.ui.SearchRevealStateTest` | 6 | 搜索增量展示的推进与边界 |
 | `feature.jm.ui.LibraryExportFilterTest` | 6 | **「有 ZIP / 有 PDF」筛选**：单条件 / 两条件要同时满足 / 快照未就绪时放行 / 「清除 N 项」只数用户加的条件 |
 | `feature.jm.ui.LibraryPagingTest` | 3 | **书库分页拼页**：后续页追加在后面 / 跨页重复的 id 只留一条（重复 key 会崩）/ 没有后续页时走快路径 |
+| `feature.jm.ui.ReadingProgressLabelTest` | 4 | **「继续阅读」那行小字 + "导出中"状态文案**：有页码 / 只记到章节 / 章节名缺失 / 排队中·导出中 45%·等待网络 |
 | `core.download.DownloadGateTest` | 5 | 下载网络策略矩阵（仅 Wi-Fi / 允许移动网络） |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
 | `core.codec.ArchiveWriterTest` | 5 | zip 结构（不套本子目录）/ 顺序 / 进度 / 不加密码 / 重新生成覆盖 |

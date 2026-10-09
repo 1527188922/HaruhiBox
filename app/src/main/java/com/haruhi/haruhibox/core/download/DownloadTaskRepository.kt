@@ -55,6 +55,15 @@ class DownloadTaskRepository(
         dao.activeTask(type, bizKey)
 
     /**
+     * 观察某个业务对象的活跃任务（同一个 `(type, bizKey)` 最多一条）。
+     *
+     * 详情页靠它显示"正在导出…"：导出任务不入章节明细，只看这一条就够；
+     * **任务从有变无**就表示这一轮跑完了（成功/失败/取消），界面据此立刻重算成品列表。
+     */
+    fun observeActiveTask(type: DownloadType, bizKey: String): Flow<DownloadTaskEntity?> =
+        dao.observeActiveTask(type, bizKey)
+
+    /**
      * 某个本子当前活跃任务里**所有章节的 id**。
      *
      * 详情页靠它把"已经在下载队列里"的章节标成另一种颜色并且不允许再选

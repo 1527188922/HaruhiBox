@@ -6,6 +6,7 @@ import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
+import com.haruhi.haruhibox.core.database.entity.DownloadStatus
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.jm.JmSearchSort
@@ -1071,6 +1072,18 @@ data class AlbumDetailUiState(
      */
     val queuedChapterIds: Set<Long> = emptySet(),
 
+    // ---------------- 阅读进度（用户第十一轮要求第 1 点） ----------------
+
+    /**
+     * 上次读到哪儿（还没读过就是 null）。
+     *
+     * 有它的时候主按钮是「继续阅读」（按这个位置续读），
+     * 没有的时候是「阅读」（从第一话第一张开始）。
+     */
+    val progress: ReadingPosition? = null,
+    /** 「继续阅读」按钮下面那行小字（"上次读到 第2话 · 第15页"）。 */
+    val progressText: String? = null,
+
     // ---------------- 导出（P4） ----------------
 
     /** 用户点了哪个导出（决定密码框的标题与默认密码）。 */
@@ -1092,6 +1105,14 @@ data class AlbumDetailUiState(
     val exports: List<ExportedFormat> = emptyList(),
 
     /**
+     * **正在跑**的导出任务（用户第十一轮要求第 3 点）。
+     *
+     * 点完「导出 ZIP/PDF」立刻就能在折叠栏里看到"排队中 / 导出中 45%"，
+     * 不用去任务页确认；跑完之后这一行消失、成品行出现（见 `JmAlbumDetailViewModel`）。
+     */
+    val activeExports: List<ActiveExport> = emptyList(),
+
+    /**
      * 「从书库移除」已经**删干净**了，页面可以退出了。
      *
      * 删除是异步的（图片目录 + 下载目录里的成品 + 封面缓存 + 五张表），
@@ -1109,6 +1130,43 @@ data class AlbumDetailUiState(
             .filter { !it.isDownloaded && it.chapterId !in queuedChapterIds }
             .map { it.chapterId }
             .toSet()
+}
+
+/**
+ * 一次正在跑的导出（详情页折叠栏里的"导出中"那一行）。
+ *
+ * [progress] 是 0..1；导出任务的总量是"图片张数"，未开始时为 0（显示成不确定进度）。
+ */
+data class ActiveExport(
+    val format: JmExportFormat,
+    val status: DownloadStatus,
+    val progress: Float,
+) {
+    /** "排队中" / "导出中 45%" / "等待网络" …。 */
+    val statusText: String
+        get() = when (status) {
+            DownloadStatus.QUEUED -> "排队中"
+            DownloadStatus.RUNNING -> if (progress > 0f) {
+                "导出中 ${(progress * 100).toInt()}%"
+            } else {
+                "导出中"
+            }
+
+            DownloadStatus.PAUSED -> "已暂停"
+            DownloadStatus.WAITING_NETWORK -> "等待网络"
+            else -> "处理中"
+        }
+}
+
+/**
+ * 「继续阅读」下面那行小字。
+ *
+ * 位置只记到章节（还没翻页就退出）时不写页码，免得显示成"第 0 页"。
+ * 章节标题拿不到就退化成"上次读到的地方"，总比不显示强。
+ */
+internal fun readingProgressLabel(chapterTitle: String?, hasPage: Boolean, pageNumber: Int): String {
+    val where = chapterTitle?.takeIf { it.isNotBlank() } ?: "上次读到的地方"
+    return if (hasPage && pageNumber > 0) "上次读到 $where · 第 $pageNumber 页" else "上次读到 $where"
 }
 
 /**
@@ -1137,6 +1195,7 @@ class JmAlbumDetailViewModel(
     private val tasks: DownloadTaskRepository,
     private val secrets: SecretStore,
     private val cleaner: JmAlbumCleaner,
+    private val reading: JmReadingRepository,
     private val albumId: Long,
 ) : ViewModel() {
 
@@ -1198,6 +1257,86 @@ class JmAlbumDetailViewModel(
                 .collect { ids ->
                     _state.update { it.copy(favoriteIds = ids) }
                 }
+        }
+
+        // 5) 阅读进度（用户第十一轮要求第 1 点）：有进度主按钮就是「继续阅读」。
+        //    用 Flow 而不是读一次：在阅读器里翻了几页再返回详情页，按钮下那行小字要跟着变。
+        viewModelScope.launch {
+            reading.observePosition(albumId)
+                .catch { e -> Timber.tag("jm").w(e, "观察阅读进度失败") }
+                .collect { position ->
+                    val chapterTitle = position?.chapterId?.let { id ->
+                        runCatching { reading.chapterFolderName(albumId, id) }.getOrNull()
+                    }
+                    _state.update {
+                        it.copy(
+                            progress = position,
+                            progressText = position?.takeIf { p -> p.isUsable }?.let { p ->
+                                readingProgressLabel(
+                                    chapterTitle = chapterTitle,
+                                    hasPage = p.imageFile != null,
+                                    pageNumber = p.imageIndex + 1,
+                                )
+                            },
+                        )
+                    }
+                }
+        }
+
+        // 6) 导出任务的实时状态（用户第十一轮要求第 3 点）：
+        //    - 任务出现 -> 折叠栏里立刻多一行"排队中 / 导出中 45%"；
+        //    - 任务消失 -> 这一轮跑完了（成功/失败/取消），立刻重算成品列表，
+        //      于是成功的那些马上变成可打开/发送/删除的成品行，不用退出页面再进来。
+        JmExportFormat.entries.forEach { format ->
+            viewModelScope.launch {
+                var hadTask = false
+                tasks.observeActiveTask(format.taskType, albumId.toString())
+                    .catch { e -> Timber.tag("jm").w(e, "观察导出任务失败") }
+                    .collect { task ->
+                        if (task == null && hadTask) loadLocalStats()
+                        hadTask = task != null
+                        val active = task?.let {
+                            ActiveExport(
+                                format = format,
+                                status = it.status,
+                                progress = if (it.totalImages > 0) {
+                                    (it.doneImages.toFloat() / it.totalImages).coerceIn(0f, 1f)
+                                } else {
+                                    0f
+                                },
+                            )
+                        }
+                        _state.update { state ->
+                            state.copy(
+                                activeExports = state.activeExports
+                                    .filterNot { row -> row.format == format }
+                                    .let { rows -> if (active != null) rows + active else rows }
+                                    .sortedBy { row -> row.format.ordinal },
+                            )
+                        }
+                    }
+            }
+        }
+    }
+
+    /**
+     * 点某一话进阅读器之前，**先把这本的阅读进度改写成这一话**（用户第十一轮要求第 1 点）。
+     *
+     * 不这么做的话：上次读到第 3 话第 20 页，用户点第 1 话从头看，
+     * 中途退出时"继续阅读"仍然指向第 3 话——用户以为自己已经换了进度。
+     * 位置只记到章节（[imageFile] 为 null），阅读器会从这一话的第一张开始读。
+     */
+    fun onChapterOpened(chapterId: Long) {
+        viewModelScope.launch {
+            runCatching {
+                reading.savePosition(
+                    albumId = albumId,
+                    chapterId = chapterId,
+                    imageFile = null,
+                    imageIndex = 0,
+                    offsetRatio = 0f,
+                )
+            }.onFailure { Timber.tag("jm").w(it, "覆盖阅读进度失败") }
         }
     }
 

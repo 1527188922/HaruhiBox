@@ -52,6 +52,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -232,11 +233,12 @@ fun JmAlbumDetailScreen(
                 }
                 // 已经导出过的 zip/pdf：放在章节前面——它属于"这本在我设备上有什么"，
                 // 与封面区的占用统计是同一类信息，不该被长长的章节列表压到最下面
-                // （用户第九轮要求第 2 点）。
-                if (state.exports.isNotEmpty()) {
+                // （用户第九轮要求第 2 点）。正在导出的也算（用户第十一轮要求第 3 点）。
+                if (state.exports.isNotEmpty() || state.activeExports.isNotEmpty()) {
                     item {
                         ExportSection(
                             exports = state.exports,
+                            active = state.activeExports,
                             onOpen = onOpenOutput,
                             onSend = onSendOutput,
                             onDelete = { name -> pendingDeleteExport = name },
@@ -389,20 +391,31 @@ fun JmAlbumDetailScreen(
  *   展开着会白占掉半屏、把章节列表挤到下面；折叠后只留一行标题，
  *   标题右侧直接写明"ZIP · PDF"，不展开也知道有哪些成品；
  * - 点头部整行展开/收起（"能点的是一整行"，不用瞄准小箭头）；
+ * - **导出中的格式也算在标题里**（用户第十一轮要求第 3 点）：刚点完导出，折叠状态下
+ *   就能看到"正在导出 PDF"，不用展开也不用去任务页确认；
  * - 展开后**一个卡片装下所有成品**，每行一个格式：最多两行，
  *   行内三段式（格式徽标 → 文件名+大小+生成时间 → 三个操作），
  *   左到右正好是"是什么 → 什么状态 → 能对它做什么"，与任务页的成品行一致；
- * - 一个成品都没有时整块不显示（章节列表直接跟在封面后面，不留空壳）。
+ * - 一个成品都没有、也没有在跑的任务时整块不显示（不留空壳）。
  */
 @Composable
 private fun ExportSection(
     exports: List<ExportedFormat>,
+    active: List<ActiveExport>,
     onOpen: (String) -> Unit,
     onSend: (String) -> Unit,
     onDelete: (String) -> Unit,
 ) {
-    // 展开状态是纯界面状态：默认收起，退出页面即忘（下次进来还是收起）
+    // 展开状态是纯界面状态：默认收起，退出页面即忘（下次进来还是收起）。
+    // 但**正在导出时会自动展开一次**，让用户马上看到进度（用户第十一轮要求第 3 点）。
     var expanded by remember { mutableStateOf(false) }
+    var autoExpanded by remember { mutableStateOf(false) }
+    LaunchedEffect(active.isNotEmpty()) {
+        if (active.isNotEmpty() && !autoExpanded) {
+            expanded = true
+            autoExpanded = true
+        }
+    }
 
     Card(
         shape = RoundedCornerShape(14.dp),
@@ -421,13 +434,22 @@ private fun ExportSection(
             ) {
                 Text("导出文件", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.width(8.dp))
-                // 折叠状态下也能一眼看到有哪几种成品
+                // 折叠状态下也能一眼看到有哪几种成品 / 哪几种正在导出
                 Text(
-                    text = exports.joinToString(" · ") { it.format.label },
+                    text = buildString {
+                        append(exports.joinToString(" · ") { it.format.label })
+                        active.forEach { row ->
+                            if (isNotEmpty()) append(" · ")
+                            append(row.format.label)
+                            append(" 导出中")
+                        }
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
-                Spacer(Modifier.weight(1f))
                 Icon(
                     imageVector = if (expanded) {
                         Icons.Default.KeyboardArrowUp
@@ -448,8 +470,52 @@ private fun ExportSection(
                         onDelete = { onDelete(exported.file.displayName) },
                     )
                 }
+                active.forEach { row ->
+                    if (exports.isNotEmpty()) HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    ActiveExportRow(row)
+                }
                 Spacer(Modifier.height(4.dp))
             }
+        }
+    }
+}
+
+/**
+ * 正在导出的那一行：格式徽标 + 状态文案 + 进度条。
+ *
+ * 没有操作按钮——这一份还没生成出来，能做的只有等（取消在任务页）。
+ */
+@Composable
+private fun ActiveExportRow(row: ActiveExport) {
+    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .width(42.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.outline)
+                    .padding(vertical = 4.dp),
+            ) {
+                Text(
+                    text = row.format.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.surface,
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = row.statusText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (row.progress > 0f) {
+            Spacer(Modifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = { row.progress },
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }
@@ -634,23 +700,6 @@ private fun AlbumHeader(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // 「阅读」= 从第一章开始读（用户要求第 4 点）；
-                    // 「下载」是**唯一**的下载入口，点开面板选章节（用户要求第 3 点）。
-                    Button(onClick = onRead, enabled = state.chapters.isNotEmpty()) {
-                        Text("阅读")
-                    }
-                    // 即使所有章节都已在队列里也保持可点：面板要能把"已在下载队列"
-                    // 这个状态显示给用户，按钮变灰反而让人不知道为什么。
-                    OutlinedButton(onClick = onDownload, enabled = state.chapters.isNotEmpty()) {
-                        Text("下载")
-                    }
-                    // 「收藏」直接打开收藏夹面板选夹（用户要求第 5 点：不再单独放「收藏夹」按钮）
-                    OutlinedButton(onClick = onOpenFavoriteSheet) {
-                        Text(if (album.collected == true) "已收藏" else "收藏")
-                    }
-                }
-                Spacer(Modifier.height(4.dp))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -676,6 +725,52 @@ private fun AlbumHeader(
                     )
                 }
             }
+        }
+
+        // 三颗按钮**另起一行、占满整宽**（用户第十一轮要求第 2 点）。
+        // 挤在封面右边的窄栏里时，"继续阅读 / 下载 / 已收藏"在 360dp 屏上放不下会掉行：
+        // 主按钮吃掉剩余宽度（weight），两颗次要按钮自己定宽，标签再长也不会换行。
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 10.dp),
+        ) {
+            // 「继续阅读」按上次读到的位置续读；没读过才是「阅读」= 从第一话第一张开始。
+            Button(
+                onClick = onRead,
+                enabled = state.chapters.isNotEmpty(),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(
+                    text = if (state.progress?.isUsable == true) "继续阅读" else "阅读",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            // 即使所有章节都已在队列里也保持可点：面板要能把"已在下载队列"
+            // 这个状态显示给用户，按钮变灰反而让人不知道为什么。
+            OutlinedButton(onClick = onDownload, enabled = state.chapters.isNotEmpty()) {
+                Text("下载")
+            }
+            // 「收藏」直接打开收藏夹面板选夹（用户要求第 5 点：不再单独放「收藏夹」按钮）
+            OutlinedButton(onClick = onOpenFavoriteSheet) {
+                Text(if (album.collected == true) "已收藏" else "收藏")
+            }
+        }
+
+        // 有进度时补一句"读到哪儿了"：按钮上的"继续阅读"只说了一半，
+        // 用户想知道的是"继续到哪一话"（用户第十一轮要求第 1 点）。
+        state.progressText?.let { text ->
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
 
         parseStringArray(album.tags).takeIf { it.isNotEmpty() }?.let { tags ->

@@ -408,14 +408,25 @@ fun JmModeRoot(
                         onAddToFavorite = vm::addToFavorite,
                         onRemoveFromFavorite = vm::removeFromFavorite,
                         onCreateFavoriteAndAdd = vm::createFavoriteAndAdd,
-                        // 点章节进阅读器；阅读器按磁盘现状区分"可读的页"与"缺失的页"
+                        // 点章节进阅读器：**先把这个本子的进度改写成这一话**，
+                        // 阅读器再按"从这一话第一张开始"打开（用户第十一轮要求第 1 点）
                         onReadChapter = { chapterId ->
+                            vm.onChapterOpened(chapterId)
                             navController.navigate(JmRoutes.reader(albumId, chapterId))
                         },
-                        // 「阅读」= 从第一章开始读（用户要求第 4 点）
+                        // 主按钮：有进度就按存下来的位置续读（不带章节号 = 续读），
+                        // 没进度才从第一话第一张开始（用户第十一轮要求第 1 点）
                         onReadFromStart = {
-                            val first = state.chapters.firstOrNull()
-                            if (first != null) navController.navigate(JmRoutes.reader(albumId, first.chapterId))
+                            val position = state.progress
+                            if (position?.isUsable == true) {
+                                navController.navigate(JmRoutes.reader(albumId))
+                            } else {
+                                val first = state.chapters.firstOrNull()
+                                if (first != null) {
+                                    vm.onChapterOpened(first.chapterId)
+                                    navController.navigate(JmRoutes.reader(albumId, first.chapterId))
+                                }
+                            }
                         },
                         onDownloadChapters = vm::downloadChapters,
                         onDeleteChapterFiles = vm::deleteChapterFiles,
@@ -612,6 +623,7 @@ class JmViewModelFactory(
                 tasks = container.downloadTasks,
                 secrets = container.secrets,
                 cleaner = container.jmAlbumCleaner,
+                reading = container.jmReading,
                 albumId = albumId ?: error("详情页必须传 albumId"),
             ) as T
 
