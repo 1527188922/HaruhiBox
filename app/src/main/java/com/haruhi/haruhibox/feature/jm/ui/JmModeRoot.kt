@@ -138,6 +138,9 @@ fun JmModeRoot(
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    // 一次性提示统一走根部：**先消费、再这里弹**（见 MessageEffect 的注释）。
+    // 挂在根部的 scope 上，切 tab 时提示不会被正在销毁的页面协程一起取消。
+    val showMessage: (String) -> Unit = { message -> scope.launch { snackbar.showSnackbar(message) } }
     // 导出成品的「打开至 / 发送至」要发系统 Intent（计划 §8 第 10 条）
     val context = LocalContext.current
 
@@ -229,12 +232,8 @@ fun JmModeRoot(
                     val state by vm.uiState.collectAsStateWithLifecycle()
                     // 从详情页/阅读器回来时重算"已下载 x/y 话"（下载完成后数字必须跟着变）
                     OnResumeEffect { vm.onScreenResumed() }
-                    LaunchedEffect(state.message) {
-                        state.message?.let {
-                            snackbar.showSnackbar(it)
-                            vm.consumeMessage()
-                        }
-                    }
+                    // 提示语先消费再弹；切 tab 也不会重放（用户反馈的 bug，见 MessageEffect）
+                    MessageEffect(state.message, onConsume = vm::consumeMessage, onShow = showMessage)
                     JmLibraryScreen(
                         state = state,
                         columns = 3,
@@ -247,7 +246,9 @@ fun JmModeRoot(
                         // 长按多选（用户要求第 1 点）
                         onDeleteFiles = vm::deleteFiles,
                         onRemoveFromLibrary = vm::removeFromLibrary,
-                        onMoveToFavorite = vm::moveToFavorite,
+                        // 批量"修改收藏夹"：多选 + 就地新建，点确认才执行（用户要求第 3 点）
+                        onModifyFavorites = vm::modifyFavorites,
+                        onCreateFavorite = vm::createFavoriteForSelection,
                     )
                 }
 
@@ -276,6 +277,8 @@ fun JmModeRoot(
                         onOpenHistory = vm::openHistory,
                         onDeleteHistory = vm::deleteHistory,
                         onClearHistory = vm::clearHistory,
+                        // 本页自己没有 Snackbar 宿主，提示统一交给根部弹
+                        onMessage = showMessage,
                         onConsumeMessage = vm::consumeMessage,
                     )
                 }
@@ -283,12 +286,7 @@ fun JmModeRoot(
                 composable(JmRoutes.FAVORITES) { entry ->
                     val vm: JmFavoritesViewModel = viewModel(viewModelStoreOwner = entry, factory = factory)
                     val state by vm.state.collectAsStateWithLifecycle()
-                    LaunchedEffect(state.message) {
-                        state.message?.let {
-                            snackbar.showSnackbar(it)
-                            vm.consumeMessage()
-                        }
-                    }
+                    MessageEffect(state.message, onConsume = vm::consumeMessage, onShow = showMessage)
                     JmFavoritesScreen(
                         state = state,
                         onOpenFavorite = { id, name ->
@@ -302,12 +300,11 @@ fun JmModeRoot(
                 }
 
                 composable(JmRoutes.TASKS) {
-                    LaunchedEffect(taskState.message) {
-                        taskState.message?.let {
-                            snackbar.showSnackbar(it)
-                            taskViewModel.consumeMessage()
-                        }
-                    }
+                    MessageEffect(
+                        taskState.message,
+                        onConsume = taskViewModel::consumeMessage,
+                        onShow = showMessage,
+                    )
                     JmTaskScreen(
                         state = taskState,
                         onToggleExpanded = taskViewModel::toggleExpanded,
@@ -349,12 +346,7 @@ fun JmModeRoot(
                         vm.updateFilter { it.copy(favoriteId = favoriteId) }
                     }
                     val state by vm.uiState.collectAsStateWithLifecycle()
-                    LaunchedEffect(state.message) {
-                        state.message?.let {
-                            snackbar.showSnackbar(it)
-                            vm.consumeMessage()
-                        }
-                    }
+                    MessageEffect(state.message, onConsume = vm::consumeMessage, onShow = showMessage)
                     JmLibraryScreen(
                         state = state,
                         columns = 3,
@@ -366,10 +358,14 @@ fun JmModeRoot(
                         onClearFilter = { vm.updateFilter { it.copy(favoriteId = favoriteId) } },
                         onOpenAlbum = { navController.navigate(JmRoutes.detail(it)) },
                         onToggleCollected = vm::setCollected,
-                        // 夹内也要能长按多选（用户要求第 2 点）
-                        onDeleteFiles = vm::deleteFiles,
-                        onRemoveFromLibrary = vm::removeFromLibrary,
-                        onMoveToFavorite = vm::moveToFavorite,
+                        // 夹内批量模式（用户要求第 3 点）：
+                        // - 不提供「删除文件」「移出书库」；
+                        // - 按钮文案改成「修改收藏夹」；
+                        // - 打开面板时把当前夹预先勾上（选中的本子本来都在这夹里）。
+                        moveFavoriteLabel = "修改收藏夹",
+                        preselectedFavoriteIds = setOf(favoriteId),
+                        onModifyFavorites = vm::modifyFavorites,
+                        onCreateFavorite = vm::createFavoriteForSelection,
                     )
                 }
 
@@ -422,8 +418,9 @@ fun JmModeRoot(
                         onConfirmExport = vm::confirmExport,
                         onExportWithoutPassword = vm::exportWithoutPassword,
                         onCancelExport = vm::cancelExport,
-                        // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）
-                        onMessage = { message -> scope.launch { snackbar.showSnackbar(message) } },
+                        // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）；
+                        // 页面内部的 MessageEffect 会先把消息消费掉，所以切页不会重放
+                        onMessage = showMessage,
                         // 页面在 state.removedFromLibrary 变 true 后自己退出（见上面的 LaunchedEffect）
                         onDeleteAlbumRecord = vm::removeFromLibrary,
                         onConsumeMessage = vm::consumeMessage,
@@ -444,13 +441,7 @@ fun JmModeRoot(
                         factory = JmViewModelFactory(container, albumId, chapterId.takeIf { it > 0 }),
                     )
                     val state by vm.state.collectAsStateWithLifecycle()
-                    val message = state.message
-                    LaunchedEffect(message) {
-                        if (message != null) {
-                            snackbar.showSnackbar(message)
-                            vm.consumeMessage()
-                        }
-                    }
+                    MessageEffect(state.message, onConsume = vm::consumeMessage, onShow = showMessage)
                     // 从任务页/详情页回到阅读器时重新扫一遍本地缓存：
                     // 刚下好的页要立刻显示出来（用户要求第 2 点）
                     OnResumeEffect { vm.refreshFromDisk() }

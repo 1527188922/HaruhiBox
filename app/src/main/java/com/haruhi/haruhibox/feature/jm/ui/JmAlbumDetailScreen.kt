@@ -49,7 +49,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -135,12 +134,8 @@ fun JmAlbumDetailScreen(
     // 面板的展开状态由本页自己管：它是纯界面状态，不需要活过页面重建
     var showDownloadSheet by remember { mutableStateOf(false) }
 
-    LaunchedEffect(state.message) {
-        state.message?.let {
-            onMessage(it)
-            onConsumeMessage()
-        }
-    }
+    // 一次性提示统一走 MessageEffect：先消费、再交给根部弹（切页不会重放）
+    MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
 
     Scaffold(
         modifier = modifier,
@@ -293,8 +288,8 @@ fun JmAlbumDetailScreen(
     if (showDeleteRecordDialog) {
         ConfirmDialog(
             title = "从书库移除？",
-            text = "会删掉书库记录与章节清单，并连同本机图片、已导出的 zip / PDF、" +
-                "最近浏览记录一起清除；收藏夹里的关联也会取消。",
+            text = "会删掉书库记录与章节清单，并连同本机图片、已导出的 zip / PDF 一起清除；" +
+                "收藏夹里的关联也会取消。最近浏览记录会保留。",
             confirmText = "移除",
             onConfirm = { showDeleteRecordDialog = false; onDeleteAlbumRecord() },
             onDismiss = { showDeleteRecordDialog = false },

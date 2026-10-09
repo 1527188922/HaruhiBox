@@ -33,8 +33,11 @@ import java.io.File
 /**
  * "删除一本漫画"的验收（用户要求第 6、7 点）。
  *
- * 两个入口的差别只有**删不删数据库记录**，所以这里把四处痕迹（图片 / 导出成品 / 封面缓存 /
- * 数据库五张表）分开断言，任何一处漏删都会挂。
+ * 两个入口的差别只有**删不删数据库记录**，所以这里把各处痕迹（图片 / 导出成品 / 封面缓存 /
+ * 数据库表）分开断言，任何一处漏删都会挂。
+ *
+ * **"从书库移除"不删最近浏览**（用户要求第 5 点）：移出书库影响的是书库与本地文件，
+ * "刚看过什么"是另一件事，保留后最近列表里还能看到这本。
  *
  * 另外验证"从书库移除"会先取消还在跑的任务——否则下载会把文件又写回刚删掉的目录。
  */
@@ -122,7 +125,7 @@ class JmAlbumCleanerTest {
     }
 
     @Test
-    fun `removing from library also wipes records favorites recent and the cover`() {
+    fun `removing from library wipes records favorites and the cover but keeps recent`() {
         seedAlbum()
         seedChapter()
         publish("$folderName.zip")
@@ -142,12 +145,13 @@ class JmAlbumCleanerTest {
         assertThat(File(publisher.dir, "$folderName.pdf").exists()).isFalse()
         assertThat(covers.evicted).containsExactly(albumId)
 
-        // 五张表都不能留痕：书库、章节清单、收藏关联、最近浏览、阅读位置
+        // 书库、章节清单、收藏关联、阅读位置都不能留痕
         assertThat(runBlocking { repo.findAlbum(albumId) }).isNull()
         assertThat(runBlocking { db.jmChapterDao().chapterList(albumId) }).isEmpty()
         assertThat(runBlocking { repo.favoriteIdsOf(albumId) }).isEmpty()
-        assertThat(runBlocking { repo.localAlbumDetail(albumId) }).isNull()
         assertThat(runBlocking { db.playbackPositionDao().find(READING_KIND, albumId.toString()) }).isNull()
+        // 但最近浏览**必须保留**（用户要求第 5 点）：移出书库不影响"刚看过什么"
+        assertThat(runBlocking { repo.findRecent(albumId) }).isNotNull()
     }
 
     @Test

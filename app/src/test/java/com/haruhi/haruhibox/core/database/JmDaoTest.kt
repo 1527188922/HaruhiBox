@@ -275,4 +275,32 @@ class JmDaoTest {
         val inFolder = albumDao.observeLibrary(null, null, null, "", favoriteId, 10, 0).first()
         assertThat(inFolder.map { it.id }).containsExactly(2L)
     }
+
+    /**
+     * 夹内排序：**按"加入这个收藏夹"的时间倒序**（用户要求第 4 点）。
+     *
+     * 与书库的入库顺序刻意相反：id=1 先入库但后加进夹子，所以它在 id=2 后面。
+     * 书库本身仍然按 `t_jm_album.create_time` 倒序。
+     */
+    @Test
+    fun `albums inside a favorite are ordered by the time they joined that folder`() = runTest {
+        val albumDao = db.jmAlbumDao()
+        val favoriteDao = db.jmFavoriteDao()
+        albumDao.insertIgnore(
+            JmAlbumEntity(id = 1, name = "先入库后加夹", createTime = "2026-01-01 10:00:00"),
+        )
+        albumDao.insertIgnore(
+            JmAlbumEntity(id = 2, name = "后入库先加夹", createTime = "2026-01-02 10:00:00"),
+        )
+        val favoriteId = favoriteDao.insert(JmFavoriteEntity(name = "夹子"))
+        favoriteDao.link(
+            JmFavoriteAlbumEntity(favoriteId = favoriteId, albumId = 1, createTime = "2026-01-03 10:00:00"),
+        )
+        favoriteDao.link(
+            JmFavoriteAlbumEntity(favoriteId = favoriteId, albumId = 2, createTime = "2026-01-04 10:00:00"),
+        )
+
+        val inFolder = albumDao.observeLibrary(null, null, null, "", favoriteId, 10, 0).first()
+        assertThat(inFolder.map { it.id }).containsExactly(2L, 1L).inOrder()
+    }
 }

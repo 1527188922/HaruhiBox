@@ -153,6 +153,13 @@ class JmReaderViewModel(
     private var scanJob: Job? = null
 
     init {
+        // 进阅读器也算"看过这本"：刷新最近浏览时间（用户要求第 5 点）。
+        // 详情页已经在进页时刷过一次，但用户可能从"继续阅读"卡片或章节直接进阅读器，
+        // 那条路径也必须把浏览时间顶到最新。
+        viewModelScope.launch {
+            runCatching { repo.touchRecent(albumId) }
+                .onFailure { Timber.tag("jm").w(it, "记录最近浏览失败") }
+        }
         viewModelScope.launch {
             settings.observeReaderPreferences().collect { prefs ->
                 _state.update { it.copy(preferences = prefs) }

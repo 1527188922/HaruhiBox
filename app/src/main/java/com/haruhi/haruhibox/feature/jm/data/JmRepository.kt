@@ -84,6 +84,13 @@ class JmRepository(
         query: String,
         sort: JmSearchSort = JmSearchSort.DEFAULT,
         page: Int = 1,
+    ): OnlineSearchResult = searchOnlineInternal(query, sort, page, recordHistory = true)
+
+    private suspend fun searchOnlineInternal(
+        query: String,
+        sort: JmSearchSort,
+        page: Int,
+        recordHistory: Boolean,
     ): OnlineSearchResult {
         val resp = api.search(query, sort, page)
         val items = resp.content.orEmpty()
@@ -101,7 +108,7 @@ class JmRepository(
             totalPages = ((total + pageSize - 1) / pageSize).toInt().coerceAtLeast(1),
             items = items.mapNotNull { it.toItem(localIds) },
         )
-        recordSearchHistory(result)
+        if (recordHistory) recordSearchHistory(result)
         return result
     }
 
@@ -115,25 +122,38 @@ class JmRepository(
      * - 两边都失败 → 按搜索的失败原因报错（详情失败不报错，它本来就是"试试看"）。
      *
      * 详情数据顺手写进"最近浏览"，所以点进详情页时**不用再联网**。
+     *
+     * 搜索历史记的是**合并之后**的结果（用户要求第 6 点①）：
+     * 记合并前的搜索结果的话，点历史记录回显时就看不到置顶的"精确匹配"那一条。
      */
     suspend fun searchOnlineByExactId(
         query: String,
         sort: JmSearchSort = JmSearchSort.DEFAULT,
         page: Int = 1,
     ): OnlineSearchResult {
-        val exactId = query.trim().toLongOrNull()
-        val base = searchOnline(query, sort, page)
-        if (exactId == null || exactId <= 0) return base
+        val exactId = query.trim().toLongOrNull()?.takeIf { it > 0 }
+        // 纯数字要等"精确匹配"合并完再记历史，所以这里先不记
+        val base = searchOnlineInternal(query, sort, page, recordHistory = exactId == null)
+        if (exactId == null) return base
 
         val dto = runCatching { api.album(exactId) }
             .onSuccess { saveToRecent(it) }
             .getOrNull()
-            ?: return base
+            // 详情查不到就按普通搜索结果收尾（历史仍然要记一条，和以前一样）
+            ?: return base.also { recordSearchHistory(it) }
+
+        // 作者在 `/album` 里是字符串数组，直接编码会显示成 ["作者1","作者2"]（用户要求第 6 点②）。
+        // 搜索结果的 author 是普通字符串，这里按详情页的风格拼成一行。
+        val author = dto.author
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.takeIf { it.isNotEmpty() }
+            ?.joinToString(" / ")
 
         val pinned = OnlineSearchItem(
             id = exactId,
             name = dto.name,
-            author = encodeStringList(dto.author),
+            author = author,
             description = dto.description,
             coverUrl = JmDefaults.buildCoverUrl(exactId),
             tags = dto.tags.orEmpty(),
@@ -143,12 +163,14 @@ class JmRepository(
             raw = JmSearchItemDto(
                 id = exactId.toString(),
                 name = dto.name,
-                author = encodeStringList(dto.author),
+                author = author,
                 description = dto.description,
             ),
         )
 
-        return mergeExactIdMatch(base, pinned)
+        val merged = mergeExactIdMatch(base, pinned)
+        recordSearchHistory(merged)
+        return merged
     }
 
     private suspend fun recordSearchHistory(result: OnlineSearchResult) {
@@ -195,6 +217,10 @@ class JmRepository(
     /**
      * 点历史记录时直接回显快照，不再请求 JM（参考实现就是这么做的），
      * 但"是否已入库"按**当前**库状态重新计算，避免显示过期状态。
+     *
+     * 纯数字搜索的那条"精确匹配"也要跟着回显（用户要求第 6 点①）：
+     * 它就在快照里，这里按"条目 id = 数字关键字"的规则把标记还原出来，
+     * 回显时同样带上"精确匹配"标签。
      */
     suspend fun searchHistorySnapshot(id: Long): OnlineSearchResult? {
         val row = searchHistoryDao.findById(id) ?: return null
@@ -205,6 +231,7 @@ class JmRepository(
         }.orEmpty()
         val ids = raw.mapNotNull { it.id?.toLongOrNull() }
         val localIds = if (ids.isEmpty()) emptySet() else albumDao.existingIds(ids).toSet()
+        val exactId = row.keyword.trim().toLongOrNull()
         return OnlineSearchResult(
             query = row.keyword,
             sort = JmSearchSort.fromCode(row.sort),
@@ -212,7 +239,9 @@ class JmRepository(
             total = row.total,
             pageSize = JmDefaults.SEARCH_PAGE_SIZE,
             totalPages = row.page,
-            items = raw.mapNotNull { it.toItem(localIds) },
+            items = raw.mapNotNull { it.toItem(localIds) }.map { item ->
+                if (exactId != null && item.id == exactId) item.copy(isExactIdMatch = true) else item
+            },
             fromHistory = true,
         )
     }
@@ -790,13 +819,17 @@ class JmRepository(
             .joinToString(",")
 
     /**
-     * 从书库移除：**删掉这本漫画在本地的所有数据库记录**（用户要求第 7 点）。
+     * 从书库移除：**删掉这本漫画在本地的数据库记录**（用户要求第 7 点）。
      *
      * 覆盖四张表：
      * - `t_jm_album`（书库记录本身）
      * - `t_jm_chapter_image`（章节图片清单）
      * - `t_jm_favorite_album`（收藏夹关联）
-     * - `t_jm_recent_album`（最近浏览）+ `t_playback_position`（阅读位置）
+     * - `t_playback_position`（阅读位置）
+     *
+     * **`t_jm_recent_album`（最近浏览）刻意不动**（用户要求第 5 点）：
+     * "移出书库"影响的是书库与本地文件，"刚看过什么"是另一件事——
+     * 保留后近期列表里还能看到这本，点进去也能重新加入书库。
      *
      * **本地文件不在这里删**：图片在本子目录、成品在系统下载目录、封面在 Coil 缓存，
      * 三处都要清，由调用方（详情页 / 书库多选）统一编排。
@@ -806,7 +839,7 @@ class JmRepository(
         ids.forEach { id ->
             favoriteDao.deleteLinksOfAlbum(id)
             chapterDao.deleteByAlbum(id)
-            recentDao.delete(id)
+            // recentDao.delete(id)
             positionDao?.delete(READING_KIND, id.toString())
         }
         albumDao.deleteByIds(ids)
@@ -979,17 +1012,19 @@ data class OnlineSearchResult(
  * 2. 搜索里已经有同一 aid 的，摘掉后面那条，避免同一本出现两次；
  * 3. 只在搜索结果里**没有**它时才把总数 +1，否则"共 N 条"会比卡片多一条。
  *
- * 抽成顶层纯函数是为了能单测：JM 的搜索响应是加密的，
- * MockWebServer 造不出真实结果（见 `JmSearchMergeTest`）。
+ * 另有一条"总数"的兜底（用户要求第 6 点③）：**搜索一条都没返回时，
+ * 接口给的 total 不可信**——纯数字查询实测会返回 `total = 1` 但 `content` 为空，
+ * 直接 +1 就显示成"共 2 条"。这时以"实际有的条目"为准。
  */
 internal fun mergeExactIdMatch(
     base: OnlineSearchResult,
     pinned: OnlineSearchItem,
 ): OnlineSearchResult {
     val alreadyThere = base.items.any { it.id == pinned.id }
+    val baseTotal = if (base.items.isEmpty()) 0L else base.total
     return base.copy(
         items = listOf(pinned) + base.items.filterNot { it.id == pinned.id },
-        total = base.total + if (alreadyThere) 0 else 1,
+        total = baseTotal + if (alreadyThere) 0 else 1,
     )
 }
 

@@ -17,11 +17,13 @@ import timber.log.Timber
  * | `files/library/jm/<本子目录>` | 章节图片 | [JmRepository.deleteAlbumFiles] |
  * | 系统下载目录 `Download/HaruHiBox` | 导出的 zip / pdf | [JmExportManager.deleteOutputs] |
  * | Coil 磁盘缓存 `files/covers` | 封面 | [CoverCache.evict] |
- * | 数据库五张表 | 书库 / 章节清单 / 收藏关联 / 最近浏览 / 阅读位置 | [JmRepository.deleteAlbums] |
+ * | 数据库四张表 | 书库 / 章节清单 / 收藏关联 / 阅读位置 | [JmRepository.deleteAlbums] |
  *
  * 两个入口的差别只有"删不删数据库记录"：
  * - **删除本地文件**：只清前三处，保留书库记录（用户要求第 6 点）；
  * - **从书库移除**：四处全清（用户要求第 7 点）。
+ *   注意 `t_jm_recent_album`（最近浏览）**不删**——"移出书库"不影响"刚看过什么"
+ *   （用户要求第 5 点），保留后最近列表里还能看到这本。
  *
  * 封面缓存是 Coil 的磁盘缓存（按 URL 哈希存文件），所以只能按 key 逐条失效，
  * 不能"删掉某个文件"——这也是它单独抽一个接口的原因。

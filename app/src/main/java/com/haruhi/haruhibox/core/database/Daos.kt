@@ -52,6 +52,10 @@ interface JmAlbumDao {
      * 之后刷新详情只会改 `modify_time`，所以用 `create_time` 才是"入库顺序"。
      * 时间戳是 `yyyy-MM-dd HH:mm:ss` 文本，字典序即时间序；同一秒内用 id 兜底。
      *
+     * **指定收藏夹时改按"加入这个夹的时间"倒序**（用户要求第 4 点）：
+     * 夹内的顺序应该是"最近加进来的在最前"，和书库的入库顺序是两回事，
+     * 所以第一个排序键取关联表 `t_jm_favorite_album.create_time`（用相关子查询取当前夹的关联时间）。
+     *
      * 筛选条件全部用 `(:param IS NULL OR ...)` 形式，避免为每个组合写一条 SQL。
      *
      * **标签多选是 OR 语义**，与参考实现 `applyTagFilter` 一致：
@@ -85,7 +89,13 @@ interface JmAlbumDao {
                 ) WHERE hit = 1))
           AND (:favoriteId IS NULL OR id IN (
                 SELECT album_id FROM t_jm_favorite_album WHERE favorite_id = :favoriteId))
-        ORDER BY COALESCE(create_time, '') DESC, id DESC
+        ORDER BY
+            CASE WHEN :favoriteId IS NULL THEN NULL ELSE (
+                SELECT fa.create_time FROM t_jm_favorite_album fa
+                WHERE fa.favorite_id = :favoriteId AND fa.album_id = t_jm_album.id
+            ) END DESC,
+            COALESCE(create_time, '') DESC,
+            id DESC
         LIMIT :limit OFFSET :offset
         """,
     )

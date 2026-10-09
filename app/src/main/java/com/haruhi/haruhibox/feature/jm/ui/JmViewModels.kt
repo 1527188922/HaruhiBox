@@ -342,22 +342,57 @@ class JmLibraryViewModel(
         }
     }
 
-    /** 批量更改收藏夹：从原夹移出、加入目标夹（"移动"而不是"多属于一个"）。 */
-    fun moveToFavorite(ids: List<Long>, favoriteId: Long) {
+    /** 批量"修改收藏夹"：勾选集合就是这些本子**最终所在的收藏夹**（用户要求第 3 点）。
+     *
+     * - 支持多选：勾了几个就同时属于这几个（"移动到多个收藏夹"）；
+     * - 一个都没勾 = 移出所有收藏夹；
+     * - 多出来的先移出、缺的再加入，语义是"修改"而不是"只增不减"。
+     */
+    fun modifyFavorites(ids: List<Long>, favoriteIds: Set<Long>) {
         viewModelScope.launch {
             runCatching {
                 ids.forEach { id ->
-                    repo.favoriteIdsOf(id).forEach { old ->
-                        if (old != favoriteId) repo.removeFromFavorite(id, old)
-                    }
-                    repo.addToFavorite(id, favoriteId)
+                    val current = repo.favoriteIdsOf(id).toSet()
+                    (current - favoriteIds).forEach { old -> repo.removeFromFavorite(id, old) }
+                    (favoriteIds - current).forEach { target -> repo.addToFavorite(id, target) }
+                    if (favoriteIds.isEmpty()) repo.uncollect(id)
                 }
             }.onSuccess {
-                val name = uiState.value.favorites.firstOrNull { it.id == favoriteId }?.name
-                postMessage(if (name != null) "已移动到「$name」" else "已移动收藏夹")
+                val names = uiState.value.favorites.filter { it.id in favoriteIds }.map { it.name }
+                postMessage(
+                    when {
+                        // 空集合就是"移出所有收藏夹"（用户要求第 3 点）
+                        favoriteIds.isEmpty() -> "已把 ${ids.size} 本移出所有收藏夹"
+                        // 刚新建的夹可能还没随 Flow 刷新出来，名字兜底成不带夹名
+                        names.isEmpty() -> "已把 ${ids.size} 本移动到收藏夹"
+                        else -> "已把 ${ids.size} 本移动到「${names.joinToString("、")}」"
+                    },
+                )
             }.onFailure { postMessage(it.toUserMessage()) }
             refreshStats()
         }
+    }
+
+    /**
+     * 批量面板里"新建收藏夹"：成功返回新夹 id（面板自动勾上），失败提示原因并返回 null。
+     *
+     * 这里只负责建，真正移动仍然等用户点面板的「确认」——用户要求第 3 点。
+     */
+    suspend fun createFavoriteForSelection(name: String): Long? {
+        val result = runCatching { repo.createFavorite(name) }
+            .getOrDefault(FavoriteWriteResult.NameBlank)
+        if (result != FavoriteWriteResult.Ok) {
+            postMessage(
+                when (result) {
+                    FavoriteWriteResult.NameTaken -> "已经有同名的收藏夹了"
+                    FavoriteWriteResult.NameBlank -> "请输入收藏夹名称"
+                    FavoriteWriteResult.DefaultFolder -> "默认收藏夹已存在"
+                    else -> "创建收藏夹失败"
+                },
+            )
+            return null
+        }
+        return repo.listFavorites().firstOrNull { it.name == name.trim() }?.id
     }
 
     fun consumeMessage() = extra.update { it.copy(message = null) }
@@ -1403,8 +1438,9 @@ class JmAlbumDetailViewModel(
     /**
      * 「从书库移除」：记录 + 文件 + 成品 + 封面全清（用户要求第 7 点）。
      *
-     * 与「删除本地文件」的差别只在于**要不要连记录一起删**；
-     * 最近浏览也会一起清掉——不然"移除了"却还在最近列表里，看着像没删掉。
+     * 与「删除本地文件」的差别只在于**要不要连记录一起删**。
+     * **最近浏览记录保留**（用户要求第 5 点：移出书库不影响"刚看过什么"），
+     * 所以移除后"最近"页仍然能看到这本、点进去还能再次加入书库。
      */
     fun removeFromLibrary() {
         viewModelScope.launch {
@@ -1420,7 +1456,7 @@ class JmAlbumDetailViewModel(
                 it.copy(
                     inLibrary = false,
                     removedFromLibrary = true,
-                    message = "已从书库移除，本地文件与浏览记录一起删掉了$suffix",
+                    message = "已从书库移除，本地文件已删除（最近浏览记录保留）$suffix",
                 )
             }
         }

@@ -1,8 +1,10 @@
 package com.haruhi.haruhibox.feature.jm.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,16 +28,18 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddCircle
-import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -47,7 +51,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -57,12 +60,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -78,6 +83,7 @@ import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchItem
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -119,8 +125,17 @@ fun JmLibraryScreen(
     onDeleteFiles: ((List<Long>) -> Unit)? = null,
     /** 批量从书库移除（记录 + 文件 + 成品 + 封面）。 */
     onRemoveFromLibrary: ((List<Long>) -> Unit)? = null,
-    /** 批量更改收藏夹。 */
-    onMoveToFavorite: ((List<Long>, Long) -> Unit)? = null,
+    /**
+     * 批量"修改收藏夹"：勾选集合就是这些漫画**最终所在的收藏夹**（可多选，
+     * 空集合 = 移出所有收藏夹）。点面板里的「确认」才会调用。
+     */
+    onModifyFavorites: ((List<Long>, Set<Long>) -> Unit)? = null,
+    /** 批量面板里"新建收藏夹"：成功返回新夹 id（自动勾上），失败返回 null。 */
+    onCreateFavorite: (suspend (String) -> Long?)? = null,
+    /** 批量操作条上"修改收藏夹"按钮的文案（收藏夹内改成"修改收藏夹"，书库页保持"收藏夹"）。 */
+    moveFavoriteLabel: String = "收藏夹",
+    /** 打开"修改收藏夹"面板时预先勾上的收藏夹（收藏夹内打开时把当前夹勾上）。 */
+    preselectedFavoriteIds: Set<Long> = emptySet(),
 ) {
     // 多选状态是纯界面状态：长按进入、退出即清空，不需要活过页面重建
     var selection by remember { mutableStateOf(emptySet<Long>()) }
@@ -145,7 +160,8 @@ fun JmLibraryScreen(
                 onMoveToFavorite = { showMoveSheet = true },
                 canDeleteFiles = onDeleteFiles != null,
                 canRemove = onRemoveFromLibrary != null,
-                canMove = onMoveToFavorite != null,
+                canMove = onModifyFavorites != null,
+                moveLabel = moveFavoriteLabel,
             )
         } else {
             if (title != null) {
@@ -219,11 +235,13 @@ fun JmLibraryScreen(
     if (showMoveSheet) {
         FavoritePickerForSelection(
             favorites = state.favorites,
-            onPick = { favoriteId ->
-                onMoveToFavorite?.invoke(selection.toList(), favoriteId)
+            initiallyChecked = preselectedFavoriteIds,
+            onConfirm = { chosen ->
+                onModifyFavorites?.invoke(selection.toList(), chosen)
                 showMoveSheet = false
                 selection = emptySet()
             },
+            onCreate = onCreateFavorite,
             onDismiss = { showMoveSheet = false },
         )
     }
@@ -246,8 +264,8 @@ fun JmLibraryScreen(
     if (confirmRemove) {
         ConfirmDialog(
             title = "从书库移除这 ${selection.size} 本？",
-            text = "会删除书库记录、章节清单、收藏关联、阅读位置、最近浏览记录，" +
-                "以及本地图片、导出的 zip/pdf 与封面缓存。此操作不可撤销。",
+            text = "会删除书库记录、章节清单、收藏关联、阅读位置，" +
+                "以及本地图片、导出的 zip/pdf 与封面缓存。最近浏览记录会保留。此操作不可撤销。",
             confirmText = "移除并删除",
             onConfirm = {
                 confirmRemove = false
@@ -265,7 +283,8 @@ private fun Set<Long>.toggle(id: Long): Set<Long> = if (id in this) this - id el
  * 多选操作条。
  *
  * 放在原筛选栏的位置（不浮在列表上），所以不会挡住内容；
- * 左侧显示已选数量与"全选/取消"，右侧是三个批量操作。
+ * 左侧显示已选数量与"全选/取消"，右侧是批量操作（书库页三个：
+ * 删除文件 / 移出书库 / 收藏夹；收藏夹内只留「修改收藏夹」）。
  */
 @Composable
 private fun MultiSelectBar(
@@ -279,6 +298,7 @@ private fun MultiSelectBar(
     canDeleteFiles: Boolean,
     canRemove: Boolean,
     canMove: Boolean,
+    moveLabel: String,
 ) {
     Column(
         modifier = Modifier
@@ -307,30 +327,45 @@ private fun MultiSelectBar(
                 TextButton(onClick = onRemoveFromLibrary) { Text("移出书库") }
             }
             if (canMove) {
-                TextButton(onClick = onMoveToFavorite) { Text("收藏夹") }
+                TextButton(onClick = onMoveToFavorite) { Text(moveLabel) }
             }
         }
     }
 }
 
-/** 批量"更改收藏夹"：列出所有收藏夹，选中即把勾选的本子移动过去。 */
+/**
+ * 批量"修改收藏夹"面板：勾选目标收藏夹，点「确认」才执行（用户要求第 3 点）。
+ *
+ * 语义：
+ * - 勾选集合 = 这些漫画**最终所在的收藏夹**，支持多选（"移动到多个收藏夹"）；
+ * - 一个都没勾就点「确认」= **移出所有收藏夹**；
+ * - 列表里没有想要的可以就地新建，新建成功自动勾上（新建本身立即生效，
+ *   移动仍然等「确认」）。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FavoritePickerForSelection(
     favorites: List<JmFavoriteEntity>,
-    onPick: (Long) -> Unit,
+    initiallyChecked: Set<Long>,
+    onConfirm: (Set<Long>) -> Unit,
+    onCreate: (suspend (String) -> Long?)?,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var checked by remember { mutableStateOf(initiallyChecked) }
+    var showCreate by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val createFavorite = onCreate
+
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
             Text(
-                text = "移动到收藏夹",
+                text = "修改收藏夹",
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
             Text(
-                text = "选中的漫画会从这个收藏夹移出（如果本来在里面），只保留在目标收藏夹里。",
+                text = "勾选这些漫画要保留的收藏夹（可多选）；一个都不勾选点「确认」= 移出所有收藏夹。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -341,17 +376,44 @@ private fun FavoritePickerForSelection(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onPick(favorite.id) }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                            .clickable { checked = checked.toggle(favorite.id) }
+                            .padding(end = 16.dp),
                     ) {
+                        Checkbox(
+                            checked = favorite.id in checked,
+                            onCheckedChange = { checked = checked.toggle(favorite.id) },
+                        )
                         Text(favorite.name, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             }
-            TextButton(onClick = onDismiss, modifier = Modifier.padding(horizontal = 8.dp)) {
-                Text("取消")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            ) {
+                if (createFavorite != null) {
+                    TextButton(onClick = { showCreate = true }) { Text("新建收藏夹") }
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) { Text("取消") }
+                Button(onClick = { onConfirm(checked) }) { Text("确认") }
             }
         }
+    }
+
+    if (showCreate && createFavorite != null) {
+        NameInputDialog(
+            title = "新建收藏夹",
+            initial = "",
+            onConfirm = { name ->
+                showCreate = false
+                scope.launch {
+                    // 建出来的夹直接勾上，用户接着点「确认」才会真正移动
+                    createFavorite(name)?.let { id -> checked = checked + id }
+                }
+            },
+            onDismiss = { showCreate = false },
+        )
     }
 }
 
@@ -552,6 +614,11 @@ private fun LibraryFilterBar(
  *
  * 交互：单击进详情；**长按进入多选**（用户要求第 1、2 点）。多选模式下单击变成勾选，
  * 卡片右上角显示勾选标记、并整体加一层淡色底，一眼能看出"现在在选择"。
+ *
+ * 勾选效果必须是**一眼可见**的（用户反馈第 2 点："看不清哪些被勾选了"），所以三处叠加：
+ * 1. 卡片加一圈主题色描边；
+ * 2. 封面盖一层半透明主题色；
+ * 3. 右上角的圆形标记：选中是实心圆 + 白色对勾，未选中是深色半透明空圈。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -572,6 +639,7 @@ private fun AlbumGridCard(
                 MaterialTheme.colorScheme.surfaceVariant
             },
         ),
+        border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onOpen, onLongClick = onLongPress),
@@ -588,23 +656,43 @@ private fun AlbumGridCard(
                 contentDescription = card.displayName,
                 modifier = Modifier.fillMaxSize(),
             )
-            when {
-                // 多选模式优先显示勾选状态，避免和"收藏星标"挤在一起
-                selecting -> Icon(
-                    imageVector = if (selected) Icons.Default.CheckCircle else Icons.Default.AddCircle,
-                    contentDescription = if (selected) "已选中" else "未选中",
-                    tint = if (selected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                    },
-                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
-                )
-
-                card.album.collected == true && onToggleCollected != null -> {
-                    IconButton(onClick = onToggleCollected, modifier = Modifier.align(Alignment.TopEnd)) {
-                        Text("★", style = MaterialTheme.typography.titleMedium)
+            if (selecting) {
+                if (selected) {
+                    // 封面上盖一层主题色，和未选中的卡片拉开肉眼可见的差距
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.32f)),
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (selected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.Black.copy(alpha = 0.35f)
+                            },
+                        )
+                        .border(1.5.dp, Color.White.copy(alpha = 0.9f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (selected) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "已选中",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp),
+                        )
                     }
+                }
+            } else if (card.album.collected == true && onToggleCollected != null) {
+                IconButton(onClick = onToggleCollected, modifier = Modifier.align(Alignment.TopEnd)) {
+                    Text("★", style = MaterialTheme.typography.titleMedium)
                 }
             }
         }
@@ -700,15 +788,11 @@ fun JmOnlineSearchScreen(
     onDeleteHistory: (Long) -> Unit,
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier,
+    onMessage: (String) -> Unit = {},
     onConsumeMessage: () -> Unit = {},
 ) {
-    val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(state.message) {
-        state.message?.let {
-            snackbarHostState.showSnackbar(it)
-            onConsumeMessage()
-        }
-    }
+    // 提示语走根部 Scaffold 的 Snackbar（本页自己没有宿主，之前写着 showSnackbar 却没人显示）
+    MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
 
     Column(modifier = modifier.fillMaxSize()) {
         OutlinedTextField(
@@ -1241,6 +1325,31 @@ fun ErrorBanner(message: String, onRetry: (() -> Unit)? = null, modifier: Modifi
 }
 
 private val TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
+
+/**
+ * 一次性提示的统一出口：**先把消息消费掉，再展示**。
+ *
+ * 之前的写法是"showSnackbar 挂起几秒结束后才消费"，于是用户在提示语还在时切走页面，
+ * 组合被销毁、协程被取消，消费那一行永远执行不到；再切回来时
+ * `LaunchedEffect(message)` 又以同一条消息重启，提示语被重放一次（用户反馈的 bug）。
+ *
+ * 先消费、后展示，状态里立刻回到 null：无论用户什么时候切页都不会再弹第二遍。
+ * 展示交给调用方（根部用 `rememberCoroutineScope` 弹 Snackbar），
+ * 这样切页时提示不会被一起取消。
+ */
+@Composable
+fun MessageEffect(
+    message: String?,
+    onConsume: () -> Unit,
+    onShow: (String) -> Unit,
+) {
+    LaunchedEffect(message) {
+        if (message != null) {
+            onConsume()
+            onShow(message)
+        }
+    }
+}
 
 /**
  * 页面重新回到前台时执行一次（导航返回也算）。

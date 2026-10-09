@@ -70,4 +70,17 @@ class JmSearchMergeTest {
         assertThat(merged.page).isEqualTo(1)
         assertThat(merged.sort).isEqualTo(JmSearchSort.DEFAULT)
     }
+
+    /**
+     * 纯数字查询时 JM 会返回 `total = 1` 但 `content` 为空（一条搜索结果都没有），
+     * 直接"总数 +1"就会显示成"共 2 条"（用户要求第 6 点③）。
+     * 搜索一条都没返回时，接口给的 total 不可信，以实际条目为准。
+     */
+    @Test
+    fun `a phantom search total is ignored when the search returned nothing`() {
+        val merged = mergeExactIdMatch(result(total = 1), item(99L, exact = true))
+
+        assertThat(merged.items.map { it.id }).containsExactly(99L)
+        assertThat(merged.total).isEqualTo(1L)
+    }
 }
