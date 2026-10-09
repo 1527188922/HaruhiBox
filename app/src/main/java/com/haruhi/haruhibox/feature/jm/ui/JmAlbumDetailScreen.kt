@@ -62,6 +62,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.storage.FileNaming
+import com.haruhi.haruhibox.feature.jm.data.ExportedFormat
 import com.haruhi.haruhibox.feature.jm.data.JmExportFormat
 import com.haruhi.haruhibox.ui.theme.WarningOrangeDark
 import com.haruhi.haruhibox.ui.theme.WarningOrangeLight
@@ -117,6 +118,11 @@ fun JmAlbumDetailScreen(
     onConfirmExport: (String) -> Unit,
     onExportWithoutPassword: () -> Unit,
     onCancelExport: () -> Unit,
+    /** 导出成品的「打开至 / 发送至」：交给上层发系统 Intent（用户第九轮要求第 2 点）。 */
+    onOpenOutput: (String) -> Unit,
+    onSendOutput: (String) -> Unit,
+    /** 导出成品的「删除」：删系统下载目录里的那个文件。 */
+    onDeleteExport: (String) -> Unit,
     /**
      * 提示文案的**上层**回调。
      *
@@ -133,6 +139,8 @@ fun JmAlbumDetailScreen(
     var showFavoriteSheet by remember { mutableStateOf(false) }
     // 面板的展开状态由本页自己管：它是纯界面状态，不需要活过页面重建
     var showDownloadSheet by remember { mutableStateOf(false) }
+    // 待删除的导出成品文件名（null = 没有待确认的删除）
+    var pendingDeleteExport by remember { mutableStateOf<String?>(null) }
 
     // 一次性提示统一走 MessageEffect：先消费、再交给根部弹（切页不会重放）
     MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
@@ -220,6 +228,20 @@ fun JmAlbumDetailScreen(
                 if (state.refreshing) {
                     item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
                 }
+                // 已经导出过的 zip/pdf：放在章节前面——它属于"这本在我设备上有什么"，
+                // 与封面区的占用统计是同一类信息，不该被长长的章节列表压到最下面
+                // （用户第九轮要求第 2 点）。
+                if (state.exports.isNotEmpty()) {
+                    item {
+                        ExportSection(
+                            exports = state.exports,
+                            location = state.exportLocation,
+                            onOpen = onOpenOutput,
+                            onSend = onSendOutput,
+                            onDelete = { name -> pendingDeleteExport = name },
+                        )
+                    }
+                }
                 // 离线/刷新失败只提示，不阻断本地阅读（计划 §9 第 7 条）
                 state.refreshError?.let { error ->
                     item { ErrorBanner(message = "在线刷新失败：$error", onRetry = onRefresh) }
@@ -289,10 +311,24 @@ fun JmAlbumDetailScreen(
         ConfirmDialog(
             title = "从书库移除？",
             text = "会删掉书库记录与章节清单，并连同本机图片、已导出的 zip / PDF 一起清除；" +
-                "收藏夹里的关联也会取消。最近浏览记录会保留。",
+                "收藏夹里的关联也会取消。最近浏览记录会保留（封面也还在）。",
             confirmText = "移除",
             onConfirm = { showDeleteRecordDialog = false; onDeleteAlbumRecord() },
             onDismiss = { showDeleteRecordDialog = false },
+        )
+    }
+
+    // 删导出成品是不可撤销的（重新生成一份 20MB 的 PDF 要花时间），所以先确认一次
+    pendingDeleteExport?.let { name ->
+        ConfirmDialog(
+            title = "删除这个导出文件？",
+            text = "会从下载目录里删掉「$name」。漫画本身、已下载的图片与其它成品都不受影响。",
+            confirmText = "删除",
+            onConfirm = {
+                pendingDeleteExport = null
+                onDeleteExport(name)
+            },
+            onDismiss = { pendingDeleteExport = null },
         )
     }
 
@@ -341,6 +377,116 @@ fun JmAlbumDetailScreen(
             onWithoutPassword = onExportWithoutPassword,
             onDismiss = onCancelExport,
         )
+    }
+}
+
+/**
+ * 「导出文件」区块：这本漫画已经导出到系统下载目录的 zip / pdf（用户第九轮要求第 2 点）。
+ *
+ * 设计取舍：
+ * - **一个卡片装下所有成品**，每行一个格式：最多两行，比两张卡片省一半纵向空间，
+ *   视觉上也更像"这本的成品清单"而不是两条互不相干的记录；
+ * - 行内三段式（格式徽标 → 文件名+大小+生成时间 → 三个操作），
+ *   左到右正好是"是什么 → 什么状态 → 能对它做什么"，与任务页的成品行一致；
+ * - 标题右侧写明**文件在哪儿**：成品在系统下载目录，用户拿文件管理器就能找到，
+ *   不写位置的话"导出了但找不到"是必然的疑问；
+ * - 一个成品都没有时整块不显示（章节列表直接跟在封面后面，不留空壳）。
+ */
+@Composable
+private fun ExportSection(
+    exports: List<ExportedFormat>,
+    location: String,
+    onOpen: (String) -> Unit,
+    onSend: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("导出文件", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.weight(1f))
+                if (location.isNotBlank()) {
+                    Text(
+                        text = "在 $location",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            exports.forEachIndexed { index, exported ->
+                if (index > 0) HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                else Spacer(Modifier.height(8.dp))
+                ExportedFileRow(
+                    exported = exported,
+                    onOpen = { onOpen(exported.file.displayName) },
+                    onSend = { onSend(exported.file.displayName) },
+                    onDelete = { onDelete(exported.file.displayName) },
+                )
+            }
+        }
+    }
+}
+
+/** 成品的一行：格式徽标 + 文件名 + 大小/生成时间 + 打开至/发送至/删除。 */
+@Composable
+private fun ExportedFileRow(
+    exported: ExportedFormat,
+    onOpen: () -> Unit,
+    onSend: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        // 格式徽标：一眼分清哪个是 zip 哪个是 pdf，不用去读扩展名
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .width(42.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.primary)
+                .padding(vertical = 4.dp),
+        ) {
+            Text(
+                text = exported.format.label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = exported.file.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = buildString {
+                    append(formatBytes(exported.file.sizeBytes))
+                    append(" · 生成于 ")
+                    append(
+                        if (exported.file.createdAt > 0) {
+                            formatTime(exported.file.createdAt)
+                        } else {
+                            "时间未知"
+                        },
+                    )
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        TextButton(onClick = onOpen) { Text("打开至") }
+        TextButton(onClick = onSend) { Text("发送至") }
+        TextButton(onClick = onDelete) { Text("删除") }
     }
 }
 

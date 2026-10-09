@@ -299,6 +299,14 @@ class JmRepository(
 
     suspend fun findRecent(aid: Long): JmRecentAlbumEntity? = recentDao.findById(aid)
 
+    /**
+     * 最近浏览里的全部 id。
+     *
+     * 清空之前先取一份：清完就查不到"刚才有哪几本"了，
+     * 而这几本的封面要不要一起清，正是靠这份名单判断的（见 `JmAlbumCleaner`）。
+     */
+    suspend fun recentAlbumIds(): List<Long> = recentDao.allIds()
+
     suspend fun removeRecent(aid: Long) = recentDao.delete(aid)
 
     suspend fun clearRecent(): Int = recentDao.clear()

@@ -24,6 +24,7 @@ import timber.log.Timber
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
+
 /** 导出任务的参数快照（`t_download_task.payload`）。**绝不放密码**（计划 §D.2 第 6 条）。 */
 @Serializable
 data class JmExportPayload(
@@ -48,6 +49,17 @@ enum class JmExportFormat(val taskType: DownloadType, val extension: String, val
     ZIP(DownloadType.JM_EXPORT_ZIP, "zip", "application/zip", "ZIP"),
     PDF(DownloadType.JM_EXPORT_PDF, "pdf", "application/pdf", "PDF"),
 }
+
+/**
+ * "这一本已经导出过这个格式了"，带上文件本身的信息。
+ *
+ * 详情页要显示文件名、大小与生成时间，所以直接把 [ExportPublisher.ExportFile] 带上，
+ * 而不是只回一个布尔值再让界面去查一次。
+ */
+data class ExportedFormat(
+    val format: JmExportFormat,
+    val file: com.haruhi.haruhibox.core.storage.ExportPublisher.ExportFile,
+)
 
 /**
  * 导出编排（计划 §10 P4）：
@@ -182,6 +194,9 @@ class JmExportManager(
     fun outputNameOf(album: JmAlbumEntity, format: JmExportFormat): String? =
         album.albumFolderName?.let { "$it.${format.extension}" }
 
+    /** 成品放在哪（详情页显示"文件在哪儿"）。 */
+    val outputLocation: String get() = publisher.locationLabel
+
     /**
      * 这个成品现在还在不在（导出确认框用它提示"会覆盖已有文件"）。
      *
@@ -190,14 +205,49 @@ class JmExportManager(
     suspend fun outputExists(album: JmAlbumEntity, format: JmExportFormat): Boolean =
         withContext(Dispatchers.IO) {
             val name = outputNameOf(album, format) ?: return@withContext false
-            publisher.exists(name)
+            publisher.infoOf(name) != null
+        }
+
+    /**
+     * 这一本现有的导出成品（详情页的"导出文件"区块）。
+     *
+     * 顺序固定 ZIP、PDF，与导出菜单里的顺序一致，界面不用再排。
+     */
+    suspend fun exportsOf(album: JmAlbumEntity): List<ExportedFormat> = withContext(Dispatchers.IO) {
+        JmExportFormat.entries.mapNotNull { format ->
+            val name = outputNameOf(album, format) ?: return@mapNotNull null
+            publisher.infoOf(name)?.let { ExportedFormat(format, it) }
+        }
+    }
+
+    /**
+     * 一批本子各有哪些成品，"按有没有 zip/pdf 筛选书库"用（用户要求第 1 点）。
+     *
+     * **一次查询拿全**再在内存里配名字：MediaStore 逐本查的话，一页 60 本就是 120 次查询。
+     * 名字规则是 `<本子目录名>.<zip|pdf>`，所以从文件名反推即可，不需要额外映射表。
+     *
+     * 返回的 map **覆盖传进来的每一本**（没有成品的给空集合）：
+     * 界面据此区分"查过、确实没有"与"还没查"，否则第一次进页面会闪一下空列表。
+     */
+    suspend fun presentFormats(albums: List<JmAlbumEntity>): Map<Long, Set<JmExportFormat>> =
+        withContext(Dispatchers.IO) {
+            if (albums.isEmpty()) return@withContext emptyMap()
+            val names = publisher.listAll().mapTo(mutableSetOf()) { it.displayName }
+            albums.associate { album ->
+                val folder = album.albumFolderName
+                album.id to if (folder == null) {
+                    emptySet()
+                } else {
+                    JmExportFormat.entries.filterTo(mutableSetOf()) { "$folder.${it.extension}" in names }
+                }
+            }
         }
 
     suspend fun outputUri(displayName: String): android.net.Uri? = withContext(Dispatchers.IO) {
-        publisher.uriOf(displayName)
+        publisher.infoOf(displayName)?.uri
     }
 
-    /** 删除某一个成品文件（任务页的「删除文件」）。 */
+    /** 删除某一个成品文件（任务页与详情页的「删除文件」）。 */
     suspend fun deleteOutput(displayName: String): Boolean = withContext(Dispatchers.IO) {
         publisher.delete(displayName)
     }
@@ -213,7 +263,8 @@ class JmExportManager(
     suspend fun deleteOutputs(album: JmAlbumEntity): Int = withContext(Dispatchers.IO) {
         JmExportFormat.entries.count { format ->
             val name = outputNameOf(album, format) ?: return@count false
-            publisher.exists(name) && publisher.delete(name)
+            // delete 本身对"文件不在"返回 false，不用先查一次
+            publisher.delete(name)
         }
     }
 

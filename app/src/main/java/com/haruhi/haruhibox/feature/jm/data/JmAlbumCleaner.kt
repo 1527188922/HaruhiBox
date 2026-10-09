@@ -22,8 +22,20 @@ import timber.log.Timber
  * 两个入口的差别只有"删不删数据库记录"：
  * - **删除本地文件**：只清前三处，保留书库记录（用户要求第 6 点）；
  * - **从书库移除**：四处全清（用户要求第 7 点）。
- *   注意 `t_jm_recent_album`（最近浏览）**不删**——"移出书库"不影响"刚看过什么"
- *   （用户要求第 5 点），保留后最近列表里还能看到这本。
+ *
+ * ## 封面什么时候才该清（用户第八轮要求第 3 点）
+ *
+ * 封面缓存的唯一用途是"列表里显示这本的封面"，而**三个页面都会用到它：书库、收藏夹、最近浏览**。
+ * 所以只要这本还会出现在任何一个页面上，封面就不能删：
+ *
+ * | 动作 | 记录变化 | 封面 |
+ * |---|---|---|
+ * | 删除本地文件 | 不变 | **保留**（三个页面都还要显示它） |
+ * | 从书库移除 | 书库/章节/收藏关联/阅读位置 | 最近浏览里**还有**就保留，没有才清 |
+ * | 清空/删除最近浏览 | 最近浏览 | 书库里**还有**就保留，没有才清 |
+ *
+ * 判断方式就是删除后去问一句另一张表还在不在（[JmRepository.findAlbum] / [JmRepository.findRecent]），
+ * 而不是猜"用户大概还会不会看"。
  *
  * 封面缓存是 Coil 的磁盘缓存（按 URL 哈希存文件），所以只能按 key 逐条失效，
  * 不能"删掉某个文件"——这也是它单独抽一个接口的原因。
@@ -53,7 +65,7 @@ class JmAlbumCleaner(
     private val coverCache: CoverCache,
 ) {
 
-    /** 只删本地文件：图片 + 导出成品 + 封面缓存，**保留数据库记录**。 */
+    /** 只删本地文件：图片 + 导出成品，**保留记录与封面**。 */
     suspend fun deleteFiles(albums: List<JmAlbumEntity>): AlbumCleanup = withContext(Dispatchers.IO) {
         var freed = 0L
         var removedExports = 0
@@ -66,15 +78,49 @@ class JmAlbumCleaner(
         AlbumCleanup(freed, removedExports, removedRecords = false)
     }
 
-    /** 从书库移除：**记录 + 文件 + 成品 + 封面**全清。 */
+    /**
+     * 从书库移除：**记录 + 文件 + 成品**全清，封面按"最近浏览里还有没有这本"决定。
+     *
+     * 「最近浏览」本身**不动**（用户第八轮要求第 5 点）：移出书库影响的是书库与本地文件，
+     * "刚看过什么"是另一件事——保留后最近列表里还能看到这本、点进去也能重新加入书库。
+     * 既然它还在最近页上露面，封面就不能删（否则最近页上那块会变成重新联网拉图）。
+     */
     suspend fun removeFromLibrary(albums: List<JmAlbumEntity>): AlbumCleanup {
         val ids = albums.map { it.id }
         cancelActiveTasks(ids)
         val files = deleteFiles(albums)
-        albums.forEach { coverCache.evict(it.id) }
         runCatching { repo.deleteAlbums(ids) }
             .onFailure { Timber.tag("jm").w(it, "删除书库记录失败：%s", ids) }
+        evictCoversIfUnused(ids)
         return files.copy(removedRecords = true)
+    }
+
+    /** 清空最近浏览：记录清掉，**不在书库里的**那些封面也一起失效。 */
+    suspend fun clearRecent(): Int {
+        val ids = repo.recentAlbumIds()
+        val removed = repo.clearRecent()
+        evictCoversIfUnused(ids)
+        return removed
+    }
+
+    /** 删除一条最近浏览记录（同上：书库里没有才清封面）。 */
+    suspend fun removeRecent(albumId: Long) {
+        repo.removeRecent(albumId)
+        evictCoversIfUnused(listOf(albumId))
+    }
+
+    /**
+     * 这些本子如果**书库与最近浏览里都没有了**，封面缓存就没用了，清掉。
+     *
+     * 必须在记录删完之后调用——判断依据正是"两张表里还在不在"。
+     */
+    private suspend fun evictCoversIfUnused(albumIds: List<Long>) {
+        albumIds.forEach { id ->
+            val stillUsed = runCatching {
+                repo.findAlbum(id) != null || repo.findRecent(id) != null
+            }.getOrDefault(true) // 查不动就当还在用，宁可留一份缓存也别误删
+            if (!stillUsed) coverCache.evict(id)
+        }
     }
 
     private suspend fun cancelActiveTasks(albumIds: List<Long>) {

@@ -259,6 +259,7 @@ fun JmModeRoot(
                         state = state,
                         onOpenAlbum = { navController.navigate(JmRoutes.detail(it)) },
                         onClearAll = vm::clearAll,
+                        onRemoveAlbum = vm::remove,
                     )
                 }
 
@@ -318,10 +319,14 @@ fun JmModeRoot(
                         onOpenAlbum = { albumId -> navController.navigate(JmRoutes.detail(albumId)) },
                         // 导出成品的「打开至 / 发送至」（用户要求第 4 点）
                         onOpenOutput = { name ->
-                            launchOutputIntent(context, taskViewModel, name, share = false, snackbar = snackbar, scope = scope)
+                            launchOutputIntent(context, name, share = false, snackbar, scope) {
+                                taskViewModel.outputUri(name)
+                            }
                         },
                         onSendOutput = { name ->
-                            launchOutputIntent(context, taskViewModel, name, share = true, snackbar = snackbar, scope = scope)
+                            launchOutputIntent(context, name, share = true, snackbar, scope) {
+                                taskViewModel.outputUri(name)
+                            }
                         },
                         onDeleteOutput = taskViewModel::deleteOutput,
                     )
@@ -418,6 +423,18 @@ fun JmModeRoot(
                         onConfirmExport = vm::confirmExport,
                         onExportWithoutPassword = vm::exportWithoutPassword,
                         onCancelExport = vm::cancelExport,
+                        // 详情页「导出文件」区块的三个操作（用户第九轮要求第 2 点）
+                        onOpenOutput = { name ->
+                            launchOutputIntent(context, name, share = false, snackbar, scope) {
+                                vm.outputUri(name)
+                            }
+                        },
+                        onSendOutput = { name ->
+                            launchOutputIntent(context, name, share = true, snackbar, scope) {
+                                vm.outputUri(name)
+                            }
+                        },
+                        onDeleteExport = vm::deleteExport,
                         // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）；
                         // 页面内部的 MessageEffect 会先把消息消费掉，所以切页不会重放
                         onMessage = showMessage,
@@ -497,18 +514,19 @@ internal fun tabShift(fromRoute: String?, toRoute: String?): Int {
  * - 打开至 → `ACTION_VIEW`：系统自己弹"用什么打开"（有默认应用就直接开）；
  * - 发送至 → `ACTION_SEND` + 选择器：分享给微信/邮箱等任意 App。
  *
- * Uri 要用 MediaStore 查（成品在系统下载目录，不是应用的私有文件），所以是挂起操作。
+ * Uri 要用 MediaStore 查（成品在系统下载目录，不是应用的私有文件），所以是挂起操作；
+ * 任务页与详情页都要用，所以 Uri 由调用方给（[resolveUri]），这里只负责发 Intent。
  */
 private fun launchOutputIntent(
     context: Context,
-    viewModel: JmTaskViewModel,
     displayName: String,
     share: Boolean,
     snackbar: SnackbarHostState,
     scope: CoroutineScope,
+    resolveUri: suspend () -> android.net.Uri?,
 ) {
     scope.launch {
-        val uri = viewModel.outputUri(displayName)
+        val uri = resolveUri()
         if (uri == null) {
             snackbar.showSnackbar("找不到这个文件，可能已经被删除")
             return@launch
@@ -553,10 +571,15 @@ class JmViewModelFactory(
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T = when {
         modelClass.isAssignableFrom(JmLibraryViewModel::class.java) ->
-            JmLibraryViewModel(container.jmRepository, container.jmReading, container.jmAlbumCleaner) as T
+            JmLibraryViewModel(
+                repo = container.jmRepository,
+                reading = container.jmReading,
+                cleaner = container.jmAlbumCleaner,
+                exports = container.jmExports,
+            ) as T
 
         modelClass.isAssignableFrom(JmRecentViewModel::class.java) ->
-            JmRecentViewModel(container.jmRepository) as T
+            JmRecentViewModel(container.jmRepository, container.jmAlbumCleaner) as T
 
         modelClass.isAssignableFrom(JmOnlineSearchViewModel::class.java) ->
             JmOnlineSearchViewModel(container.jmRepository) as T

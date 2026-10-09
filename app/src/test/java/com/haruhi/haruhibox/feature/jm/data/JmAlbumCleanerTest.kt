@@ -11,9 +11,9 @@ import com.haruhi.haruhibox.core.database.entity.DownloadType
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
-import com.haruhi.haruhibox.core.storage.ExportPublisher
 import com.haruhi.haruhibox.core.storage.LibraryDirs
 import com.haruhi.haruhibox.feature.jm.api.JmApiClient
+import com.haruhi.haruhibox.testing.FakeExportPublisher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -52,7 +52,7 @@ class JmAlbumCleanerTest {
     private lateinit var dirs: LibraryDirs
     private lateinit var repo: JmRepository
     private lateinit var tasks: DownloadTaskRepository
-    private lateinit var publisher: FakePublisher
+    private lateinit var publisher: FakeExportPublisher
     private lateinit var covers: RecordingCoverCache
     private lateinit var cleaner: JmAlbumCleaner
     private lateinit var scope: CoroutineScope
@@ -78,7 +78,7 @@ class JmAlbumCleanerTest {
             positionDao = db.playbackPositionDao(),
         )
         tasks = DownloadTaskRepository(dao = db.downloadTaskDao(), dirs = dirs)
-        publisher = FakePublisher(temp.newFolder("downloads"))
+        publisher = FakeExportPublisher(temp.newFolder("downloads"))
         covers = RecordingCoverCache()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         cleaner = JmAlbumCleaner(
@@ -125,7 +125,7 @@ class JmAlbumCleanerTest {
     }
 
     @Test
-    fun `removing from library wipes records favorites and the cover but keeps recent`() {
+    fun `removing from library wipes records favorites but keeps recent and therefore the cover`() {
         seedAlbum()
         seedChapter()
         publish("$folderName.zip")
@@ -143,15 +143,67 @@ class JmAlbumCleanerTest {
         assertThat(dirs.albumDir(folderName).exists()).isFalse()
         assertThat(File(publisher.dir, "$folderName.zip").exists()).isFalse()
         assertThat(File(publisher.dir, "$folderName.pdf").exists()).isFalse()
-        assertThat(covers.evicted).containsExactly(albumId)
 
         // 书库、章节清单、收藏关联、阅读位置都不能留痕
         assertThat(runBlocking { repo.findAlbum(albumId) }).isNull()
         assertThat(runBlocking { db.jmChapterDao().chapterList(albumId) }).isEmpty()
         assertThat(runBlocking { repo.favoriteIdsOf(albumId) }).isEmpty()
         assertThat(runBlocking { db.playbackPositionDao().find(READING_KIND, albumId.toString()) }).isNull()
-        // 但最近浏览**必须保留**（用户要求第 5 点）：移出书库不影响"刚看过什么"
+        // 但最近浏览**必须保留**（用户第八轮要求第 5 点）：移出书库不影响"刚看过什么"
         assertThat(runBlocking { repo.findRecent(albumId) }).isNotNull()
+        // 既然它还在最近页上露面，封面就不能删（用户第九轮要求第 3 点）
+        assertThat(covers.evicted).isEmpty()
+    }
+
+    @Test
+    fun `removing from library clears the cover when the album is not in recent anymore`() {
+        seedAlbum()
+        seedChapter()
+
+        runBlocking { cleaner.removeFromLibrary(listOf(album())) }
+
+        // 书库与最近浏览里都没有这本了 -> 封面缓存没人用，清掉
+        assertThat(runBlocking { repo.findRecent(albumId) }).isNull()
+        assertThat(covers.evicted).containsExactly(albumId)
+    }
+
+    @Test
+    fun `clearing recent keeps the cover of albums that are still in the library`() {
+        seedAlbum()
+        seedChapter()
+        runBlocking { repo.touchRecent(albumId) }
+
+        val removed = runBlocking { cleaner.clearRecent() }
+
+        assertThat(removed).isEqualTo(1)
+        assertThat(runBlocking { repo.findRecent(albumId) }).isNull()
+        // 书库里还有这本，书库页还要显示它的封面
+        assertThat(runBlocking { repo.findAlbum(albumId) }).isNotNull()
+        assertThat(covers.evicted).isEmpty()
+    }
+
+    @Test
+    fun `clearing recent drops covers that the library no longer needs`() {
+        // 只在最近浏览里、不在书库里：正是"移出书库之后"的那种状态
+        runBlocking { repo.touchRecent(albumId) }
+
+        runBlocking { cleaner.clearRecent() }
+
+        assertThat(runBlocking { repo.findRecent(albumId) }).isNull()
+        assertThat(runBlocking { repo.findAlbum(albumId) }).isNull()
+        assertThat(covers.evicted).containsExactly(albumId)
+    }
+
+    @Test
+    fun `removing one recent entry only drops its cover when the library does not have it`() {
+        seedAlbum()
+        seedChapter()
+        runBlocking { repo.touchRecent(albumId) }
+
+        runBlocking { cleaner.removeRecent(albumId) }
+
+        assertThat(runBlocking { repo.findRecent(albumId) }).isNull()
+        assertThat(covers.evicted).isEmpty()
     }
 
     @Test
@@ -224,7 +276,7 @@ class JmAlbumCleanerTest {
 
     /** 直接在"下载目录"里造一个成品，等价于"之前导出过"。 */
     private fun publish(name: String) {
-        File(publisher.dir, name).writeBytes(ByteArray(16))
+        publisher.seed(name)
     }
 
     private class RecordingCoverCache : CoverCache {
@@ -232,18 +284,5 @@ class JmAlbumCleanerTest {
         override fun evict(albumId: Long) {
             evicted += albumId
         }
-    }
-
-    private class FakePublisher(val dir: File) : ExportPublisher {
-        override fun publish(source: File, displayName: String, mimeType: String): ExportPublisher.Published {
-            source.copyTo(File(dir, displayName), overwrite = true)
-            return ExportPublisher.Published(displayName, "下载/HaruHiBox", null)
-        }
-
-        override fun exists(displayName: String): Boolean = File(dir, displayName).isFile
-
-        override fun uriOf(displayName: String): android.net.Uri? = null
-
-        override fun delete(displayName: String): Boolean = File(dir, displayName).delete()
     }
 }

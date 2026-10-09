@@ -2,6 +2,7 @@ package com.haruhi.haruhibox.core.storage
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -24,7 +25,8 @@ import java.io.File
  *   只要求"首次需要后台任务时"申请通知权限），所以这一档退到应用的外部私有目录
  *   `Android/data/<pkg>/files/Download/`，并把**确切位置**告诉用户。
  *
- * 无论走哪条路，都返回一段可以直接展示的"在哪里"文案。
+ * 除了"写进去"，还要能**读回来**：详情页要展示成品的文件名、大小与生成时间，
+ * 书库要按"有没有 zip/pdf"筛选，所以这里有 [infoOf] 与 [listAll]。
  */
 interface ExportPublisher {
     data class Published(
@@ -36,18 +38,37 @@ interface ExportPublisher {
         val uri: Uri?,
     )
 
+    /**
+     * 一个已经躺在下载目录里的成品。
+     *
+     * 详情页要把它**当成文件来介绍**（多大、什么时候生成的、能不能打开），
+     * 所以除了名字还要大小与时间。
+     */
+    data class ExportFile(
+        val displayName: String,
+        /** 字节数；系统没给这个字段时是 -1。 */
+        val sizeBytes: Long,
+        /** 生成时间（毫秒，取文件的最后修改时间）；拿不到就是 0，界面显示"时间未知"。 */
+        val createdAt: Long,
+        /** 内容 Uri；老系统（API 26～28）没有，返回 null。 */
+        val uri: Uri?,
+    )
+
+    /** 成品放在哪（给用户看的短文案），详情页用它说明"文件在哪儿"。 */
+    val locationLabel: String
+
     fun publish(source: File, displayName: String, mimeType: String): Published
 
-    /**
-     * 这个成品在不在？
-     *
-     * 用途有二：导出前提示"同名文件已存在，再次生成会覆盖"；
-     * 以及删除本地文件 / 从书库移除时把导出成品一并清掉。
-     */
-    fun exists(displayName: String): Boolean
+    /** 查一个成品，不存在返回 null。导出前的"会覆盖"提示、详情页的文件信息都用它。 */
+    fun infoOf(displayName: String): ExportFile?
 
-    /** 成品的内容 Uri（用于"打开至 / 发送至"）。找不到返回 null。 */
-    fun uriOf(displayName: String): Uri?
+    /**
+     * 列出本 App 写进下载目录的**全部**成品。
+     *
+     * 供"按有没有 zip/pdf 筛选书库"使用：一次查询拿全，避免每本漫画各查一次
+     * （一页 60 本的话就是 120 次 MediaStore 查询）。
+     */
+    fun listAll(): List<ExportFile>
 
     /** 删除成品。返回是否真的删掉了。 */
     fun delete(displayName: String): Boolean
@@ -55,6 +76,13 @@ interface ExportPublisher {
 
 /** 真机实现（见接口注释里的版本分支）。 */
 class AndroidExportPublisher(private val context: Context) : ExportPublisher {
+
+    override val locationLabel: String
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            "下载/$SUBFOLDER"
+        } else {
+            "Android/data/${context.packageName}/files/Download"
+        }
 
     override fun publish(source: File, displayName: String, mimeType: String): ExportPublisher.Published =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -75,10 +103,10 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
     ): ExportPublisher.Published {
         val resolver = context.contentResolver
         // **先删同名旧文件**：MediaStore 遇到重名会自动改名成"xxx (1).zip"，
-        // 那会留下两份内容不同的同名成品，而且 `findInMediaStore` 按确切文件名查，
+        // 那会留下两份内容不同的同名成品，而且按确切文件名查只能查到一条，
         // 之后"打开至 / 删除文件"就会指向旧的那一份。
         // 用户已经在密码框里被告知"再次生成会覆盖"，所以这里就是覆盖。
-        findInMediaStore(displayName)?.let { old ->
+        findRows(displayName).firstOrNull()?.uri?.let { old ->
             runCatching { resolver.delete(old, null, null) }
                 .onFailure { Timber.tag("export").w(it, "覆盖旧成品失败：%s", displayName) }
         }
@@ -121,30 +149,28 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
         Timber.tag("export").i("已导出（应用目录）：%s", target.absolutePath)
         return ExportPublisher.Published(
             displayName = displayName,
-            location = "Android/data/${context.packageName}/files/Download",
+            location = locationLabel,
             uri = null,
         )
     }
 
-    override fun exists(displayName: String): Boolean =
+    override fun infoOf(displayName: String): ExportPublisher.ExportFile? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            findInMediaStore(displayName) != null
+            findRows(displayName).firstOrNull()
         } else {
-            File(externalDir(), displayName).isFile
+            fileOf(displayName)
         }
 
-    override fun uriOf(displayName: String): Uri? =
+    override fun listAll(): List<ExportPublisher.ExportFile> =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            findInMediaStore(displayName)
+            findRows(displayName = null)
         } else {
-            // 老系统没有 content Uri；用 FileProvider 才能分享，这里直接给 file:// 之外的空值，
-            // 由界面按"位置说明"提示用户（见 Published.uri 的注释）
-            null
+            externalDir().listFiles().orEmpty().filter { it.isFile }.map { toExportFile(it) }
         }
 
     override fun delete(displayName: String): Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val uri = findInMediaStore(displayName) ?: return false
+            val uri = findRows(displayName).firstOrNull()?.uri ?: return false
             runCatching { context.contentResolver.delete(uri, null, null) > 0 }
                 .onFailure { Timber.tag("export").w(it, "删除导出文件失败：%s", displayName) }
                 .getOrDefault(false)
@@ -152,13 +178,30 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
             File(externalDir(), displayName).delete()
         }
 
-    /** 在下载目录里按文件名找。同名文件只会有一条（导出时先删旧的再写新的）。 */
+    /**
+     * 在下载目录里查成品。
+     *
+     * 同名文件只会有一条（导出时先删旧的再写新的），所以按名字查最多命中一条；
+     * `displayName` 传 null 就是"列出全部"（书库筛选用）。
+     */
     @RequiresApi(Build.VERSION_CODES.Q)
-    private fun findInMediaStore(displayName: String): Uri? = runCatching {
-        val projection = arrayOf(MediaStore.Downloads._ID)
-        val selection = "${MediaStore.Downloads.DISPLAY_NAME} = ? AND " +
-            "${MediaStore.Downloads.RELATIVE_PATH} LIKE ?"
-        val args = arrayOf(displayName, "%$SUBFOLDER%")
+    private fun findRows(displayName: String?): List<ExportPublisher.ExportFile> = runCatching {
+        val projection = arrayOf(
+            MediaStore.Downloads._ID,
+            MediaStore.Downloads.DISPLAY_NAME,
+            MediaStore.Downloads.SIZE,
+            MediaStore.Downloads.DATE_MODIFIED,
+        )
+        val selection = buildString {
+            append("${MediaStore.Downloads.RELATIVE_PATH} LIKE ?")
+            if (displayName != null) append(" AND ${MediaStore.Downloads.DISPLAY_NAME} = ?")
+        }
+        val args = if (displayName == null) {
+            arrayOf("%$SUBFOLDER%")
+        } else {
+            arrayOf("%$SUBFOLDER%", displayName)
+        }
+        val rows = mutableListOf<ExportPublisher.ExportFile>()
         context.contentResolver.query(
             MediaStore.Downloads.EXTERNAL_CONTENT_URI,
             projection,
@@ -166,17 +209,40 @@ class AndroidExportPublisher(private val context: Context) : ExportPublisher {
             args,
             null,
         )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                Uri.withAppendedPath(
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                    cursor.getLong(0).toString(),
-                )
-            } else {
-                null
-            }
+            while (cursor.moveToNext()) rows += cursor.toExportFile()
         }
+        rows
     }.onFailure { Timber.tag("export").w(it, "查询导出文件失败：%s", displayName) }
-        .getOrNull()
+        .getOrDefault(emptyList())
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun Cursor.toExportFile(): ExportPublisher.ExportFile {
+        val id = getLong(getColumnIndexOrThrow(MediaStore.Downloads._ID))
+        return ExportPublisher.ExportFile(
+            displayName = getString(getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME)).orEmpty(),
+            sizeBytes = getLong(getColumnIndexOrThrow(MediaStore.Downloads.SIZE)),
+            // DATE_MODIFIED 是**秒**，界面要毫秒
+            createdAt = getLong(getColumnIndexOrThrow(MediaStore.Downloads.DATE_MODIFIED)) * 1000L,
+            uri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id.toString()),
+        )
+    }
+
+    /** 老系统那条路的单条查询（应用外部私有目录里的普通文件）。 */
+    private fun fileOf(displayName: String): ExportPublisher.ExportFile? {
+        val file = File(externalDir(), displayName)
+        return if (file.isFile) toExportFile(file) else null
+    }
+
+    /**
+     * 老系统没有 content Uri：要分享得靠 FileProvider，本 App 没配，
+     * 所以这里给 null，界面按 [locationLabel] 告诉用户文件在哪。
+     */
+    private fun toExportFile(file: File) = ExportPublisher.ExportFile(
+        displayName = file.name,
+        sizeBytes = file.length(),
+        createdAt = file.lastModified(),
+        uri = null,
+    )
 
     private fun externalDir(): File =
         context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir

@@ -13,6 +13,7 @@ import com.haruhi.haruhibox.core.network.NetworkError
 import com.haruhi.haruhibox.core.network.toUserMessage
 import com.haruhi.haruhibox.core.settings.SecretStore
 import com.haruhi.haruhibox.core.settings.SettingKeys
+import com.haruhi.haruhibox.feature.jm.data.ExportedFormat
 import com.haruhi.haruhibox.feature.jm.data.FavoriteWriteResult
 import com.haruhi.haruhibox.feature.jm.data.JmAlbumCleaner
 import com.haruhi.haruhibox.feature.jm.data.JmDownloadManager
@@ -52,21 +53,59 @@ data class LibraryFilter(
     val favoriteId: Long? = null,
     val tags: List<String> = emptyList(),
     val author: String? = null,
+    /**
+     * 只显示**已经导出过 ZIP / PDF** 的本子（用户第九轮要求第 1 点）。
+     *
+     * 两个条件互相独立：都打开就是"两种都导出过"。
+     * 成品在系统下载目录里、库表里没有记录，所以这一条在拿到磁盘快照之后才生效
+     * （见 [matchesExportFilter]）。
+     */
+    val hasZipOnly: Boolean = false,
+    val hasPdfOnly: Boolean = false,
 ) {
     val isActive: Boolean
-        get() = keyword.isNotBlank() || downloadedOnly != null || collectedOnly != null ||
-            favoriteId != null || tags.isNotEmpty() || author != null
+        get() = hasUserFilter || favoriteId != null
 
-    /** 生效条件数量，UI 用来显示"已筛选 N 项"。 */
-    val activeCount: Int
+    /** 生效条件数量（**含**"在哪个收藏夹"这类页面上下文），界面上的"清除 N 项"用 [userActiveCount]。 */
+    val activeCount: Int get() = userActiveCount + if (favoriteId != null) 1 else 0
+
+    /**
+     * **用户自己加的**条件数量（不含"当前在哪个收藏夹"）。
+     *
+     * 收藏夹内页的 `favoriteId` 是页面上下文，不是用户能清的筛选项：
+     * 拿它算进"清除 N 项"会一直显示"清除 1 项"（用户反馈）。
+     */
+    val userActiveCount: Int
         get() = listOf(
             keyword.isNotBlank(),
             downloadedOnly != null,
             collectedOnly != null,
-            favoriteId != null,
             tags.isNotEmpty(),
             author != null,
+            hasZipOnly,
+            hasPdfOnly,
         ).count { it }
+
+    val hasUserFilter: Boolean get() = userActiveCount > 0
+}
+
+/**
+ * "有 ZIP / 有 PDF"这一条筛选的判定（用户第九轮要求第 1 点）。
+ *
+ * 抽成纯函数是因为它同时用在书库与收藏夹内两处，而且**没查到快照时不能误杀**：
+ * [formats] 为 null 表示"这本还没有查过导出情况"，此时一律放行，
+ * 否则第一次进页面（快照还没回来）会显示成空列表。
+ */
+internal fun matchesExportFilter(
+    formats: Set<JmExportFormat>?,
+    hasZipOnly: Boolean,
+    hasPdfOnly: Boolean,
+): Boolean {
+    if (!hasZipOnly && !hasPdfOnly) return true
+    if (formats == null) return true
+    if (hasZipOnly && JmExportFormat.ZIP !in formats) return false
+    if (hasPdfOnly && JmExportFormat.PDF !in formats) return false
+    return true
 }
 
 data class LibraryUiState(
@@ -114,6 +153,7 @@ class JmLibraryViewModel(
     private val repo: JmRepository,
     private val reading: JmReadingRepository,
     private val cleaner: JmAlbumCleaner,
+    private val exports: JmExportManager,
 ) : ViewModel() {
 
     private val filter = MutableStateFlow(LibraryFilter())
@@ -127,6 +167,14 @@ class JmLibraryViewModel(
         val loadingStat: Boolean = false,
         val continueReading: ContinueReadingCard? = null,
         val favorites: List<JmFavoriteEntity> = emptyList(),
+        /**
+         * 本子 id → 已经导出过哪几种格式（用户第九轮要求第 1 点）。
+         *
+         * 成品在系统下载目录里，数据库里没有记录，所以这是一份**磁盘快照**，
+         * 跟着 [refreshStats] 一起刷新（进页面、切筛选、从任务页回来都会重算）。
+         * 还没查过的本子不在 map 里，此时筛选一律放行（见 [matchesExportFilter]）。
+         */
+        val exportFormats: Map<Long, Set<JmExportFormat>> = emptyMap(),
         /** 批量操作的一次性提示。 */
         val message: String? = null,
     )
@@ -172,6 +220,11 @@ class JmLibraryViewModel(
                 true -> list.filter { it.downloadedChapters > 0 }
                 false -> list.filter { it.downloadedChapters == 0 }
                 null -> list
+            }
+        }.let { list ->
+            // "有 ZIP / 有 PDF"同样要等磁盘快照（用户第九轮要求第 1 点）
+            list.filter { card ->
+                matchesExportFilter(e.exportFormats[card.album.id], f.hasZipOnly, f.hasPdfOnly)
             }
         }
         LibraryUiState(
@@ -243,7 +296,12 @@ class JmLibraryViewModel(
 
     fun clearFilter() = updateFilter { LibraryFilter() }
 
-    /** 拉取每个本子的章节数 / 已下载章节数 / 占用。列表不大（分页 60 条）时够用。 */
+    /**
+     * 拉取每个本子的章节数 / 已下载章节数 / 占用，顺带取一份导出成品快照。
+     *
+     * 列表不大（分页 60 条）时够用；"有 ZIP / 有 PDF"筛选靠的就是这一次查询的结果，
+     * 所以两者一起刷新——分开刷新会出现"筛选了但快照还是旧的"。
+     */
     fun refreshStats() {
         viewModelScope.launch {
             extra.update { it.copy(loadingStat = true) }
@@ -260,8 +318,11 @@ class JmLibraryViewModel(
                 val stats = albums.associate { album ->
                     album.id to buildStat(album)
                 }
+                val exportFormats = exports.presentFormats(albums)
                 // 用 update 而不是整体替换：continueReading 由另一条流维护，不能被统计覆盖掉
-                extra.update { it.copy(summaries = stats, loadingStat = false) }
+                extra.update {
+                    it.copy(summaries = stats, exportFormats = exportFormats, loadingStat = false)
+                }
             }.onFailure { e ->
                 Timber.tag("jm").w(e, "统计章节与占用失败")
                 extra.update { it.copy(loadingStat = false) }
@@ -817,8 +878,14 @@ data class RecentUiState(
  *
  * 只展示、不统计章节：这张表的用途是"快速回到刚看过的本子"，
  * 每次进来都为 60 条记录查一次章节会明显拖慢页面。
+ *
+ * 删除走 [JmAlbumCleaner]：删记录的同时要判断"这本还在不在书库里"，
+ * 不在的话它的封面缓存也就没用了（用户第九轮要求第 3 点）。
  */
-class JmRecentViewModel(private val repo: JmRepository) : ViewModel() {
+class JmRecentViewModel(
+    private val repo: JmRepository,
+    private val cleaner: JmAlbumCleaner,
+) : ViewModel() {
 
     val state: StateFlow<RecentUiState> = repo.observeRecentAlbums()
         .map { rows ->
@@ -845,11 +912,11 @@ class JmRecentViewModel(private val repo: JmRepository) : ViewModel() {
         )
 
     fun remove(albumId: Long) {
-        viewModelScope.launch { runCatching { repo.removeRecent(albumId) } }
+        viewModelScope.launch { runCatching { cleaner.removeRecent(albumId) } }
     }
 
     fun clearAll() {
-        viewModelScope.launch { runCatching { repo.clearRecent() } }
+        viewModelScope.launch { runCatching { cleaner.clearRecent() } }
     }
 }
 
@@ -920,6 +987,13 @@ data class AlbumDetailUiState(
     val exportTargetExists: Boolean = false,
     /** 缺图预检结果；非 null 时展示"缺图"对话框而不是密码框。 */
     val exportPrecheck: JmExportManager.Precheck? = null,
+    /**
+     * 这本漫画**已经导出到系统下载目录**的成品，带大小与生成时间
+     * （用户第九轮要求第 2 点）。空列表 = 还没导出过，此时详情页不显示这个区块。
+     */
+    val exports: List<ExportedFormat> = emptyList(),
+    /** 成品放在哪（"下载/HaruHiBox"），区块标题里说明位置。 */
+    val exportLocation: String = "",
 
     /**
      * 「从书库移除」已经**删干净**了，页面可以退出了。
@@ -1138,6 +1212,10 @@ class JmAlbumDetailViewModel(
             }
             Triple(rows, repo.localSize(album.albumFolderName), repo.favoriteIdsOf(albumId))
         }
+        // 导出成品也要跟着重算：刚导出完回到这个页面，区块里必须马上多一行；
+        // 在任务页删掉文件再回来，那一行也要消失（用户第九轮要求第 2 点）
+        val exportedFiles = runCatching { exports.exportsOf(album) }.getOrDefault(emptyList())
+        val location = exports.outputLocation
         _state.update {
             it.copy(
                 chapters = if (it.reversed) rows.reversed() else rows,
@@ -1145,7 +1223,27 @@ class JmAlbumDetailViewModel(
                 downloadedChapters = rows.count { row -> row.isDownloaded },
                 localSizeBytes = localSize,
                 favoriteIds = favoriteIds,
+                exports = exportedFiles,
+                exportLocation = location,
             )
+        }
+    }
+
+    /**
+     * 成品的「打开至 / 发送至」要拿内容 Uri。
+     *
+     * 与任务页同一个入口：Uri 按文件名去系统下载目录里查，所以界面不用缓存它。
+     */
+    suspend fun outputUri(displayName: String): android.net.Uri? = exports.outputUri(displayName)
+
+    /** 详情页的「删除」：删掉下载目录里的成品文件，漫画本身与图片都不动。 */
+    fun deleteExport(displayName: String) {
+        viewModelScope.launch {
+            val ok = runCatching { exports.deleteOutput(displayName) }.getOrDefault(false)
+            _state.update {
+                it.copy(message = if (ok) "已删除导出文件" else "文件已经不在了")
+            }
+            loadLocalStats()
         }
     }
 

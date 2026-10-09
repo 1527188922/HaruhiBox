@@ -296,6 +296,28 @@ app/src/main/java/com/haruhi/haruhibox/
 > G6/G7 的差别只有"删不删数据库记录"，所以两处都收敛到 `JmAlbumCleaner` 一个编排里；
 > 删除是不可撤销的重活，`deleteFiles` 整段跑在 `Dispatchers.IO`（约定见第五轮 E8/E9）。
 
+### 第八轮反馈修复（2026-10-09，由你直接提交 `d11a992`）
+
+| # | 修复 | 要点 |
+|---|---|---|
+| H1 | **提示语重放**（通用 bug） | `showSnackbar` 是挂起调用，"展示完才消费"会让用户在提示未消失时切页，协程被取消、消息留在 ViewModel 里，切回来就重放。新增 `MessageEffect`：**先消费、再交给根部 scope 展示**；书库/收藏/夹内/任务/阅读器/详情页全部收敛到这一条路径。发现页此前建了 `SnackbarHostState` 却没有宿主，改为走根部 Snackbar |
+| H2 | 批量勾选看不清 | 选中卡片叠加主题色描边 + 封面半透明遮罩 + 右上角实心圆对勾（未选为深色空圈） |
+| H3 | 收藏夹内批量操作 | 夹内不再提供"删除文件/移出书库"，按钮文案改为「修改收藏夹」；面板改为多选勾选 + 就地新建 + 点确认才执行；一个都不勾 = 移出所有收藏夹；夹内打开时预勾当前夹 |
+| H4 | 夹内排序 | 指定收藏夹时改为按 `t_jm_favorite_album.create_time` 倒序（"最近加进这个夹的"在最前），与书库的入库顺序分开 |
+| H5 | 移出书库不再删最近浏览 | `deleteAlbums` 不再清 `t_jm_recent_album`；进阅读器也会刷新浏览时间（此前只有详情页刷） |
+| H6 | 纯数字搜索三处修正 | 历史快照改记**合并后**的结果；置顶条目作者不再显示成 `["作者"]`；搜索零结果时接口给的 `total` 不可信（实测返回 1 且 content 为空），以实际条目数为准 |
+
+### 第九轮反馈修复（2026-10-09）
+
+| # | 反馈 | 落地方式 | 验证 |
+|---|---|---|---|
+| I1 | 书库、收藏夹内要能按"有没有 pdf/zip"筛选 | 筛选栏加 **「有 ZIP」「有 PDF」** 两个独立开关（都选中 = 两种都有），行改成 `FlowRow` 自动换行，窄屏也全部看得见。成品不在数据库里，所以由 `JmExportManager.presentFormats(albums)` **整页只查一次**下载目录，再按 `<本子目录名>.<zip\|pdf>` 在内存里配名；快照没回来前一律放行（`matchesExportFilter`），避免首次进页面闪成空列表 | `LibraryExportFilterTest` 6 个用例 + `JmExportManagerTest` 3 个新用例（含"60 本只查一次"）；模拟器实测：书库选「有 ZIP」→ 只剩导出过的那本、出现「清除 1 项」；夹内选「有 PDF」→ 空态提示 |
+| I2 | 详情页要显示这本的 zip/pdf 信息并能打开/发送/删除 | 封面下方新增**「导出文件」卡片**（在章节列表之前，属于"这本在我设备上有什么"）：每行 = 格式徽标 + 文件名 + `大小 · 生成于 MM-dd HH:mm` + 三个操作（打开至 / 发送至 / 删除，删除需二次确认）。标题右侧写明文件位置「在 下载/HaruHiBox」。数据来自 `ExportPublisher.infoOf`（MediaStore 的 `SIZE`/`DATE_MODIFIED`），进页面与从别处返回都会重算 | `JmExportManagerTest` 的 `exportsOf` 用例；模拟器实测：ZIP「11.8 MB · 生成于 10-08 16:58」、PDF「19.8 MB · 生成于 10-08 16:01」与实际文件逐字节对齐；点「删除」→ 确认后行消失、`Download/HaruHiBox` 里文件也没了；「打开至」在无对应 App 时给出可读提示 |
+| I3 | 封面缓存该不该清（第八轮改成"移出书库保留最近浏览"之后必须一起理顺） | `JmAlbumCleaner` 改按"**这本还会不会出现在任何列表里**"判断，判断方式就是删完之后回查两张表：<br>「删除本地文件」→ 记录不变 → 封面**保留**；<br>「从书库移除」→ 最近浏览里还有 → 封面**保留**，没有才清；<br>「清空/删除最近浏览」→ 书库里还有 → 封面**保留**，没有才清。<br>顺带给最近页加了长按单条「从最近浏览移除」（走同一条路径），确认文案同步写明封面规则 | `JmAlbumCleanerTest` 增至 8 个用例（两条规则各两个方向 + 单条删除）；模拟器实测**用缓存文件数验证**：移出书库后 14 个封面文件不变、再删掉它的最近记录 → 12；清空最近浏览 → 12 降到 8（只掉不在书库的那两本） |
+
+> I1 顺带修掉一处旧问题：「清除 N 项」以前只在书库页显示，夹内因为 `favoriteId` 也算一个条件而永远看不到。
+> 现在只数**用户自己加的**条件（`userActiveCount`），夹内筛选后同样能一键清掉。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |
@@ -518,7 +540,7 @@ OK (11 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：240 个单元测试 + lint + 两种构建
+# 开发机：256 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF/zip 加密 + 长图切片）
@@ -526,7 +548,7 @@ $env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**240 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**256 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（release 5.6 MB）。
 
 ### 测试清单（单元测试）
@@ -543,18 +565,19 @@ debug / release APK 均可构建（release 5.6 MB）。
 | `core.database.DownloadTaskDaoTest` | 12 | 任务去重 / 恢复 / 章节计数幂等 / 历史裁剪 |
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
 | `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
-| `feature.jm.data.JmExportManagerTest` | 11 | **导出编排**：缺图预检 / zip 与 pdf 跑通并交付 / 重复提交复用 / 无图时给出可读失败原因 / **成品是否存在、按名查 Uri、删单个与删两个格式** |
+| `feature.jm.data.JmExportManagerTest` | 15 | **导出编排**：缺图预检 / zip 与 pdf 跑通并交付 / 重复提交复用 / 无图时给出可读失败原因 / **成品是否存在、按名查 Uri、删单个与删两个格式 / `exportsOf` 的大小与生成时间 / `presentFormats` 整页只查一次** |
 | `feature.jm.ui.JmDisplayLogicTest` | 8 | 书库状态文案 / 章节状态 / 体积格式 / 空态与错误文案 |
 | `core.codec.PdfPagePlanTest` | 8 | **PDF 切片**：未超限仍是一页 / 超限切片连续无重叠 / 宽度超限等比缩小 / 切片数上限 |
+| `feature.jm.data.JmAlbumCleanerTest` | 8 | **删除编排**：只删文件保留记录 / 从书库移除清四张表 / **封面按"还在不在书库或最近浏览里"决定**（四种组合）/ 移除前先取消任务 / 只删文件时任务照跑 |
 | `feature.jm.ui.FavoriteSortTest` | 7 | **收藏页排序**：默认夹置顶 / 三种方式都是降序 / 空夹排最后 / 同值按 id 稳定 |
 | `feature.jm.data.JmImageStoreTest` | 7 | **本地优先取图**：命中不发请求 / 取回来就缓存 / 删掉后重新取 / 块数 0 原样保留 |
 | `feature.jm.data.JmReadingRepositoryTest` | 6 | 阅读位置读写与钳位 / "继续阅读"取最近一本 / 章节目录名规则 |
 | `feature.jm.ui.SearchRevealStateTest` | 6 | 搜索增量展示的推进与边界 |
+| `feature.jm.ui.LibraryExportFilterTest` | 6 | **「有 ZIP / 有 PDF」筛选**：单条件 / 两条件要同时满足 / 快照未就绪时放行 / 「清除 N 项」只数用户加的条件 |
 | `core.download.DownloadGateTest` | 5 | 下载网络策略矩阵（仅 Wi-Fi / 允许移动网络） |
 | `core.codec.DescramblerGoldenTest` | 5 | 解扰块布局 + 与参考实现逐像素一致 |
 | `core.codec.ArchiveWriterTest` | 5 | zip 结构（不套本子目录）/ 顺序 / 进度 / 不加密码 / 重新生成覆盖 |
 | `core.codec.PdfWriterSpikeTest` | 4 | PDF 页面 / 书签 / `PageMode` / 不加密 |
-| `feature.jm.data.JmAlbumCleanerTest` | 4 | **删除编排**：只删文件保留记录 / 从书库移除连五张表与封面一起清 / 移除前先取消任务 / 只删文件时任务照跑 |
 | `feature.jm.data.JmSearchMergeTest` | 4 | **精确匹配合并**：置顶 / 同 aid 不重复 / 总数只在真的新增时 +1 / 搜索零结果也有它 |
 | `core.jm.CryptoProbeTest` | 2 | 环境回归：JCE 可用性 |
 | `core.codec.PixelProbeTest` | 2 | 环境回归：位图像素读写行为 |

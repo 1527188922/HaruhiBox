@@ -14,9 +14,9 @@ import com.haruhi.haruhibox.core.database.entity.DownloadType
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
-import com.haruhi.haruhibox.core.storage.ExportPublisher
 import com.haruhi.haruhibox.core.storage.LibraryDirs
 import com.haruhi.haruhibox.feature.jm.api.JmApiClient
+import com.haruhi.haruhibox.testing.FakeExportPublisher
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -59,7 +59,7 @@ class JmExportManagerTest {
     private lateinit var repo: JmRepository
     private lateinit var tasks: DownloadTaskRepository
     private lateinit var manager: JmExportManager
-    private lateinit var publisher: FakePublisher
+    private lateinit var publisher: FakeExportPublisher
     private lateinit var scope: CoroutineScope
 
     private val albumId = 480854L
@@ -82,7 +82,7 @@ class JmExportManagerTest {
             dirs = dirs,
         )
         tasks = DownloadTaskRepository(dao = db.downloadTaskDao(), dirs = dirs)
-        publisher = FakePublisher(temp.newFolder("downloads"))
+        publisher = FakeExportPublisher(temp.newFolder("downloads"))
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         manager = JmExportManager(
             repo = repo,
@@ -285,6 +285,70 @@ class JmExportManagerTest {
     }
 
     // ------------------------------------------------------------------
+    // 成品信息与"按有没有 zip/pdf 筛选"（用户第九轮要求第 1、2 点）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `exportsOf reports size and creation time of every format on disk`() {
+        seedAlbum()
+        seedChapter(1L, "第1话", "00001.webp", onDisk = 1)
+        val generatedAt = 1_700_000_000_000L
+        publisher.seed("$folderName.zip", bytes = 64, modifiedAt = generatedAt)
+
+        val exports = runBlocking { manager.exportsOf(album()) }
+
+        // 只有 zip：pdf 没导出过就不该出现在列表里
+        assertThat(exports.map { it.format }).containsExactly(JmExportFormat.ZIP)
+        assertThat(exports.single().file.displayName).isEqualTo("$folderName.zip")
+        assertThat(exports.single().file.sizeBytes).isEqualTo(64L)
+        assertThat(exports.single().file.createdAt).isEqualTo(generatedAt)
+    }
+
+    @Test
+    fun `exportsOf is empty when nothing was exported yet`() {
+        seedAlbum()
+        seedChapter(1L, "第1话", "00001.webp", onDisk = 1)
+
+        assertThat(runBlocking { manager.exportsOf(album()) }).isEmpty()
+    }
+
+    @Test
+    fun `presentFormats maps each album to the formats sitting in the download folder`() {
+        seedAlbum()
+        seedChapter(1L, "第1话", "00001.webp", onDisk = 1)
+        val other = JmAlbumEntity(id = 572339L, name = "另一本", albumFolderName = "另一本_JM572339")
+        val untouched = JmAlbumEntity(id = 1L, name = "没导出过", albumFolderName = "没导出过_JM1")
+        publisher.seed("$folderName.pdf")
+        publisher.seed("另一本_JM572339.zip")
+        publisher.seed("另一本_JM572339.pdf")
+        // 别的 App 或用户自己放进去的同名文件不该算数（这里以"本子目录名"为准）
+        publisher.seed("不相干的文件.zip")
+
+        val formats = runBlocking { manager.presentFormats(listOf(album(), other, untouched)) }
+
+        assertThat(formats[albumId]).containsExactly(JmExportFormat.PDF)
+        assertThat(formats[572339L]).containsExactly(JmExportFormat.ZIP, JmExportFormat.PDF)
+        // **每一本都要有条目**（空集合），界面才知道"查过了、确实没有"
+        assertThat(formats).containsKey(1L)
+        assertThat(formats[1L]).isEmpty()
+    }
+
+    @Test
+    fun `presentFormats does one listing for the whole page`() {
+        seedAlbum()
+        seedChapter(1L, "第1话", "00001.webp", onDisk = 1)
+        publisher.seed("$folderName.zip")
+        val albums = (1L..60L).map { JmAlbumEntity(id = it, name = "本子 $it", albumFolderName = "本子_$it") }
+
+        val formats = runBlocking { manager.presentFormats(albums) }
+
+        assertThat(formats).hasSize(60)
+        assertThat(formats.values.count { it.isNotEmpty() }).isEqualTo(0)
+        // 60 本只查一次下载目录：逐本查的话一页就是 120 次 MediaStore 查询
+        assertThat(publisher.listAllCalls).isEqualTo(1)
+    }
+
+    // ------------------------------------------------------------------
     // 工具
     // ------------------------------------------------------------------
 
@@ -347,23 +411,5 @@ class JmExportManagerTest {
         Canvas(bitmap).drawColor(Color.rgb(60, 90, 120))
         file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         bitmap.recycle()
-    }
-
-    /** 假的交付器：把成品拷到临时目录并记下名字，避免依赖 MediaStore。 */
-    private class FakePublisher(val dir: File) : ExportPublisher {
-        val publishedNames = mutableListOf<String>()
-
-        override fun publish(source: File, displayName: String, mimeType: String): ExportPublisher.Published {
-            source.copyTo(File(dir, displayName), overwrite = true)
-            publishedNames += displayName
-            return ExportPublisher.Published(displayName, "下载/HaruHiBox", null)
-        }
-
-        override fun exists(displayName: String): Boolean = File(dir, displayName).isFile
-
-        // 真机上这里给的是 content Uri；假实现不需要"打开至"，按注释约定返回 null
-        override fun uriOf(displayName: String): android.net.Uri? = null
-
-        override fun delete(displayName: String): Boolean = File(dir, displayName).delete()
     }
 }

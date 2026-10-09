@@ -10,6 +10,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -265,7 +266,7 @@ fun JmLibraryScreen(
         ConfirmDialog(
             title = "从书库移除这 ${selection.size} 本？",
             text = "会删除书库记录、章节清单、收藏关联、阅读位置，" +
-                "以及本地图片、导出的 zip/pdf 与封面缓存。最近浏览记录会保留。此操作不可撤销。",
+                "以及本地图片与导出的 zip/pdf。最近浏览记录会保留（封面也还在）。此操作不可撤销。",
             confirmText = "移除并删除",
             onConfirm = {
                 confirmRemove = false
@@ -477,10 +478,13 @@ fun JmRecentScreen(
     state: RecentUiState,
     onOpenAlbum: (Long) -> Unit,
     onClearAll: () -> Unit,
+    /** 长按单条"从最近浏览移除"（用户第九轮要求第 3 点：删记录时按书库情况处理封面）。 */
+    onRemoveAlbum: (Long) -> Unit,
     columns: Int = 3,
     modifier: Modifier = Modifier,
 ) {
     var showClearDialog by remember { mutableStateOf(false) }
+    var pendingRemove by remember { mutableStateOf<Long?>(null) }
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(
@@ -517,7 +521,8 @@ fun JmRecentScreen(
                         selecting = false,
                         selected = false,
                         onOpen = { onOpenAlbum(card.album.id) },
-                        onLongPress = {},
+                        // 长按只处理这一条，不进多选
+                        onLongPress = { pendingRemove = card.album.id },
                         // 最近浏览里没有收藏语义，不显示星标
                         onToggleCollected = null,
                     )
@@ -529,10 +534,25 @@ fun JmRecentScreen(
     if (showClearDialog) {
         ConfirmDialog(
             title = "清空最近浏览？",
-            text = "只清空浏览记录，书库、收藏夹与本地文件都不受影响。",
+            text = "只清空浏览记录，书库、收藏夹与本地文件都不受影响；" +
+                "不在书库里的那几本，封面缓存会一起清掉（下次显示重新联网取）。",
             confirmText = "清空",
             onConfirm = { showClearDialog = false; onClearAll() },
             onDismiss = { showClearDialog = false },
+        )
+    }
+
+    pendingRemove?.let { albumId ->
+        ConfirmDialog(
+            title = "从最近浏览移除？",
+            text = "只移除这条浏览记录；书库、收藏夹与本地文件都不受影响。" +
+                "若这本已经不在书库，它的封面缓存也会一起清掉。",
+            confirmText = "移除",
+            onConfirm = {
+                pendingRemove = null
+                onRemoveAlbum(albumId)
+            },
+            onDismiss = { pendingRemove = null },
         )
     }
 }
@@ -562,9 +582,11 @@ private fun LibraryFilterBar(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        Row(
+        // 条件会换行（窄屏上"已下载/未下载/收藏/有 ZIP/有 PDF"一行放不下），
+        // 所以用 FlowRow：全部条件都看得见，不需要横向滚才知道还有筛选
+        FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier.padding(top = 8.dp),
         ) {
             FilterChip(
@@ -597,12 +619,24 @@ private fun LibraryFilterBar(
                     label = { Text("收藏") },
                 )
             }
+            // 按"系统下载目录里有没有这本的成品"筛选（用户第九轮要求第 1 点）。
+            // 两个条件互相独立，都选上就是"两种都导出过"。
+            FilterChip(
+                selected = filter.hasZipOnly,
+                onClick = { onFilterChange { it.copy(hasZipOnly = !it.hasZipOnly) } },
+                label = { Text("有 ZIP") },
+            )
+            FilterChip(
+                selected = filter.hasPdfOnly,
+                onClick = { onFilterChange { it.copy(hasPdfOnly = !it.hasPdfOnly) } },
+                label = { Text("有 PDF") },
+            )
             // 生效条件数量 + 清除（计划 §9.1「筛选生效后显示条件标签或数量，支持清除」）。
-            // **收藏夹内不显示**：进夹时 favoriteId 必然已设置，会一直显示"清除 1 项"，
-            // 而那个条件是页面的上下文、不是用户可以清的筛选（用户反馈）。
-            if (showCollectedChip && filter.isActive) {
+            // 只数**用户自己加的**条件：收藏夹内的 favoriteId 是页面上下文，
+            // 算进去会一直显示"清除 1 项"（用户反馈）。
+            if (filter.hasUserFilter) {
                 TextButton(onClick = onClearFilter) {
-                    Text("清除 ${filter.activeCount} 项")
+                    Text("清除 ${filter.userActiveCount} 项")
                 }
             }
         }
