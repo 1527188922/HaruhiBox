@@ -28,6 +28,16 @@ echo "==> 1/4 准备构建环境"
 sed -i '/org.gradle.java.home/d' gradle.properties
 # gradlew 在仓库里没有可执行位（Windows 提交的）
 chmod +x gradlew
+# 构建容器只有 4GB 内存：Gradle 守护进程 3GB + Kotlin/KSP 编译进程默认还要 2GB，
+# 很容易在打包前被 OOM kill（表现：日志里没有 Gradle 的 FAILURE 段、任务跑一半就断）。
+# 这里把两者的堆都压到容器内存以内（只改本次构建的工作区副本，仓库里的值不动）。
+{
+  echo ''
+  echo '# Gitee 构建容器内存较小，覆盖上面的默认值'
+  echo 'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8'
+  echo 'kotlin.daemon.jvmargs=-Xmx1280m'
+} >> gradle.properties
+grep -E 'jvmargs|java.home' gradle.properties
 # wrapper 默认从 services.gradle.org 拉 Gradle 发行包，国内构建机会一直卡在 "Downloading ..."：
 # 临时把地址换成国内镜像（只改工作区里的文件，仓库里保持官方地址）。
 # 镜像是同一份文件（与官方 Content-Length 一致），所以 distributionSha256Sum 校验不受影响。
