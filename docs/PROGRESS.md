@@ -1,7 +1,8 @@
 # 实施进度台账
 
 > 计划原文：`docs/android-app-plan.md`（= `2026-10-05-android-jm-bilibili-app.md`）
-> 最后更新：2026-10-09
+> 跨功能硬约束：`docs/CONVENTIONS.md`（封面加载规范等）
+> 最后更新：2026-10-10
 
 ## 目录结构决策
 
@@ -349,6 +350,17 @@ app/src/main/java/com/haruhi/haruhibox/
 > L1 的封面处理值得记一笔：Coil 的内存缓存条目**带尺寸**，列表里那份比详情页小的话，
 > 详情页会重新解码（不是重新联网）。除了共享 key，这里还把请求尺寸抬到两者中较大的那个，
 > 所以"网格里看过的封面，点进详情立刻就在"。
+
+### 第十三轮反馈修复（2026-10-10）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| M1 | 发现页搜索结果加载过封面后，点进详情页又为同一张封面发了一次网络请求；要求发现页补上这条链路，并把"任何加载过封面的地方都走同一条链路"写成项目规范 | **根因是两条链路用了两个不同的 ImageLoader**：发现页搜索结果行是裸 `AsyncImage(model = item.coverUrl)`（`OnlineResultRow`），而 Coil 的 `AsyncImage` 不传 `imageLoader` 时取的是**进程单例**（`SingletonImageLoader.get`）——它的内存缓存、磁盘缓存（`cacheDir/coil3_disk_cache`）与应用级 `container.imageLoader`（`files/covers`）完全不共享，单例也没有 JM 的 UA/代理，所以详情页两层缓存都 miss、只能联网（L1 那次"零请求"只对**书库网格 → 详情页**成立，两边都走 `JmCover`）。改法：`OnlineResultRow` 改用 `JmCover(item.id)`，从此书库 / 最近 / 发现 / 详情 / 收藏 / 任务六处封面走的是同一条链路（应用级 ImageLoader + `files/covers` 磁盘缓存 + 统一的 `jm-cover-<aid>` 内存 key）。<br>**缓存机制没有改**：仍然是 Coil 的磁盘缓存（按 key 哈希命名），`covers/jm/<aid>.jpg` 那套目录声明维持原样不使用——按你的要求"跟其余四处保持一致"。<br>规范写进新文档 `docs/CONVENTIONS.md`「封面加载：只允许一个入口 `JmCover`」，并在 `JmCover` 的注释里指向它 | 代码（**按要求没有跑测试**，等你打 debug 包确认）。设备上这样核对：发现页搜索 → 看到封面 → 点进详情，`adb logcat -s http:*` 里不应再出现封面那条请求（只有 `/album` 等接口请求） |
+
+> 顺带发现、**这次没改**（等你发话）：`AppContainer` 里 `coverCache.evict` 清内存缓存用的是
+> `MemoryCache.Key(URL)`，而 `JmCover` 实际用的 key 是 `jm-cover-<aid>`，两者对不上，
+> 也就是"删掉封面后内存里那份没被清掉"（磁盘缓存那份是按 URL 删的，是对的）。
+> 修它不影响其它四处，一行的事；要改随时说。
 
 ## P4 明细（JM 导出 zip / pdf）
 

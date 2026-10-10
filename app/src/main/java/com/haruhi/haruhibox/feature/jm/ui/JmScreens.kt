@@ -862,6 +862,11 @@ private fun AlbumGridCard(
 /**
  * JM 封面。
  *
+ * **任何显示封面的地方都用它**（书库 / 最近 / 发现 / 详情 / 收藏 / 任务），
+ * 不要自己写 `AsyncImage(url)`——那样会落到 Coil 的**进程单例**加载器上，
+ * 缓存与应用级加载器不共享，"列表里刚加载过的封面点进详情页会再联网一次"。
+ * 规范见 `docs/CONVENTIONS.md`。
+ *
  * 用户要求第 8 点（封面本地缓存）由 Coil 的**磁盘缓存**实现：
  * `AppContainer.imageLoader` 把缓存目录指到 `files/covers`，
  * Coil 的默认策略就是"先查磁盘缓存，没有再请求网络"。
@@ -1204,13 +1209,17 @@ private fun OnlineResultRow(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(modifier = Modifier.padding(8.dp)) {
-            AsyncImage(
-                model = item.coverUrl,
+            // 必须跟书库/收藏/详情/任务一样走 JmCover：直接用 AsyncImage(item.coverUrl)
+            // 会落到 Coil 的**进程单例**加载器上（AsyncImage 不传 imageLoader 时的默认值），
+            // 它的内存/磁盘缓存与应用级加载器完全不共享，所以这里刚加载过的封面，
+            // 点进详情页会再联网请求一次。
+            JmCover(
+                albumId = item.id,
                 contentDescription = item.name,
-                contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .size(width = 72.dp, height = 100.dp)
-                    .clip(RoundedCornerShape(8.dp)),
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
             )
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
