@@ -11,7 +11,7 @@ import com.haruhi.haruhibox.core.database.entity.DownloadStatus
 import com.haruhi.haruhibox.core.database.entity.DownloadTaskChapterEntity
 import com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity
 import com.haruhi.haruhibox.core.database.entity.DownloadType
-import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import com.haruhi.haruhibox.core.database.entity.JmAlbumBaseEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
@@ -41,7 +41,7 @@ import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
  */
 @Database(
     entities = [
-        JmAlbumEntity::class,
+        JmAlbumBaseEntity::class,
         JmChapterImageEntity::class,
         JmFavoriteEntity::class,
         JmFavoriteAlbumEntity::class,

@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
 import com.haruhi.haruhibox.core.database.entity.DownloadStatus
+import com.haruhi.haruhibox.core.database.entity.JmAlbumBaseEntity
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmLibraryEntity
@@ -469,7 +470,9 @@ class JmDownloadManagerTest {
     /** 基础数据 + 书库成员各写一行：下载执行器要求本子在书库里（`repo.findAlbum` 走成员表）。 */
     private fun seedAlbum() {
         runBlocking {
-            db.jmAlbumDao().insertIgnore(album())
+            db.jmAlbumDao().insertIgnore(
+                JmAlbumBaseEntity(id = albumId, name = "测试本子", albumFolderName = folderName),
+            )
             db.jmAlbumDao().insertLibraryRow(
                 JmLibraryEntity(
                     albumId = albumId,

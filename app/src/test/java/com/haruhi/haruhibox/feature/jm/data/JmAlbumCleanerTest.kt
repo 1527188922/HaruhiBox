@@ -8,6 +8,7 @@ import com.haruhi.haruhibox.core.codec.PdfWriter
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
 import com.haruhi.haruhibox.core.database.entity.DownloadStatus
 import com.haruhi.haruhibox.core.database.entity.DownloadType
+import com.haruhi.haruhibox.core.database.entity.JmAlbumBaseEntity
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmLibraryEntity
@@ -271,7 +272,9 @@ class JmAlbumCleanerTest {
     /** 基础数据 + 书库成员各写一行：模拟"已入库"的完整形态。 */
     private fun seedAlbum() {
         runBlocking {
-            db.jmAlbumDao().insertIgnore(album())
+            db.jmAlbumDao().insertIgnore(
+                JmAlbumBaseEntity(id = albumId, name = "测试本子", albumFolderName = folderName),
+            )
             db.jmAlbumDao().insertLibraryRow(
                 JmLibraryEntity(
                     albumId = albumId,

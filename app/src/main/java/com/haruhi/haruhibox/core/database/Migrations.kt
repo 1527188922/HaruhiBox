@@ -74,14 +74,16 @@ object Migrations {
      *
      * 背景（用户要求）：拉取 `/album` 不等于加入最近预览，所以详情缓存要有一个
      * **任何操作都不会删除**的归宿。改造后：
-     * - `t_jm_album` 变成**漫画基础数据表**（永久缓存，只留界面用到的列）；
-     * - 新增 `t_jm_library`：书库成员表，只存 `album_id` + 首次入库时间，
-     *   书库默认排序改用它（"移出书库"只删这里的行）；
+     * - `t_jm_album` 变成**漫画基础数据表**（永久缓存，原内容字段全部保留，只把
+     *   书库语义的 `collected` 移走）；
+     * - 新增 `t_jm_library`：书库成员表，存 `album_id` + 本地收藏标记 `collected`
+     *   + 首次入库时间（书库默认排序用它；"移出书库"只删这里的行）；
      * - `t_jm_recent_album` 瘦身成 `id + viewed_time`，渲染时与基础表拼接。
      *
      * 迁移步骤：
-     * 1. 建成员表，把现有书库行（原 `t_jm_album` 全是已入库本子）灌进去；
-     * 2. 重建基础表（去掉无用列）；
+     * 1. 建成员表，把现有书库行（原 `t_jm_album` 全是已入库本子）的
+     *    `collected` 与入库时间灌进去；
+     * 2. 重建基础表（去掉 `collected` 列，其余字段原样保留）；
      * 3. 把**只存在于最近表里的在线数据**（看过但没入库的本子）并入基础表——
      *    只有真正拿到过在线数据的行（`name` 非空）才并，骨架行不并；
      * 4. 重建最近表为瘦身版，浏览时间原样保留。
@@ -91,11 +93,12 @@ object Migrations {
      */
     private val MIGRATION_2_3 = object : Migration(2, 3) {
         override fun migrate(db: SupportSQLiteDatabase) {
-            // 1) 书库成员表 + 从现有书库行灌入
+            // 1) 书库成员表（含收藏标记与入库时间）+ 从现有书库行灌入
             db.execSQL(
                 """
                 CREATE TABLE IF NOT EXISTS `t_jm_library` (
                     `album_id` INTEGER NOT NULL,
+                    `collected` INTEGER,
                     `create_time` TEXT,
                     PRIMARY KEY(`album_id`)
                 )
@@ -103,23 +106,42 @@ object Migrations {
             )
             db.execSQL(
                 """
-                INSERT OR REPLACE INTO `t_jm_library` (`album_id`, `create_time`)
-                SELECT `id`, `create_time` FROM `t_jm_album`
+                INSERT OR REPLACE INTO `t_jm_library` (`album_id`, `collected`, `create_time`)
+                SELECT `id`, `collected`, `create_time` FROM `t_jm_album`
                 """.trimIndent(),
             )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_t_jm_library_collected` ON `t_jm_library` (`collected`)",
+            )
 
-            // 2) 重建基础表（去掉无用列）
+            // 2) 重建基础表：去掉 collected，其余内容字段全部保留
             db.execSQL(
                 """
                 CREATE TABLE IF NOT EXISTS `t_jm_album_v3` (
                     `id` INTEGER NOT NULL,
                     `name` TEXT,
                     `album_folder_name` TEXT,
+                    `images` TEXT,
+                    `add_time` TEXT,
                     `description` TEXT,
+                    `total_views` TEXT,
+                    `likes` TEXT,
                     `series` TEXT,
+                    `series_id` TEXT,
+                    `comment_total` TEXT,
                     `author` TEXT,
                     `tags` TEXT,
-                    `collected` INTEGER,
+                    `works` TEXT,
+                    `actors` TEXT,
+                    `related_list` TEXT,
+                    `liked` INTEGER,
+                    `is_favorite` INTEGER,
+                    `is_aids` INTEGER,
+                    `price` TEXT,
+                    `purchased` TEXT,
+                    `raw` TEXT,
+                    `create_time` TEXT,
+                    `modify_time` TEXT,
                     PRIMARY KEY(`id`)
                 )
                 """.trimIndent(),
@@ -127,8 +149,14 @@ object Migrations {
             db.execSQL(
                 """
                 INSERT OR REPLACE INTO `t_jm_album_v3`
-                    (`id`, `name`, `album_folder_name`, `description`, `series`, `author`, `tags`, `collected`)
-                SELECT `id`, `name`, `album_folder_name`, `description`, `series`, `author`, `tags`, `collected`
+                    (`id`, `name`, `album_folder_name`, `images`, `add_time`, `description`,
+                     `total_views`, `likes`, `series`, `series_id`, `comment_total`, `author`,
+                     `tags`, `works`, `actors`, `related_list`, `liked`, `is_favorite`,
+                     `is_aids`, `price`, `purchased`, `raw`, `create_time`, `modify_time`)
+                SELECT `id`, `name`, `album_folder_name`, `images`, `add_time`, `description`,
+                       `total_views`, `likes`, `series`, `series_id`, `comment_total`, `author`,
+                       `tags`, `works`, `actors`, `related_list`, `liked`, `is_favorite`,
+                       `is_aids`, `price`, `purchased`, `raw`, `create_time`, `modify_time`
                 FROM `t_jm_album`
                 """.trimIndent(),
             )
@@ -136,15 +164,20 @@ object Migrations {
             db.execSQL(
                 """
                 INSERT OR IGNORE INTO `t_jm_album_v3`
-                    (`id`, `name`, `album_folder_name`, `description`, `series`, `author`, `tags`, `collected`)
-                SELECT `id`, `name`, `album_folder_name`, `description`, `series`, `author`, `tags`, NULL
+                    (`id`, `name`, `album_folder_name`, `images`, `add_time`, `description`,
+                     `total_views`, `likes`, `series`, `series_id`, `comment_total`, `author`,
+                     `tags`, `works`, `actors`, `related_list`, `liked`, `is_favorite`,
+                     `is_aids`, `price`, `purchased`, `raw`, `create_time`, `modify_time`)
+                SELECT `id`, `name`, `album_folder_name`, `images`, `add_time`, `description`,
+                       `total_views`, `likes`, `series`, `series_id`, `comment_total`, `author`,
+                       `tags`, `works`, `actors`, `related_list`, `liked`, `is_favorite`,
+                       `is_aids`, `price`, `purchased`, `raw`, `create_time`, `modify_time`
                 FROM `t_jm_recent_album`
                 WHERE `name` IS NOT NULL AND `name` <> ''
                 """.trimIndent(),
             )
             db.execSQL("DROP TABLE `t_jm_album`")
             db.execSQL("ALTER TABLE `t_jm_album_v3` RENAME TO `t_jm_album`")
-            db.execSQL("CREATE INDEX IF NOT EXISTS `index_t_jm_album_collected` ON `t_jm_album` (`collected`)")
             db.execSQL("CREATE INDEX IF NOT EXISTS `index_t_jm_album_name` ON `t_jm_album` (`name`)")
 
             // 4) 最近表瘦身：只留 id + viewed_time

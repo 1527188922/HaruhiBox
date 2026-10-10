@@ -4,7 +4,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
-import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import com.haruhi.haruhibox.core.database.entity.JmAlbumBaseEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.storage.LibraryDirs
@@ -84,10 +84,16 @@ class JmRepositoryTest {
         assertThat(album.name).isEqualTo("测试本子")
         // `<清洗后的标题>_JM<aid>`
         assertThat(album.albumFolderName).isEqualTo("测试本子_JM480854")
+        assertThat(album.seriesId).isEqualTo("12345")
         assertThat(album.description).isEqualTo("简介内容")
+        assertThat(album.totalViews).isEqualTo("12345")
+        assertThat(album.commentTotal).isEqualTo("7")
         // 列表字段存 JSON 数组字符串；解析回来顺序不变
         assertThat(parse(album.tags)).containsExactly("标签一", "标签二").inOrder()
         assertThat(parse(album.author)).containsExactly("作者A")
+        assertThat(parse(album.actors)).containsExactly("演员1")
+        assertThat(album.createTime).isNotNull()
+        assertThat(album.modifyTime).isNotNull()
         // 入库同时写入书库成员，排序用的入库时间落在成员表里
         assertThat(repo.findAlbum(480854L)).isNotNull()
     }
@@ -470,7 +476,7 @@ class JmRepositoryTest {
     fun `adding to library from a search result does not hit the network when local data exists`() = runTest {
         // 精确匹配那一条：搜索时已经请求过 /album 并写进**基础数据表**（模拟：直接写 dao）
         db.jmAlbumDao().insertIgnore(
-            JmAlbumEntity(
+            JmAlbumBaseEntity(
                 id = 480854L,
                 name = "测试本子",
                 albumFolderName = "测试本子_JM480854",

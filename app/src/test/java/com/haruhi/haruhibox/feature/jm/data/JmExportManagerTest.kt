@@ -400,7 +400,15 @@ class JmExportManagerTest {
     private fun album() = JmAlbumEntity(id = albumId, name = "测试本子", albumFolderName = folderName)
 
     private fun seedAlbum() {
-        runBlocking { db.jmAlbumDao().insertIgnore(album()) }
+        runBlocking {
+            db.jmAlbumDao().insertIgnore(
+                com.haruhi.haruhibox.core.database.entity.JmAlbumBaseEntity(
+                    id = albumId,
+                    name = "测试本子",
+                    albumFolderName = folderName,
+                ),
+            )
+        }
     }
 
     /** 章节清单入库，并在磁盘上真的放 [onDisk] 张图。 */

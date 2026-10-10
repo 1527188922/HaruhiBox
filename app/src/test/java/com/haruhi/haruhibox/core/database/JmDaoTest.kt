@@ -3,7 +3,7 @@ package com.haruhi.haruhibox.core.database
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
-import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import com.haruhi.haruhibox.core.database.entity.JmAlbumBaseEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
@@ -58,16 +58,17 @@ class JmDaoTest {
         description: String? = null,
     ) {
         db.jmAlbumDao().insertIgnore(
-            JmAlbumEntity(
+            JmAlbumBaseEntity(
                 id = id,
                 name = name,
-                collected = collected,
                 author = author,
                 tags = tags,
                 description = description,
             ),
         )
-        db.jmAlbumDao().insertLibraryRow(JmLibraryEntity(albumId = id, createTime = createTime))
+        db.jmAlbumDao().insertLibraryRow(
+            JmLibraryEntity(albumId = id, collected = collected, createTime = createTime),
+        )
     }
 
     /**
@@ -99,8 +100,8 @@ class JmDaoTest {
         seedLibraryAlbum(id = 1, name = "旧的", createTime = "2026-01-01")
         seedLibraryAlbum(id = 2, name = "新的", createTime = "2026-01-02")
 
-        // 刷新旧的那本：基础数据整行替换（保留 collected），入库时间在成员表里不受影响
-        dao.replaceAlbum(JmAlbumEntity(id = 1, name = "旧的（刷新后）"))
+        // 刷新旧的那本：基础数据整行替换（create_time 保留），入库时间在成员表里不受影响
+        dao.replaceAlbum(JmAlbumBaseEntity(id = 1, name = "旧的（刷新后）"))
 
         val page = dao.observeLibrary(null, null, null, "", null, limit = 10, offset = 0).first()
         assertThat(page.map { it.id }).containsExactly(2L, 1L).inOrder()
@@ -153,26 +154,25 @@ class JmDaoTest {
     @Test
     fun `inserting the same album id twice keeps the first row`() = runTest {
         val dao = db.jmAlbumDao()
-        dao.insertIgnore(JmAlbumEntity(id = 1, name = "原始", collected = true))
-        // IGNORE 策略：重新拉取在线数据不能把本地收藏标记重置成默认值
-        dao.insertIgnore(JmAlbumEntity(id = 1, name = "覆盖", collected = false))
+        dao.insertIgnore(JmAlbumBaseEntity(id = 1, name = "原始"))
+        // IGNORE 策略：基础数据已存在时不覆盖（刷新走事务整行替换，不经过这里）
+        dao.insertIgnore(JmAlbumBaseEntity(id = 1, name = "覆盖"))
 
-        val album = dao.findById(1)!!
-        assertThat(album.name).isEqualTo("原始")
-        assertThat(album.collected).isTrue()
+        assertThat(dao.findById(1)!!.name).isEqualTo("原始")
     }
 
+    /** `collected` 在成员表里：只改它一个字段，基础数据不受影响。 */
     @Test
-    fun `setCollected only touches the collected column`() = runTest {
+    fun `setCollected only touches the library row`() = runTest {
         val dao = db.jmAlbumDao()
-        dao.insertIgnore(JmAlbumEntity(id = 1, name = "标题", description = "简介", collected = false))
+        seedLibraryAlbum(id = 1, name = "标题", description = "简介", collected = false)
 
         dao.setCollected(1, true)
 
-        val album = dao.findById(1)!!
-        assertThat(album.collected).isTrue()
-        assertThat(album.name).isEqualTo("标题")
-        assertThat(album.description).isEqualTo("简介")
+        assertThat(dao.findLibraryAlbum(1)!!.collected).isTrue()
+        // 基础数据原样不动
+        assertThat(dao.findById(1)!!.name).isEqualTo("标题")
+        assertThat(dao.findById(1)!!.description).isEqualTo("简介")
     }
 
     /**

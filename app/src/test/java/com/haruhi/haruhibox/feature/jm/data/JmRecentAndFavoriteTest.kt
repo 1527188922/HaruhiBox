@@ -4,7 +4,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
-import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import com.haruhi.haruhibox.core.database.entity.JmAlbumBaseEntity
 import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.storage.LibraryDirs
 import com.haruhi.haruhibox.feature.jm.api.JmAlbumDto
@@ -349,7 +349,7 @@ class JmRecentAndFavoriteTest {
     // ------------------------------------------------------------------
 
     /** 基础数据表里的一行（模拟"已经缓存到在线详情"的状态）。 */
-    private fun albumEntity(id: Long, name: String) = JmAlbumEntity(id = id, name = name)
+    private fun albumEntity(id: Long, name: String) = JmAlbumBaseEntity(id = id, name = name)
 
     private fun albumFixture(id: Long, name: String) = JmAlbumDto(
         id = id,

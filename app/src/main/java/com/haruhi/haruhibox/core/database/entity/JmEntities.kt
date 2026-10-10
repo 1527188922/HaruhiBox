@@ -8,55 +8,109 @@ import androidx.room.PrimaryKey
 /**
  * `t_jm_album`：**漫画基础数据表**（永久缓存）。
  *
- * 在线 `/album` 拿到的详情都落在这里。它**不表达**"在不在书库"，
- * 也**不表达**"看没看过"：
- * - 书库成员关系在 [JmLibraryEntity]（`t_jm_library`），只存 `album_id` 与入库时间；
+ * 在线 `/album` 拿到的详情都落在这里，**原有内容字段全部保留**（对齐参考实现
+ * `JmAlbumSqlite` 的字段集）。它**不表达**"在不在书库"，也**不表达**"看没看过"：
+ * - 书库成员关系、本地收藏标记 `collected`、首次入库时间在 [JmLibraryEntity]（`t_jm_library`）；
  * - 最近预览在 [JmRecentAlbumEntity]（`t_jm_recent_album`），只存 `id` 与浏览时间。
  *
  * 两张关联表都通过 `id` 引用本表，列表/详情渲染时与本表拼接。所以
  * **清空最近浏览、移出书库都不会删除这里的任何数据**——这样"请求漫画详情接口"
  * 与"加入最近预览"才能真正解耦，同时保留下载页、阅读器、精确匹配搜索
  * 依赖的本地详情缓存。
- *
- * 字段只保留界面/逻辑真正使用到的列（其余对齐参考实现但本工程没用到的一律去掉）。
  */
 @Entity(
     tableName = "t_jm_album",
     indices = [
-        Index(value = ["collected"]),
         Index(value = ["name"]),
     ],
 )
-data class JmAlbumEntity(
+data class JmAlbumBaseEntity(
     @PrimaryKey @ColumnInfo(name = "id") val id: Long,
     @ColumnInfo(name = "name") val name: String? = null,
     @ColumnInfo(name = "album_folder_name") val albumFolderName: String? = null,
+    @ColumnInfo(name = "images") val images: String? = null,
+    @ColumnInfo(name = "add_time") val addTime: String? = null,
     @ColumnInfo(name = "description") val description: String? = null,
-    /** 章节列表的权威来源（JSON 字符串，见 `JmRepository.chaptersOf`）。 */
+    @ColumnInfo(name = "total_views") val totalViews: String? = null,
+    @ColumnInfo(name = "likes") val likes: String? = null,
     @ColumnInfo(name = "series") val series: String? = null,
+    @ColumnInfo(name = "series_id") val seriesId: String? = null,
+    @ColumnInfo(name = "comment_total") val commentTotal: String? = null,
     @ColumnInfo(name = "author") val author: String? = null,
     @ColumnInfo(name = "tags") val tags: String? = null,
-    /**
-     * 本地收藏标记（重新拉取 JM 数据不覆盖）。
-     *
-     * **注意**：不要给这个字段设默认值，否则更新已有记录时会把收藏状态重置。
-     * 它属于"书库语义"：移出书库时会被清零（与旧行为一致——旧实现直接删行）。
-     */
-    @ColumnInfo(name = "collected") val collected: Boolean? = null,
+    @ColumnInfo(name = "works") val works: String? = null,
+    @ColumnInfo(name = "actors") val actors: String? = null,
+    @ColumnInfo(name = "related_list") val relatedList: String? = null,
+    @ColumnInfo(name = "liked") val liked: Boolean? = null,
+    @ColumnInfo(name = "is_favorite") val isFavorite: Boolean? = null,
+    @ColumnInfo(name = "is_aids") val isAids: Boolean? = null,
+    @ColumnInfo(name = "price") val price: String? = null,
+    @ColumnInfo(name = "purchased") val purchased: String? = null,
+    @ColumnInfo(name = "raw") val raw: String? = null,
+    @ColumnInfo(name = "create_time") val createTime: String? = null,
+    @ColumnInfo(name = "modify_time") val modifyTime: String? = null,
 )
 
 /**
- * `t_jm_library`：**书库成员表**。只存"这本在书库里"与首次入库时间。
+ * 漫画读取模型（**不是数据库实体**）：基础数据 + 书库语义的 `collected`。
  *
- * 为什么不把成员关系放在基础表上：基础表是永久缓存，而"移出书库"要能把这本
- * 从书库列表里去掉——成员关系必须可删、且删掉后基础数据仍在。
- * 书库列表渲染时与 [JmAlbumEntity] 按 `album_id` 拼接。
+ * 书库列表 / 最近列表 / 详情页读取时由查询拼出来：内容列来自 `t_jm_album`，
+ * `collected` 来自 `t_jm_library`（未入库时为空）。保留"字段最全"的一个模型，
+ * 是为了详情页、下载、导出继续共用同一套渲染与目录逻辑。
+ *
+ * `@ColumnInfo` 仍然有效：Room 用它把查询结果里的 snake_case 列映射到字段。
+ */
+data class JmAlbumEntity(
+    @ColumnInfo(name = "id") val id: Long,
+    @ColumnInfo(name = "name") val name: String? = null,
+    @ColumnInfo(name = "album_folder_name") val albumFolderName: String? = null,
+    @ColumnInfo(name = "images") val images: String? = null,
+    @ColumnInfo(name = "add_time") val addTime: String? = null,
+    @ColumnInfo(name = "description") val description: String? = null,
+    @ColumnInfo(name = "total_views") val totalViews: String? = null,
+    @ColumnInfo(name = "likes") val likes: String? = null,
+    @ColumnInfo(name = "series") val series: String? = null,
+    @ColumnInfo(name = "series_id") val seriesId: String? = null,
+    @ColumnInfo(name = "comment_total") val commentTotal: String? = null,
+    @ColumnInfo(name = "author") val author: String? = null,
+    @ColumnInfo(name = "tags") val tags: String? = null,
+    @ColumnInfo(name = "works") val works: String? = null,
+    @ColumnInfo(name = "actors") val actors: String? = null,
+    @ColumnInfo(name = "related_list") val relatedList: String? = null,
+    @ColumnInfo(name = "liked") val liked: Boolean? = null,
+    @ColumnInfo(name = "is_favorite") val isFavorite: Boolean? = null,
+    /** 本地收藏标记：只存在 `t_jm_library.collected`，未入库/未收藏时为空。 */
+    @ColumnInfo(name = "collected") val collected: Boolean? = null,
+    @ColumnInfo(name = "is_aids") val isAids: Boolean? = null,
+    @ColumnInfo(name = "price") val price: String? = null,
+    @ColumnInfo(name = "purchased") val purchased: String? = null,
+    @ColumnInfo(name = "raw") val raw: String? = null,
+    @ColumnInfo(name = "create_time") val createTime: String? = null,
+    @ColumnInfo(name = "modify_time") val modifyTime: String? = null,
+)
+
+/**
+ * `t_jm_library`：**书库成员表**。存"这本在书库里"、本地收藏标记与首次入库时间。
+ *
+ * 为什么不放在基础表上：基础表是永久缓存，而"移出书库"要能把这本
+ * 从书库列表里去掉——成员关系（连同收藏标记）必须可删、且删掉后基础数据仍在。
+ * 书库列表渲染时与 [JmAlbumBaseEntity] 按 `album_id` 拼接。
  *
  * `create_time` 是**第一次入库时间**，书库默认排序用它（刷新详情不改变它）。
  */
-@Entity(tableName = "t_jm_library")
+@Entity(
+    tableName = "t_jm_library",
+    indices = [Index(value = ["collected"])],
+)
 data class JmLibraryEntity(
     @PrimaryKey @ColumnInfo(name = "album_id") val albumId: Long,
+    /**
+     * 本地收藏标记（原 `t_jm_album.collected`）。
+     *
+     * 收集/取消收藏只改这里（`/album` 响应里没有这个字段，刷新详情不受影响）；
+     * 移出书库时整行删除，标记自然消失（与旧行为一致）。
+     */
+    @ColumnInfo(name = "collected") val collected: Boolean? = null,
     @ColumnInfo(name = "create_time") val createTime: String? = null,
 )
 

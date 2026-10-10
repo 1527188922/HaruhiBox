@@ -6,6 +6,7 @@ import com.haruhi.haruhibox.core.database.JmFavoriteDao
 import com.haruhi.haruhibox.core.database.JmRecentAlbumDao
 import com.haruhi.haruhibox.core.database.JmSearchHistoryDao
 import com.haruhi.haruhibox.core.database.PlaybackPositionDao
+import com.haruhi.haruhibox.core.database.entity.JmAlbumBaseEntity
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
@@ -269,14 +270,17 @@ class JmRepository(
     }
 
     /**
-     * 把在线详情写进**基础数据表**（永久缓存），**保留本地收藏标记**。
+     * 把在线详情写进**基础数据表**（永久缓存）。
      *
      * 这是所有 `/album` 拉取路径（详情页加载/刷新、精确匹配搜索、加入书库）的公共落点：
      * **每次请求成功都会整行刷新基础表**（事务内先删后插，见 `JmAlbumDao.replaceAlbum`），
+     * `create_time` 保留首次缓存时间、`modify_time` 更新为当前；
      * 同时不写最近预览、不写书库成员——那两件事分别由 [touchRecent] 与 [addToLibrary] 负责。
+     * 本地收藏标记 `collected` 在成员表里，刷新基础数据不会碰到它。
      */
     private suspend fun cacheAlbum(dto: JmAlbumDto) {
-        albumDao.replaceAlbum(toAlbumEntity(dto))
+        val now = nowText()
+        albumDao.replaceAlbum(toAlbumEntity(dto).copy(createTime = now, modifyTime = now))
     }
 
     /** 最近预览列表：按浏览时间倒序，内容与基础数据表拼接（见 DAO 里的 LEFT JOIN）。 */
@@ -309,7 +313,7 @@ class JmRepository(
      */
     suspend fun localAlbumDetail(aid: Long): LocalAlbumDetail? {
         albumDao.findLibraryAlbum(aid)?.let { return LocalAlbumDetail(it, fromLibrary = true) }
-        albumDao.findById(aid)?.let { return LocalAlbumDetail(it, fromLibrary = false) }
+        albumDao.findById(aid)?.let { return LocalAlbumDetail(it.toReadModel(), fromLibrary = false) }
         return null
     }
 
@@ -349,7 +353,8 @@ class JmRepository(
      * 收藏标记由调用方随后设置。
      */
     suspend fun addToLibrary(album: JmAlbumEntity): JmAlbumEntity {
-        albumDao.replaceAlbum(album)
+        val now = nowText()
+        albumDao.replaceAlbum(album.toBaseEntity().copy(createTime = now, modifyTime = now))
         addLibraryRow(album.id)
         return albumDao.findLibraryAlbum(album.id) ?: album
     }
@@ -383,21 +388,97 @@ class JmRepository(
         return albumDao.findLibraryAlbum(dto.id) ?: error("本子入库失败：${dto.id}")
     }
 
-    /** 接口 DTO → 基础数据实体（只映射界面/逻辑用到的字段）。 */
-    private fun toAlbumEntity(dto: JmAlbumDto) = JmAlbumEntity(
+    /** 接口 DTO → 基础数据实体（字段与原书库表一一对应，`collected` 除外）。 */
+    private fun toAlbumEntity(dto: JmAlbumDto) = JmAlbumBaseEntity(
         id = dto.id,
         name = dto.name,
         albumFolderName = FileNaming.albumFolderName(dto.name, dto.id.toString(), albumNameMaxBytes()),
+        images = encodeStringList(dto.images),
+        addTime = dto.addTime,
         description = dto.description,
+        totalViews = dto.totalViews,
+        likes = dto.likes,
         // series 原样存 JSON 字符串：详情页的章节列表以它为准（见类注释第 2 条）
         series = dto.series?.let { JmJson.encodeToString(ListSerializer(JmSeriesDto.serializer()), it) },
+        seriesId = dto.seriesId,
+        commentTotal = dto.commentTotal,
         author = encodeStringList(dto.author),
         tags = encodeStringList(dto.tags),
+        works = encodeStringList(dto.works),
+        actors = encodeStringList(dto.actors),
+        relatedList = dto.relatedList?.let {
+            JmJson.encodeToString(
+                ListSerializer(com.haruhi.haruhibox.feature.jm.api.JmRelatedDto.serializer()),
+                it,
+            )
+        },
+        liked = dto.liked,
+        isFavorite = dto.isFavorite,
+        isAids = dto.isAids,
+        price = dto.price,
+        purchased = dto.purchased,
+    )
+
+    /** 读取模型 → 基础数据实体（写入时丢掉书库语义的 `collected`）。 */
+    private fun JmAlbumEntity.toBaseEntity() = JmAlbumBaseEntity(
+        id = id,
+        name = name,
+        albumFolderName = albumFolderName,
+        images = images,
+        addTime = addTime,
+        description = description,
+        totalViews = totalViews,
+        likes = likes,
+        series = series,
+        seriesId = seriesId,
+        commentTotal = commentTotal,
+        author = author,
+        tags = tags,
+        works = works,
+        actors = actors,
+        relatedList = relatedList,
+        liked = liked,
+        isFavorite = isFavorite,
+        isAids = isAids,
+        price = price,
+        purchased = purchased,
+        raw = raw,
+        createTime = createTime,
+        modifyTime = modifyTime,
+    )
+
+    /** 基础数据实体 → 读取模型（未入库时 `collected` 为空）。 */
+    private fun JmAlbumBaseEntity.toReadModel(collected: Boolean? = null) = JmAlbumEntity(
+        id = id,
+        name = name,
+        albumFolderName = albumFolderName,
+        images = images,
+        addTime = addTime,
+        description = description,
+        totalViews = totalViews,
+        likes = likes,
+        series = series,
+        seriesId = seriesId,
+        commentTotal = commentTotal,
+        author = author,
+        tags = tags,
+        works = works,
+        actors = actors,
+        relatedList = relatedList,
+        liked = liked,
+        isFavorite = isFavorite,
+        collected = collected,
+        isAids = isAids,
+        price = price,
+        purchased = purchased,
+        raw = raw,
+        createTime = createTime,
+        modifyTime = modifyTime,
     )
 
     /** 拉取章节详情（图片清单）并入库。返回入库后的图片数。 */
     suspend fun fetchAndSaveChapter(albumId: Long, chapterId: Long): Int {
-        val album = albumDao.findById(albumId)
+        val album = albumDao.findById(albumId)?.toReadModel()
         val chapter = api.chapter(chapterId)
         saveChapterImages(albumId, chapter, album?.let { seriesOf(it, chapterId) })
         return chapterDao.imageCount(albumId, chapterId)
@@ -773,8 +854,8 @@ class JmRepository(
      * 保留后最近列表里还能看到这本，点进去也能重新加入书库。
      *
      * **`t_jm_album`（基础数据缓存）也刻意不动**（用户要求：缓存表不因任何操作删除）：
-     * 移出书库后再进详情页/阅读器仍然有完整数据可看；`collected` 属于书库语义，
-     * 这里顺手清零，与旧实现"整行删掉"的效果一致。
+     * 移出书库后再进详情页/阅读器仍然有完整数据可看；
+     * `collected` 在成员行里，随 [deleteLibraryRows] 一起消失（与旧实现"整行删掉"的效果一致）。
      *
      * **本地文件不在这里删**：图片在本子目录、成品在系统下载目录、封面在 Coil 缓存，
      * 三处都要清，由调用方（详情页 / 书库多选）统一编排。
@@ -785,7 +866,6 @@ class JmRepository(
             favoriteDao.deleteLinksOfAlbum(id)
             chapterDao.deleteByAlbum(id)
             positionDao?.delete(READING_KIND, id.toString())
-            albumDao.setCollected(id, false)
         }
         albumDao.deleteLibraryRows(ids)
     }
