@@ -15,14 +15,7 @@ stages:
     buildToolsVersion: 35.0.1
     ndkVersion: 28.2.13676358
     commands:
-    # ① 构建机是 Linux、没有本机那个固定路径的 JDK：删掉 org.gradle.java.home；gradlew 没可执行位，补 chmod
-    - sed -i '/org.gradle.java.home/d' gradle.properties; chmod +x gradlew
-    # ② 构建 debug 包（debug 用 Gradle 自动生成的 debug keystore 签名，不需要 keystore.properties）
-    - ./gradlew --no-daemon :app:assembleDebug
-    # ③ 取产物、改成好认的文件名（debug 包 applicationId 带 .debug 后缀、版本号带 -debug）
-    - APK=$(ls app/build/outputs/apk/debug/*.apk | head -n1); test -n "$APK" || { echo "没有找到 debug APK，中止"; exit 1; }; TAG="${RELEASE_TAG}"; if [ -z "$TAG" ]; then TAG="v1.0.${GITEE_PIPELINE_BUILD_NUMBER}-debug"; fi; OUT="HaruhiBox-${TAG}.apk"; cp "$APK" "$OUT"; ls -lh "$OUT"
-    # ④ 可选：发布到 Gitee 发行版。令牌没配/还是占位符就跳过，不影响构建产物
-    - TOKEN="${GITEE_TOKEN}"; if [ -z "$TOKEN" ]; then TOKEN="PASTE_YOUR_GITEE_TOKEN_HERE"; fi; TAG="${RELEASE_TAG}"; if [ -z "$TAG" ]; then TAG="v1.0.${GITEE_PIPELINE_BUILD_NUMBER}-debug"; fi; OUT="HaruhiBox-${TAG}.apk"; if [ "$TOKEN" = "PASTE_YOUR_GITEE_TOKEN_HERE" ]; then echo "未配置 GITEE_TOKEN，跳过发布；APK 见本次构建的制品/归档"; else REMOTE=$(git config --get remote.origin.url); OWNER=$(echo "$REMOTE" | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#'); REPO=$(echo "$REMOTE" | sed -E 's#.*/([^/]+)(\.git)?$#\1#'); curl -s -o /tmp/release.json "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases/tags/${TAG}?access_token=${TOKEN}"; RELEASE_ID=$(grep -o '"id":[0-9]*' /tmp/release.json | head -n1 | cut -d: -f2); if [ -z "$RELEASE_ID" ]; then curl -s -o /tmp/release.json -X POST "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases" --data-urlencode "access_token=${TOKEN}" --data-urlencode "tag_name=${TAG}" --data-urlencode "name=HaruhiBox ${TAG}" --data-urlencode "body=$(git log -1 --pretty=%s)" --data-urlencode "target_commitish=$(git rev-parse HEAD)" --data-urlencode "prerelease=true"; RELEASE_ID=$(grep -o '"id":[0-9]*' /tmp/release.json | head -n1 | cut -d: -f2); fi; if [ -z "$RELEASE_ID" ]; then echo "发行版创建/查找失败，响应如下"; cat /tmp/release.json; exit 1; fi; curl -s -X POST "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases/${RELEASE_ID}/attach_files" -F "access_token=${TOKEN}" -F "file=@${OUT}"; fi
+    - sh tools/ci/gitee-build.sh
     artifacts:
     - name: BUILD_ARTIFACT
       path:
