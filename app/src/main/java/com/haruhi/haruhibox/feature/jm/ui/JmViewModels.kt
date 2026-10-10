@@ -585,8 +585,21 @@ data class OnlineSearchUiState(
     val history: List<JmSearchHistoryEntity> = emptyList(),
     val searching: Boolean = false,
     val loadingMore: Boolean = false,
-    val error: String? = null,
-    /** 一次性提示（例如"已加入书库"）。 */
+    /**
+     * 正在入库、且**确实要联网拉详情**的本子号。
+     *
+     * 只有这一种情况才让卡片上的「加入书库」变成转圈 + 不可点：
+     * 本地（书库 / 基础数据缓存）已有完整详情时，入库只是一次数据库写入，
+     * 给它加 loading 只会"闪一下"，所以那条路径根本不置这个标记。
+     */
+    val addingIds: Set<Long> = emptySet(),
+    /**
+     * 一次性提示，由根部弹 Snackbar。**成功与失败都走这里**。
+     *
+     * 失败不再挂列表上方的横幅：那条横幅的「重试」按钮绑的是 `search()`，
+     * 也就是重发整个在线搜索，与用户刚点的「加入书库」不是同一件事；
+     * 现在只提示一句失败原因，重试由用户自己决定（用户本轮要求）。
+     */
     val message: String? = null,
     /** 历史未开启时提示"搜索历史已关闭"。 */
     val historyEnabled: Boolean = true,
@@ -652,11 +665,16 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
         if (_state.value.keyword.isNotBlank()) search()
     }
 
-    /** 从第一页开始搜索。 */
+    /**
+     * 从第一页开始搜索。
+     *
+     * 失败只弹一条提示（[OnlineSearchUiState.message]），不挂横幅：
+     * 搜索这种事用户自己会再点一次「搜索」，不需要页面替他留一个重试按钮。
+     */
     fun search() {
         val keyword = _state.value.keyword.trim()
         if (keyword.isEmpty()) {
-            _state.update { it.copy(error = "请输入搜索关键字") }
+            _state.update { it.copy(message = "请输入搜索关键字") }
             return
         }
         searchJob?.cancel()
@@ -664,7 +682,6 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
             _state.update {
                 it.copy(
                     searching = true,
-                    error = null,
                     result = null,
                     message = null,
                     visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
@@ -675,7 +692,7 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
                 .onSuccess { result -> _state.update { it.copy(result = result, searching = false) } }
                 .onFailure { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
-                    _state.update { it.copy(searching = false, error = e.toUserMessage()) }
+                    _state.update { it.copy(searching = false, message = e.toUserMessage()) }
                 }
         }
     }
@@ -706,7 +723,7 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
         if (_state.value.loadingMore || current.page >= current.totalPages) return
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            _state.update { it.copy(loadingMore = true, error = null) }
+            _state.update { it.copy(loadingMore = true) }
             runCatching { repo.searchOnline(current.query, current.sort, page = current.page + 1) }
                 .onSuccess { next ->
                     _state.update { s ->
@@ -721,7 +738,7 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
                 }
                 .onFailure { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
-                    _state.update { it.copy(loadingMore = false, error = e.toUserMessage()) }
+                    _state.update { it.copy(loadingMore = false, message = e.toUserMessage()) }
                 }
         }
     }
@@ -733,7 +750,6 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
             _state.update {
                 it.copy(
                     searching = true,
-                    error = null,
                     keyword = history.keyword,
                     // 换了一批结果，展示条数从头开始
                     visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
@@ -744,8 +760,13 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
                 it.copy(
                     searching = false,
                     result = result,
-                    error = if (result == null) "这条搜索记录的结果已丢失，请重新搜索" else null,
                     sort = JmSearchSort.fromCode(history.sort),
+                    // 快照丢了同样只提示一句；`else it.message` 是不覆盖尚未弹出的那条提示
+                    message = if (result == null) {
+                        "这条搜索记录的结果已丢失，请重新搜索"
+                    } else {
+                        it.message
+                    },
                 )
             }
         }
@@ -765,15 +786,33 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
      * 走 `addToLibraryLocalFirst`：精确匹配那一条的详情**搜索时就已经拿到了**
      * （缓存在基础数据表里），这里不必再请求一次 `/album`——用户反馈的"点一下特别慢"
      * 就是那次多余的网络往返。只有本地完全没有数据时才回落到网络。
+     *
+     * **只有真的要联网时按钮才转圈**（用户本轮要求）：本地命中是一条数据库写入，
+     * 一帧就结束，给它加 loading 只会闪一下。所以先用
+     * [JmRepository.libraryAddNeedsNetwork] 问一句——它和 `addToLibraryLocalFirst`
+     * 里"本地有没有"用的是同一个依据，两者不会打架。
      */
     fun addToLibrary(item: OnlineSearchItem) {
+        // 转圈期间挡掉重复点按：每个点按都会新起一个协程，连点就是并发重复请求
+        if (item.id in _state.value.addingIds) return
         viewModelScope.launch {
-            runCatching { repo.addToLibraryLocalFirst(item.id) }
-                .onSuccess {
-                    markLocal(item.id)
-                    _state.update { it.copy(message = "已加入书库") }
-                }
-                .onFailure { e -> _state.update { it.copy(error = e.toUserMessage()) } }
+            val needsNetwork = runCatching { repo.libraryAddNeedsNetwork(item.id) }
+                .getOrDefault(true)
+            if (needsNetwork) {
+                _state.update { it.copy(addingIds = it.addingIds + item.id) }
+            }
+            try {
+                repo.addToLibraryLocalFirst(item.id)
+                markLocal(item.id)
+                _state.update { it.copy(message = "已加入书库") }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // 失败只提示一句，页面不留横幅（重试由用户再点一次按钮）
+                _state.update { it.copy(message = e.toUserMessage()) }
+            } finally {
+                _state.update { it.copy(addingIds = it.addingIds - item.id) }
+            }
         }
     }
 

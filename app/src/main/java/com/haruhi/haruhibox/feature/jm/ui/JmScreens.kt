@@ -1005,10 +1005,10 @@ fun JmOnlineSearchScreen(
             }
         }
 
-        if (state.error != null) {
-            ErrorBanner(message = state.error, onRetry = onSearch)
-        }
-
+        // 这里原来挂过一条 ErrorBanner（带「重试」按钮）。已去掉（用户本轮要求）：
+        // 那个「重试」绑的是 `onSearch`，也就是重发整个在线搜索，
+        // 而横幅上的文案有时是「加入书库」失败——按钮和它旁边的话根本不是同一件事。
+        // 现在无论搜索、翻页还是加入书库失败，都只弹一条一次性提示，重试由用户自己决定。
         val result = state.result
         when {
             state.searching -> LoadingBox()
@@ -1080,6 +1080,8 @@ fun JmOnlineSearchScreen(
                     items(visibleItems, key = { it.id }) { item ->
                         OnlineResultRow(
                             item = item,
+                            // 只有"这次入库确实要联网拉详情"才会是 true（见 VM 的 addToLibrary）
+                            adding = item.id in state.addingIds,
                             onOpen = { onOpenAlbum(item.id) },
                             onAddToLibrary = { onAddToLibrary(item) },
                         )
@@ -1200,6 +1202,7 @@ private fun SearchHistoryList(
 @Composable
 private fun OnlineResultRow(
     item: OnlineSearchItem,
+    adding: Boolean,
     onOpen: () -> Unit,
     onAddToLibrary: () -> Unit,
 ) {
@@ -1262,7 +1265,20 @@ private fun OnlineResultRow(
                         )
                         Spacer(Modifier.width(8.dp))
                     } else {
-                        TextButton(onClick = onAddToLibrary) { Text("加入书库") }
+                        // 本地没有完整详情时，这一次入库要等一个 `/album` 往返，
+                        // 所以按钮上转圈并挡掉重复点按（用户本轮要求）。
+                        // 本地命中的那条路径不会进这个状态——VM 只在真要联网时才置 adding，
+                        // 否则"点一下就变已入库"会先闪一下 loading。
+                        TextButton(onClick = onAddToLibrary, enabled = !adding) {
+                            if (adding) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text("加入书库")
+                        }
                     }
                 }
             }

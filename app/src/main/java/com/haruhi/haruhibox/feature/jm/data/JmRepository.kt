@@ -360,6 +360,16 @@ class JmRepository(
     }
 
     /**
+     * 入库时**是否需要联网**：本地已有完整详情就不需要。
+     *
+     * 判定依据与 [addToLibraryLocalFirst] 完全一致（同一个 [localAlbumDetail]：
+     * 先看书库、再看基础数据缓存），供 UI 决定卡片上的「加入书库」要不要转圈。
+     * 只有回落到 `/album` 的这一条路径会让用户真的等一次网络往返；
+     * 本地命中是一帧就结束的数据库写入，给它加 loading 只会变成"闪一下"。
+     */
+    suspend fun libraryAddNeedsNetwork(aid: Long): Boolean = localAlbumDetail(aid) == null
+
+    /**
      * 搜索结果点「加入书库」：**本地已经有完整详情就不联网**。
      *
      * 精确匹配那一条本来就是 `/album` 的结果（`searchOnlineByExactId` 已经把它
