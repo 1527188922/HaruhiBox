@@ -35,6 +35,23 @@ chmod +x gradlew
 sed -i 's#services.gradle.org/distributions#mirrors.cloud.tencent.com/gradle#' gradle/wrapper/gradle-wrapper.properties
 grep distributionUrl gradle/wrapper/gradle-wrapper.properties
 
+# 依赖也走国内镜像：dl.google.com / plugins.gradle.org 在国内拉不动。
+# settings.gradle.kts 里这个变量为 1 时才把阿里云镜像排在官方仓库前面（本地/GitHub 不受影响）。
+export HARUHIBOX_USE_CN_MIRROR=1
+
+# Gitee 构建镜像自带一个全局 init 脚本 /root/.gradle/init.gradle，它会给**每个模块**
+# 注入一个 maven 仓库；而本工程的 settings.gradle.kts 是 FAIL_ON_PROJECT_REPOS
+# （禁止模块级仓库），两者冲突时 Gradle 直接失败：
+#   Build was configured to prefer settings repositories over project repositories
+#   but repository 'maven' was added by initialization script '/root/.gradle/init.gradle'
+# 依赖源已经由上面的镜像变量接管，所以把镜像自带的这些 init 脚本停用掉。
+for f in /root/.gradle/init.gradle /root/.gradle/init.d/*.gradle; do
+  if [ -f "$f" ]; then
+    mv "$f" "$f.disabled"
+    echo "已停用构建镜像自带的 init 脚本：$f"
+  fi
+done
+
 echo "==> 2/4 构建 debug 包"
 # debug 由 Gradle 自动生成的 debug keystore 签名，不需要 keystore.properties
 ./gradlew --no-daemon :app:assembleDebug
