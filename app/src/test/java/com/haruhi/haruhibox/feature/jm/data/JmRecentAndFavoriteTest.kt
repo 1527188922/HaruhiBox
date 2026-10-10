@@ -122,6 +122,57 @@ class JmRecentAndFavoriteTest {
         assertThat(repo.findRecent(480854L)!!.viewedTime).isGreaterThan(1_000L)
     }
 
+    // ---------------- 第十三轮：最近浏览的写入不能被对方覆盖 ----------------
+
+    /**
+     * 已经在书库、但最近浏览里还没有记录的本子：进详情页时要**直接用书库数据**写完整记录，
+     * 不能只写一条"只有 JM 号"的骨架行——列表里那种行看着不像刚点过的那本
+     * （用户第十三轮要求第 1 点）。
+     */
+    @Test
+    fun `touching an album in the library writes a complete recent row`() = runTest {
+        repo.saveAlbum(albumFixture(480854, "在书库的本子"))
+        val library = repo.findAlbum(480854L)!!
+
+        repo.touchRecent(480854L)
+
+        val recent = repo.findRecent(480854L)!!
+        assertThat(recent.name).isEqualTo("在书库的本子")
+        assertThat(recent.albumFolderName).isEqualTo(library.albumFolderName)
+        assertThat(recent.viewedTime).isGreaterThan(0L)
+    }
+
+    /** 早期版本/联网失败留下的骨架行：再次进入时也要补全，别让最近列表长期显示 JM 号。 */
+    @Test
+    fun `touching heals a skeleton row with the library data`() = runTest {
+        repo.touchRecent(480854L)
+        assertThat(repo.findRecent(480854L)!!.name).isNull()
+
+        repo.saveAlbum(albumFixture(480854, "后来入库"))
+
+        repo.touchRecent(480854L)
+
+        assertThat(repo.findRecent(480854L)!!.name).isEqualTo("后来入库")
+    }
+
+    /**
+     * 详情页的两条写入路径必须串行（见 `JmRepository.touchRecent` 的注释）：
+     * 进页面记下的浏览时间，随后"联网成功写内容"时**必须原样保留**，
+     * 否则刚更新的时间会被旧值覆盖，最近列表第一条就不会变成刚点过的这本。
+     */
+    @Test
+    fun `a later save to recent keeps the time written when entering the page`() = runTest {
+        repo.touchRecent(480854L)
+        val touchedAt = repo.findRecent(480854L)!!.viewedTime
+
+        // 详情页联网成功：写内容，但保留浏览时间
+        repo.saveToRecent(albumFixture(480854, "联网结果"))
+
+        val recent = repo.findRecent(480854L)!!
+        assertThat(recent.name).isEqualTo("联网结果")
+        assertThat(recent.viewedTime).isEqualTo(touchedAt)
+    }
+
     @Test
     fun `refresh updates recent fields but keeps the viewed time`() = runTest {
         repo.saveToRecent(albumFixture(480854, "旧标题"))

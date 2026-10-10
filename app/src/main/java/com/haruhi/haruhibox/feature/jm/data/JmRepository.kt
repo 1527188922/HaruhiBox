@@ -24,6 +24,8 @@ import com.haruhi.haruhibox.feature.jm.api.JmSearchItemDto
 import com.haruhi.haruhibox.feature.jm.api.JmSeriesDto
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import timber.log.Timber
@@ -69,6 +71,15 @@ class JmRepository(
     private val saveSearchHistory: () -> Boolean = { true },
     private val albumNameMaxBytes: () -> Int = { FileNaming.DEFAULT_ALBUM_NAME_MAX_BYTES },
 ) {
+
+    /**
+     * 最近浏览表的写入锁。
+     *
+     * 见 [touchRecent] 的长注释：这张表有两条"先读后写"的路径
+     * （进页面记浏览时间 / 详情联网成功写内容），不加锁时会互相穿插、
+     * 把刚写进去的浏览时间又覆盖回旧值（用户反馈的"最近第一条不更新"）。
+     */
+    private val recentWriteLock = Mutex()
 
     // ------------------------------------------------------------------
     // 在线搜索
@@ -251,45 +262,103 @@ class JmRepository(
     // ------------------------------------------------------------------
 
     /**
-     * 点进详情页时调用：**只更新最近浏览的浏览时间**，不写书库。
+     * 点进详情页（或阅读器）时调用：**只更新最近浏览的浏览时间**，不写书库。
      *
      * 用户明确要求「点详情不等于加入书库」，所以入书库只发生在
      * [addToLibrary] / 搜索结果里的「加入书库」按钮。
      *
-     * 三种进入路径（搜索、书库、收藏夹）都会走这里，所以浏览时间一致更新。
-     * 记录还不存在时先建一条骨架，等详情数据回来再补全（[saveToRecent]）。
+     * 三种进入路径（搜索、书库、收藏夹）都会走这里，所以浏览时间一致更新；
+     * 阅读器也走这里（用户第八轮要求第 5 点）。
+     *
+     * ## 为什么这里必须和 [saveToRecent] 串行（用户第十三轮要求第 1 点）
+     *
+     * 这张表有**两条**写入路径，而且都是"先读、再写"：
+     * - 本方法：读不到行就 REPLACE 插一条骨架行，读到行就 UPDATE 浏览时间；
+     * - [saveToRecent]（详情页本地没有数据时联网拿到 `/album` 后调用）：
+     *   读出旧行的 `viewed_time`，然后 REPLACE 整行并"保留"那个旧值
+     *   ——这是"刷新不改浏览时间"的要求。
+     *
+     * 两条交错时就会丢更新：`saveToRecent` 先读到**旧**的浏览时间 →
+     * 本方法写进**新**时间 → `saveToRecent` 再拿旧值覆盖整行。
+     * 结果是"刚从详情页出来，最近浏览第一条却还是上一本"。
+     * 什么时候会交错？详情页的联网很快、而本方法的写被主线程/数据库线程池
+     * 推迟了一会儿时就会（真机反馈"有时正常有时不行"正是这个）。
+     * 阅读器只有本方法一条写入路径，所以从来不出问题。
+     *
+     * 加锁让"读—写"整段串行：后进入的那一方一定基于最新状态，谁都不会覆盖谁。
+     *
+     * ## 顺带把记录补全
+     *
+     * 记录不存在、或只有一条早期版本留下的"骨架行"（字段全空、列表里只显示 JM 号）时，
+     * 用书库里的数据直接补成完整记录——书库数据本来就在本地，不需要联网。
+     * 补不上的（书库里也没有这本）才留骨架行，等详情页联网结果来填。
      */
     suspend fun touchRecent(aid: Long) {
         val now = System.currentTimeMillis()
-        val existing = recentDao.findById(aid)
-        if (existing == null) {
-            // 骨架行：只有 id 与浏览时间，字段随后由 saveToRecent 补齐
+        recentWriteLock.withLock {
+            val existing = recentDao.findById(aid)
+            if (existing != null && !existing.name.isNullOrBlank()) {
+                // 已经有完整记录：只改浏览时间，其它列一个都不动
+                recentDao.touch(aid, now)
+                return@withLock
+            }
+            val fromLibrary = albumDao.findById(aid)?.toRecentEntity(viewedTime = now)
+            val base = fromLibrary ?: existing ?: JmRecentAlbumEntity(
+                id = aid,
+                albumFolderName = FileNaming.albumFolderName(null, aid.toString(), albumNameMaxBytes()),
+            )
             recentDao.upsert(
-                JmRecentAlbumEntity(
-                    id = aid,
-                    albumFolderName = FileNaming.albumFolderName(null, aid.toString(), albumNameMaxBytes()),
-                    createTime = nowText(),
-                    modifyTime = nowText(),
+                base.copy(
                     viewedTime = now,
+                    createTime = existing?.createTime ?: nowText(),
+                    modifyTime = nowText(),
                 ),
             )
-        } else {
-            recentDao.touch(aid, now)
         }
     }
 
     /** 把在线详情写进最近浏览表，**保留原有的浏览时间**（刷新按钮用）。 */
     suspend fun saveToRecent(dto: JmAlbumDto): JmRecentAlbumEntity {
-        val existing = recentDao.findById(dto.id)
         val now = System.currentTimeMillis()
-        val entity = toRecentEntity(dto).copy(
-            viewedTime = existing?.viewedTime ?: now,
-            createTime = existing?.createTime ?: nowText(),
-            modifyTime = nowText(),
-        )
-        recentDao.upsert(entity)
-        return entity
+        // 与 touchRecent 串行：这里"读旧时间 + 整行覆盖"才不会把并发写入的新时间吃掉
+        return recentWriteLock.withLock {
+            val existing = recentDao.findById(dto.id)
+            val entity = toRecentEntity(dto).copy(
+                viewedTime = existing?.viewedTime ?: now,
+                createTime = existing?.createTime ?: nowText(),
+                modifyTime = nowText(),
+            )
+            recentDao.upsert(entity)
+            entity
+        }
     }
+
+    /** 书库实体 → 最近浏览实体（字段一一对应；`collected` 在最近浏览里没有语义）。 */
+    private fun JmAlbumEntity.toRecentEntity(viewedTime: Long) = JmRecentAlbumEntity(
+        id = id,
+        name = name,
+        albumFolderName = albumFolderName,
+        images = images,
+        addTime = addTime,
+        description = description,
+        totalViews = totalViews,
+        likes = likes,
+        series = series,
+        seriesId = seriesId,
+        commentTotal = commentTotal,
+        author = author,
+        tags = tags,
+        works = works,
+        actors = actors,
+        relatedList = relatedList,
+        liked = liked,
+        isFavorite = isFavorite,
+        isAids = isAids,
+        price = price,
+        purchased = purchased,
+        raw = raw,
+        viewedTime = viewedTime,
+    )
 
     /** 最近浏览列表（按浏览时间倒序）。 */
     fun observeRecentAlbums(limit: Int = 60, offset: Int = 0): Flow<List<JmRecentAlbumEntity>> =

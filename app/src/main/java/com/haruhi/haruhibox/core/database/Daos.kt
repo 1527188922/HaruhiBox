@@ -387,6 +387,10 @@ interface JmRecentAlbumDao {
      *
      * `REPLACE` 语义在这里是安全的：这张表**没有需要保留的本地字段**
      * （不像 `t_jm_album` 有 `collected`），整行覆盖正是想要的行为。
+     *
+     * 但**调用方必须保证"读—改—写"是串行的**：`viewed_time` 需要"读旧值再保留"，
+     * 与另一个并发写入交错时会被回写成旧值（详见 `JmRepository.touchRecent`
+     * 的注释与 `recentWriteLock`）。
      */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(album: JmRecentAlbumEntity)
