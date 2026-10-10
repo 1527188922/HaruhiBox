@@ -660,6 +660,25 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
 
     fun onKeywordChange(value: String) = _state.update { it.copy(keyword = value) }
 
+    /**
+     * 把关键字**填进搜索框**，但不发起搜索（详情页点作者走这条）。
+     *
+     * 用户要求：点了作者只把作者名填好，搜不搜由他自己按搜索按钮决定。
+     * 同时把上一次的结果清掉——不然输入框里是"新作者"、下面却挂着"上一个关键字的结果"，
+     * 看起来像是这次搜出来的。
+     */
+    fun prefillKeyword(value: String) {
+        searchJob?.cancel()
+        _state.update {
+            it.copy(
+                keyword = value,
+                searching = false,
+                result = null,
+                visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
+            )
+        }
+    }
+
     fun onSortChange(sort: JmSearchSort) {
         _state.update { it.copy(sort = sort) }
         if (_state.value.keyword.isNotBlank()) search()

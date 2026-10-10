@@ -28,8 +28,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -148,6 +150,15 @@ fun JmModeRoot(
     // 任务页复用同一个实例，两处看到的状态一定一致。
     val taskViewModel: JmTaskViewModel = viewModel(factory = factory)
     val taskState by taskViewModel.state.collectAsStateWithLifecycle()
+
+    /**
+     * 「点作者去搜索」的交接棒：详情页塞进来一个作者名，发现页接住填进搜索框。
+     *
+     * 为什么要绕这一道：详情页与发现页各有各的 `JmOnlineSearchViewModel`
+     * （作用域是各自的 NavBackStackEntry），详情页拿不到发现页那一个实例。
+     * 挂在 `/` 上的这个 NavHost 自己就是两者共同的父作用域，所以把值放这儿最省事。
+     */
+    var pendingSearchKeyword by remember { mutableStateOf<String?>(null) }
 
     // 封面统一走应用级 ImageLoader：正确的 UA/代理 + files/covers 磁盘缓存
     // （用户要求第 8 点：加载过的封面优先读本地）
@@ -268,6 +279,13 @@ fun JmModeRoot(
                 composable(JmRoutes.DISCOVER) { entry ->
                     val vm: JmOnlineSearchViewModel = viewModel(viewModelStoreOwner = entry, factory = factory)
                     val state by vm.state.collectAsStateWithLifecycle()
+                    // 详情页点作者带过来的关键字：接住、填进搜索框，然后清掉交接棒。
+                    // 只 prefill，**不调 search()**——用户要求"不触发搜索、自己点搜索按钮"。
+                    LaunchedEffect(pendingSearchKeyword) {
+                        val keyword = pendingSearchKeyword ?: return@LaunchedEffect
+                        vm.prefillKeyword(keyword)
+                        pendingSearchKeyword = null
+                    }
                     JmOnlineSearchScreen(
                         state = state,
                         onKeywordChange = vm::onKeywordChange,
@@ -452,6 +470,22 @@ fun JmModeRoot(
                         // 「打开文件夹」：把系统文件管理器拉到成品目录（用户反馈第 2 点）
                         onOpenFolder = {
                             openExportFolder(context, vm.outputFolderUri(), snackbar, scope)
+                        },
+                        // 点作者：切到发现页并填好搜索框（不自动搜，用户自己点搜索）。
+                        //
+                        // 只把"发现"以上的东西弹掉，**详情页留在栈里**——这样手机返回键
+                        // 会退回详情页（用户要求）。两个不能碰的坑：
+                        // - 不要用底栏切 tab 那一套 `saveState = true`：那会把详情页一起存进
+                        //   "书库 tab 的状态"，之后点底栏「书库」会把它整条恢复出来 = 又回到
+                        //   详情页（用户实测到过的 bug）；
+                        // - 也不要 `popBackStack(LIBRARY)` 把详情页提前弹掉：那样从发现页
+                        //   返回就直接退出到书库了，返回链路断掉。
+                        onSearchAuthor = { author ->
+                            pendingSearchKeyword = author
+                            navController.navigate(JmRoutes.DISCOVER) {
+                                popUpTo(JmRoutes.DISCOVER) { inclusive = true }
+                                launchSingleTop = true
+                            }
                         },
                         // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）；
                         // 页面内部的 MessageEffect 会先把消息消费掉，所以切页不会重放

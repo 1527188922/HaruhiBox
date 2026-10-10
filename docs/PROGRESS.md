@@ -369,6 +369,49 @@ app/src/main/java/com/haruhi/haruhibox/
 | N1 | 在线搜索失败给个 toast 提示、用户自行重试即可，不要横幅 | 发现页原来在排序栏下面挂 `ErrorBanner(message = state.error, onRetry = onSearch)`。问题不只是"太重"：那个「重试」绑的是 `onSearch`，也就是**重发整个在线搜索**，而横幅上的文案有时是「加入书库」失败——按钮和它旁边那句话根本不是同一件事。现在把 `OnlineSearchUiState.error` 整个删掉，**搜索失败 / 翻页失败 / 加入书库失败 / 历史快照丢失 / 关键字为空**五种提示统一走 `message`（一次性提示，根部 Scaffold 弹 Snackbar，与"已加入书库"同一条路），页面上不再留任何横幅，重试由用户自己决定 | 代码（**按要求没有跑测试**，等你打 debug 包确认）。设备上这样核对：飞行模式下点「搜索」、以及点「加入书库」→ 底部各弹一句失败原因，页面上不再出现红字横幅，结果列表也不被清掉（翻页失败时本页已显示的结果仍在） |
 | N2 | 加入书库时如果本地真的没有、要走网络请求漫画详情，那么「加入书库」按钮需要一个 loading 效果 | 新增 `JmRepository.libraryAddNeedsNetwork(aid)`（判定依据与 `addToLibraryLocalFirst` 用的是同一个 `localAlbumDetail`：先书库、再基础数据缓存），VM 先问一句，**只有确实要联网才**把 aid 放进 `OnlineSearchUiState.addingIds`：卡片上的按钮变成「转圈 + 加入书库」且 `enabled = false`，网络往返结束（成功、失败、取消都算）在 `finally` 里清掉标记。<br>**本地命中不置这个标记**（精确匹配那一条、看过/缓存过的本子），所以那条路径仍然是"点一下立刻变已入库"，不会先闪一下 loading。<br>顺带挡掉重复点按：转圈期间同一张卡再点直接 return（原来连点会每次新起一个协程并发发请求） | 代码（同上）。设备上这样核对：**断网**时点一张从没点进去过的普通搜索结果 → 按钮转圈 → 底部弹失败原因 → 转圈消失、按钮复原可再点；再点精确匹配那一条 → 不转圈，直接变「已入库」 |
 
+### 第十八~二十轮：点作者去搜索（保留）+ 复制相关的尝试（**已全部撤回**，2026-10-10）
+
+**保留的功能**（与复制无关，是独立的一次需求）：
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| R1 | **点作者**跳发现页并把作者名填进搜索框（**不触发搜索**，用户自己点搜索按钮） | 详情页作者那行改成可点（`Modifier.clickable` + 主色，暗示它能点）。详情页 → 发现页的关键字交接棒挂在 `JmModeRoot` 的 `pendingSearchKeyword` 上：两页的 `JmOnlineSearchViewModel` 作用域是各自的 NavBackStackEntry，详情页拿不到发现页那一个实例，而 `/` 上的 NavHost 是两者共同的父作用域。发现页 `LaunchedEffect` 接住 → `JmOnlineSearchViewModel.prefillKeyword()`（**只填关键字、清掉上一次的结果，不调 `search()`**）→ 清掉交接棒 | 模拟器实测：详情页点「有贺冬」→ 切到「发现」tab（底栏高亮在发现）、搜索框已填 `有贺冬`、**页面显示的是搜索历史而不是结果**（证明没有自动搜） |
+| R2 | 点作者进发现页后，**手机返回键要继续退回详情页** | `onSearchAuthor` 用 `navigate(DISCOVER) { popUpTo(DISCOVER) { inclusive = true }; launchSingleTop = true }`：**只弹掉"发现"以上的东西，详情页留在回退栈里**。两个不能碰的坑都写在注释里：① 不能用底栏切 tab 那一套 `saveState = true`——那会把详情页一起存进"书库 tab 的状态"，之后点底栏「书库」会把它整条恢复出来 = 又回到详情页（用户实测到过的 bug）；② 也不能 `popBackStack(LIBRARY)` 提前弹掉详情页——那样从发现页返回就直接退出到书库，返回链路断掉 | 模拟器实测：详情页点作者 → 发现页 → 按返回 → **回到详情页** → 再按返回 → 书库；点底栏「书库」也仍正常回书库列表 |
+
+**已撤回的尝试**（用户要求收回，代码已还原）：
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| O1~Q5 | 详情页长按书名 / JM 号 / 作者弹自定义气泡复制 → 改系统文字选中复制 → 发现页漫画名也可选中 | **三轮尝试后按用户要求全部撤回**，相关代码已删除。试过的东西：<br>① 自定义气泡（`CopyBubble.kt`：`Modifier.longPressCopy` + `CopyBubbleHost()`，深灰圆角气泡 + 底部小三角、`Popup` 定位、内容先在隐形 `Layout` 里量尺寸）；<br>② 四处 `SelectionContainer` + 根节点手势（`focusable()` / `detectTapGestures` / 自写不消费事件的检测器 / `PointerEventPass.Initial` 拦截）；<br>③ 发现页搜索结果漫画名可选中。<br>下面留的是这轮踩出来的、以后可能还用得上的结论 | 代码已还原（**按要求没有跑测试**） |
+
+**这轮值得留下的结论**（省得以后重复踩）：
+
+- **`SelectionState` 不能共用**：一个状态只能绑一个 `SelectionContainer`，共用直接抛
+  `IllegalStateException: A SelectionState can only be bound to one SelectionContainer`
+  （`SelectionContainer.kt:233`）。要几处可选就得几处各自的 `rememberSelectionState()`。
+- **根节点上不要加 `focusable()`**：根一旦可获焦，手指按下（DOWN）时它就把焦点抢走，
+  而文字的选择手势**是靠焦点驱动的**——表现是"长按完全选不中文字"。
+- **根节点上不要用 `detectTapGestures` 去"点别处"**：它收到 DOWN 就 `consume()`，
+  子节点的选择手势看到 down 已被消费就不启动。要"在子节点之前"处理得用
+  `PointerEventPass.Initial`（派发顺序是「祖先 Initial → 子节点 → 祖先 Main」，
+  见 `HitPathTracker.dispatchMainEventPass`）。
+- **`Modifier.onTextLayout` 在 Compose 1.12 里不存在**：行信息只能从 `Text(onTextLayout = …)`
+  参数拿；`Modifier.onLongPress` 同样不存在，只有 `detectTapGestures`。
+- **`Popup` 的定位发生在测量之前**：要让气泡"以某个点为中心"，得先用一个不可见、
+  不占位的 `Layout` 把内容量一遍拿到宽高。
+- **Material3 的 `Surface(onClick = ...)` 会加 `minimumInteractiveComponentSize()`**：
+  会把小气泡撑到 48dp 高且带水波纹；要紧凑就用静态 `Surface` + 自定义点击。
+
+> **两条给自己的教训（写在这里免得再犯）**：
+>
+> 1. **改含中文的源文件一律用编辑工具（edit/write），不要用 shell 重写整个文件**。
+>    `JmAlbumDetailScreen.kt` 被我一条 PowerShell `Get-Content -Raw` + `Set-Content`
+>    （Windows PowerShell 5.1 默认按 ANSI 读写）**整文件改坏编码**，236 个汉字变成
+>    `U+FFFD`，注释和**字符串字面量里都有**（界面文案会直接损坏）。已 `git checkout` 还原。
+> 2. **"撤回某功能"要逐条对着需求清单核对，别把搭在一起但独立的另一个功能一起删掉**。
+>    这次"撤回所有复制相关代码"时，把**跟复制无关的"点作者去搜索 + 返回回详情页"**
+>    也一起删了（见上面 R1/R2，用户指出后已恢复）。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |

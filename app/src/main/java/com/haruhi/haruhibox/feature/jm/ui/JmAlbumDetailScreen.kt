@@ -129,6 +129,10 @@ fun JmAlbumDetailScreen(
     /** 「打开文件夹」：让系统文件管理器定位到成品目录（用户反馈第 2 点）。 */
     onOpenFolder: () -> Unit,
     /**
+     * 点作者：跳到发现页，把作者名填进在线搜索框（**不自动搜**，由用户自己点搜索按钮）。
+     */
+    onSearchAuthor: (String) -> Unit = {},
+    /**
      * 提示文案的**上层**回调。
      *
      * 为什么不在这里自己弹 Snackbar：收藏夹是 `ModalBottomSheet`，
@@ -228,6 +232,7 @@ fun JmAlbumDetailScreen(
                         onToggleDescription = onToggleDescription,
                         onRead = onReadFromStart,
                         onDownload = { showDownloadSheet = true },
+                        onSearchAuthor = onSearchAuthor,
                     )
                 }
                 if (state.refreshing) {
@@ -685,8 +690,11 @@ private fun AlbumHeader(
     onToggleDescription: () -> Unit,
     onRead: () -> Unit,
     onDownload: () -> Unit,
+    /** 点作者：跳发现页并把作者名填进搜索框（不自动搜，由用户自己点搜索按钮）。 */
+    onSearchAuthor: (String) -> Unit = {},
 ) {
     val album = state.album ?: return
+    val authorText = parseStringArray(album.author).joinToString(" / ")
     Column(modifier = Modifier.padding(12.dp)) {
         Row {
             JmCover(
@@ -711,12 +719,17 @@ private fun AlbumHeader(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                parseStringArray(album.author).takeIf { it.isNotEmpty() }?.let { authors ->
+                if (authorText.isNotEmpty()) {
+                    Spacer(Modifier.height(2.dp))
+                    // 点作者 = 拿去在线搜索：切到发现页并把作者名填进搜索框（不自动搜）。
+                    // 用主色把它标出来，让用户知道这行可以点。
                     Text(
-                        text = authors.joinToString(" / "),
+                        text = authorText,
                         style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable { onSearchAuthor(authorText) },
                     )
                 }
                 Spacer(Modifier.height(6.dp))
