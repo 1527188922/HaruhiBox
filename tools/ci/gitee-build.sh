@@ -52,6 +52,82 @@ for f in /root/.gradle/init.gradle /root/.gradle/init.d/*.gradle; do
   fi
 done
 
+# 镜像里的 Android SDK 在只读挂载 /mnt/pipeline-tools/standard/android/sdk 下，
+# AGP 要补装 build-tools/platform 时报 "The SDK directory is not writable"。
+# 这里搭一个**可写**的 SDK：已有组件用软链接指过去（省几 GB 复制），
+# 缺的（工程要 compileSdk 37 / build-tools 36）让 AGP 自己下到可写目录里。
+IMAGE_SDK=/mnt/pipeline-tools/standard/android/sdk
+if [ -d "$IMAGE_SDK" ]; then
+  SDK="$HOME/android-sdk"
+  mkdir -p "$SDK/platforms" "$SDK/build-tools"
+  for kind in platforms build-tools; do
+    for sub in "$IMAGE_SDK/$kind"/*; do
+      [ -e "$sub" ] || continue
+      ln -sfn "$sub" "$SDK/$kind/$(basename "$sub")"
+    done
+  done
+  for sub in "$IMAGE_SDK"/*; do
+    name=$(basename "$sub")
+    case "$name" in
+      platforms|build-tools) ;;
+      *) ln -sfn "$sub" "$SDK/$name" ;;
+    esac
+  done
+  export ANDROID_HOME="$SDK"
+  export ANDROID_SDK_ROOT="$SDK"
+  printf 'sdk.dir=%s\n' "$SDK" > local.properties
+  echo "可写 SDK：$SDK（local.properties 已指向它）"
+
+  # 工程要 compileSdk 37 / build-tools 36，镜像里没有这两个组件；AGP 会自动去
+  # dl.google.com 补装，而国内构建机访问不了（会卡住/失败）。所以直接从腾讯云的
+  # Android SDK 镜像（dl.google.com/android/repository 的完整镜像）把官方 zip 解进来。
+  # 文件名取自镜像上的 repository2-3.xml（platforms;android-37.0、build-tools;36.0.0），
+  # 以后升级这两个版本时改下面的常量即可。
+  SDK_MIRROR=https://mirrors.cloud.tencent.com/AndroidSDK
+  extract_zip() {
+    mkdir -p "$2"
+    if command -v unzip >/dev/null 2>&1; then
+      unzip -q -o "$1" -d "$2"
+    else
+      (cd "$2" && jar xf "$1")
+    fi
+  }
+
+  if grep -s -l '^AndroidVersion.ApiLevel=37' "$SDK"/platforms/*/source.properties >/dev/null 2>&1; then
+    echo "已存在 Android Platform 37，跳过"
+  else
+    echo "从镜像安装 Android SDK Platform 37.0 ..."
+    curl -sL --max-time 600 -o /tmp/platform-37.zip "$SDK_MIRROR/platform-37.0_r02.zip"
+    rm -rf /tmp/platform-37 && extract_zip /tmp/platform-37.zip /tmp/platform-37
+    # zip 里是一个 android-* 目录；AGP 是按 source.properties 认平台的，目录名保持原样即可
+    first=$(ls -d /tmp/platform-37/*/ 2>/dev/null | head -n 1)
+    if [ -z "$first" ]; then
+      echo "解压 Platform 后没找到目录，补装失败"
+      exit 1
+    fi
+    mv "$first" "$SDK/platforms/$(basename "$first")"
+  fi
+
+  if [ -d "$SDK/build-tools/36.0.0" ]; then
+    echo "已存在 Android Build-Tools 36.0.0，跳过"
+  else
+    echo "从镜像安装 Android SDK Build-Tools 36.0.0 ..."
+    curl -sL --max-time 600 -o /tmp/build-tools-36.zip "$SDK_MIRROR/build-tools_r36_linux.zip"
+    rm -rf /tmp/build-tools-36 && extract_zip /tmp/build-tools-36.zip /tmp/build-tools-36
+    # build-tools 的目录名必须是版本号：AGP 用目录名解析版本
+    first=$(ls -d /tmp/build-tools-36/*/ 2>/dev/null | head -n 1)
+    if [ -z "$first" ]; then
+      echo "解压 Build-Tools 后没找到目录，补装失败"
+      exit 1
+    fi
+    mv "$first" "$SDK/build-tools/36.0.0"
+  fi
+
+  echo "--- 补装后的组件 ---"
+  ls "$SDK/platforms" 2>/dev/null || true
+  ls "$SDK/build-tools" 2>/dev/null || true
+fi
+
 echo "==> 2/4 构建 debug 包"
 # debug 由 Gradle 自动生成的 debug keystore 签名，不需要 keystore.properties
 ./gradlew --no-daemon :app:assembleDebug
