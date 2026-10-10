@@ -341,22 +341,36 @@ fun JmAlbumDetailScreen(
 
     // 缺图：先列明缺哪些话、缺多少张，提供补下载后再导出（计划 §9 第 7 条）
     state.exportPrecheck?.let { precheck ->
+        // "没下过"的话（连图片清单都没有）和"下了一部分"的话要分开说：
+        // 前者说不出缺几张，混在一起写"共缺 0 张"会让人以为不用补（用户反馈的 bug）
+        val neverDownloaded = precheck.missingChapters.count { !it.hasImageList }
+        val partlyDownloaded = precheck.missingChapters.size - neverDownloaded
         AlertDialog(
             onDismissRequest = onDismissExportPrecheck,
             title = { Text("还有图片没下载完") },
             text = {
                 Column {
                     Text(
-                        text = "共缺 ${precheck.missingImages} 张，" +
-                            "涉及 ${precheck.missingChapters.size} 话。" +
-                            "导出前请先补下载，否则成品会缺页。",
+                        text = buildString {
+                            if (partlyDownloaded > 0) {
+                                append("有 $partlyDownloaded 话没下完（共缺 ${precheck.missingImages} 张）；")
+                            }
+                            if (neverDownloaded > 0) {
+                                append("有 $neverDownloaded 话还没有下载过；")
+                            }
+                            append("导出前请先补下载，否则成品会缺页。")
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Spacer(Modifier.height(8.dp))
                     LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
                         items(precheck.missingChapters, key = { it.title }) { row ->
                             Text(
-                                text = "${row.title}　缺 ${row.missing}/${row.total} 张",
+                                text = if (row.hasImageList) {
+                                    "${row.title}　缺 ${row.missing}/${row.total} 张"
+                                } else {
+                                    "${row.title}　未下载"
+                                },
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(vertical = 2.dp),

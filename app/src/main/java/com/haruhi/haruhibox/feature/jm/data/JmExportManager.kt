@@ -105,6 +105,15 @@ class JmExportManager(
      *
      * 返回每一话的"应有多少张 / 实际有多少张"，缺的那些列出来给用户，
      * 由用户决定先补下载还是直接导出（首版选择"先补下载"）。
+     *
+     * **连图片清单都没有的章节也算"没下完"**（用户反馈的 bug）：
+     * 导出是**按磁盘上的本子目录打包**的，而一章的图片清单（`t_jm_chapter_image`）
+     * 是"这一话应该有哪些图"的唯一来源——从没下载过、也没在阅读器里点开过的一话
+     * 根本没有清单行。之前这种章节被 `continue` 掉，既不计入总数也不算缺图，
+     * 于是"完全没下载的本子"预检直接通过、静默导出缺页的包；
+     * 只有"下过一部分"的本子才会因为拿到清单而报出缺图。
+     * 现在它们会以 [MissingChapter.hasImageList] = false 列进缺失清单，
+     * 缺几张无从得知（补下载时会先拉清单再下）。
      */
     data class Precheck(
         val totalImages: Int,
@@ -115,7 +124,18 @@ class JmExportManager(
         val missingImages: Int get() = totalImages - readyImages
     }
 
-    data class MissingChapter(val title: String, val missing: Int, val total: Int)
+    /**
+     * 缺图的一话。
+     *
+     * [hasImageList] = false 表示**这一话还没下载过**（图片清单都还没拉取），
+     * 此时 [missing]/[total] 都是 0：缺几张要等清单拉下来才知道，界面不要显示"0/0"。
+     */
+    data class MissingChapter(
+        val title: String,
+        val missing: Int,
+        val total: Int,
+        val hasImageList: Boolean = true,
+    )
 
     suspend fun precheck(album: JmAlbumEntity): Precheck = withContext(Dispatchers.IO) {
         val albumId = album.id
@@ -126,7 +146,12 @@ class JmExportManager(
         val missing = mutableListOf<MissingChapter>()
         for (chapter in chapters) {
             val images = repo.imagesOf(albumId, chapter.chapterId).map { it.imageFile }
-            if (images.isEmpty()) continue
+            if (images.isEmpty()) {
+                // 没清单 = 这一话从没下载过：导出包里不会有它，必须报出来
+                // （不能 continue 跳过，那正是"完全没下载的本子预检通过"的原因）
+                missing += MissingChapter(chapter.title, missing = 0, total = 0, hasImageList = false)
+                continue
+            }
             val have = repo.downloadedImageCount(folder, repo.chapterFolderName(chapter), images)
             total += images.size
             ready += have

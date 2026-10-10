@@ -132,6 +132,27 @@ class JmExportManagerTest {
         assertThat(precheck.missingImages).isEqualTo(0)
     }
 
+    /**
+     * **一话都没下载过**的本子也要被预检拦下来（用户反馈的 bug）。
+     *
+     * 之前只有"下过一部分"的本子才会弹"先补下载"：这种本子有图片清单，
+     * 能算出缺几张；而一话都没下过的本子连清单都没有，被当成"没有缺失"跳过了，
+     * 于是静默导出缺页的包。现在它们以 `hasImageList = false` 列进缺失清单。
+     */
+    @Test
+    fun `precheck reports chapters that were never downloaded`() {
+        // 只有书库记录：没有 series、没有章节图片清单、磁盘上也没有本子目录
+        seedAlbum()
+
+        val precheck = runBlocking { manager.precheck(album()) }
+
+        assertThat(precheck.isComplete).isFalse()
+        assertThat(precheck.missingChapters).hasSize(1)
+        assertThat(precheck.missingChapters[0].hasImageList).isFalse()
+        // 说不出缺几张（清单还没拉过），所以这两个数字是 0
+        assertThat(precheck.missingImages).isEqualTo(0)
+    }
+
     // ------------------------------------------------------------------
     // zip
     // ------------------------------------------------------------------

@@ -1683,6 +1683,8 @@ class JmAlbumDetailViewModel(
      *
      * 先做**缺图预检**：缺图时不静默导出残缺内容（计划 §9 第 7 条），
      * 而是列出缺哪些话、缺多少张，让用户先去补下载。
+     * **完全没下载过的话也算缺**（连图片清单都没有，导出包里会是空的），
+     * 见 `JmExportManager.precheck` 的注释。
      */
     fun startExport(format: JmExportFormat) {
         viewModelScope.launch {
