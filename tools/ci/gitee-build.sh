@@ -28,6 +28,12 @@ echo "==> 1/4 准备构建环境"
 sed -i '/org.gradle.java.home/d' gradle.properties
 # gradlew 在仓库里没有可执行位（Windows 提交的）
 chmod +x gradlew
+# wrapper 默认从 services.gradle.org 拉 Gradle 发行包，国内构建机会一直卡在 "Downloading ..."：
+# 临时把地址换成国内镜像（只改工作区里的文件，仓库里保持官方地址）。
+# 镜像是同一份文件（与官方 Content-Length 一致），所以 distributionSha256Sum 校验不受影响。
+# 腾讯云不通时换成 https://mirrors.huaweicloud.com/gradle/
+sed -i 's#services.gradle.org/distributions#mirrors.cloud.tencent.com/gradle#' gradle/wrapper/gradle-wrapper.properties
+grep distributionUrl gradle/wrapper/gradle-wrapper.properties
 
 echo "==> 2/4 构建 debug 包"
 # debug 由 Gradle 自动生成的 debug keystore 签名，不需要 keystore.properties
