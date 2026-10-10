@@ -172,7 +172,6 @@ class AppContainer(private val appContext: Context) {
         com.haruhi.haruhibox.feature.jm.data.JmReadingRepository(
             positionDao = database.playbackPositionDao(),
             chapterDao = database.jmChapterDao(),
-            recentDao = database.jmRecentAlbumDao(),
         )
     }
 

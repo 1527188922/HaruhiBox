@@ -69,5 +69,108 @@ object Migrations {
         }
     }
 
-    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2)
+    /**
+     * v2 → v3：拆分"基础数据 / 书库成员 / 最近预览"三张表。
+     *
+     * 背景（用户要求）：拉取 `/album` 不等于加入最近预览，所以详情缓存要有一个
+     * **任何操作都不会删除**的归宿。改造后：
+     * - `t_jm_album` 变成**漫画基础数据表**（永久缓存，只留界面用到的列）；
+     * - 新增 `t_jm_library`：书库成员表，只存 `album_id` + 首次入库时间，
+     *   书库默认排序改用它（"移出书库"只删这里的行）；
+     * - `t_jm_recent_album` 瘦身成 `id + viewed_time`，渲染时与基础表拼接。
+     *
+     * 迁移步骤：
+     * 1. 建成员表，把现有书库行（原 `t_jm_album` 全是已入库本子）灌进去；
+     * 2. 重建基础表（去掉无用列）；
+     * 3. 把**只存在于最近表里的在线数据**（看过但没入库的本子）并入基础表——
+     *    只有真正拿到过在线数据的行（`name` 非空）才并，骨架行不并；
+     * 4. 重建最近表为瘦身版，浏览时间原样保留。
+     *
+     * 注意：迁移不会去区分"最近表里哪些行是搜索/入库时被顺带写进来的"——
+     * 旧数据已经无法区分真实浏览与顺带写入，统一按浏览记录保留，用户可自行清理。
+     */
+    private val MIGRATION_2_3 = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            // 1) 书库成员表 + 从现有书库行灌入
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `t_jm_library` (
+                    `album_id` INTEGER NOT NULL,
+                    `create_time` TEXT,
+                    PRIMARY KEY(`album_id`)
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                INSERT OR REPLACE INTO `t_jm_library` (`album_id`, `create_time`)
+                SELECT `id`, `create_time` FROM `t_jm_album`
+                """.trimIndent(),
+            )
+
+            // 2) 重建基础表（去掉无用列）
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `t_jm_album_v3` (
+                    `id` INTEGER NOT NULL,
+                    `name` TEXT,
+                    `album_folder_name` TEXT,
+                    `description` TEXT,
+                    `series` TEXT,
+                    `author` TEXT,
+                    `tags` TEXT,
+                    `collected` INTEGER,
+                    PRIMARY KEY(`id`)
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                INSERT OR REPLACE INTO `t_jm_album_v3`
+                    (`id`, `name`, `album_folder_name`, `description`, `series`, `author`, `tags`, `collected`)
+                SELECT `id`, `name`, `album_folder_name`, `description`, `series`, `author`, `tags`, `collected`
+                FROM `t_jm_album`
+                """.trimIndent(),
+            )
+            // 3) 最近表里"看过但没入库"的在线数据并入基础表（书库已有的行优先，IGNORE）
+            db.execSQL(
+                """
+                INSERT OR IGNORE INTO `t_jm_album_v3`
+                    (`id`, `name`, `album_folder_name`, `description`, `series`, `author`, `tags`, `collected`)
+                SELECT `id`, `name`, `album_folder_name`, `description`, `series`, `author`, `tags`, NULL
+                FROM `t_jm_recent_album`
+                WHERE `name` IS NOT NULL AND `name` <> ''
+                """.trimIndent(),
+            )
+            db.execSQL("DROP TABLE `t_jm_album`")
+            db.execSQL("ALTER TABLE `t_jm_album_v3` RENAME TO `t_jm_album`")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_t_jm_album_collected` ON `t_jm_album` (`collected`)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS `index_t_jm_album_name` ON `t_jm_album` (`name`)")
+
+            // 4) 最近表瘦身：只留 id + viewed_time
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `t_jm_recent_album_v3` (
+                    `id` INTEGER NOT NULL,
+                    `viewed_time` INTEGER NOT NULL,
+                    PRIMARY KEY(`id`)
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                INSERT OR REPLACE INTO `t_jm_recent_album_v3` (`id`, `viewed_time`)
+                SELECT `id`, `viewed_time` FROM `t_jm_recent_album`
+                """.trimIndent(),
+            )
+            db.execSQL("DROP TABLE `t_jm_recent_album`")
+            db.execSQL("ALTER TABLE `t_jm_recent_album_v3` RENAME TO `t_jm_recent_album`")
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_t_jm_recent_album_viewed_time` " +
+                    "ON `t_jm_recent_album` (`viewed_time`)",
+            )
+        }
+    }
+
+    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
 }

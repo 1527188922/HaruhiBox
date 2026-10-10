@@ -7,6 +7,7 @@ import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
 import com.haruhi.haruhibox.core.database.entity.DownloadStatus
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
+import com.haruhi.haruhibox.core.database.entity.JmLibraryEntity
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
 import com.haruhi.haruhibox.core.download.FileDownloader
 import com.haruhi.haruhibox.core.download.ParallelImageDownloader
@@ -465,8 +466,17 @@ class JmDownloadManagerTest {
 
     private fun album() = JmAlbumEntity(id = albumId, name = "测试本子", albumFolderName = folderName)
 
+    /** 基础数据 + 书库成员各写一行：下载执行器要求本子在书库里（`repo.findAlbum` 走成员表）。 */
     private fun seedAlbum() {
-        runBlocking { db.jmAlbumDao().insertIgnore(album()) }
+        runBlocking {
+            db.jmAlbumDao().insertIgnore(album())
+            db.jmAlbumDao().insertLibraryRow(
+                JmLibraryEntity(
+                    albumId = albumId,
+                    createTime = "2026-01-01 00:00:00",
+                ),
+            )
+        }
     }
 
     /** 章节清单入库；[rawBytes] 用于给某一张图指定任意字节（验证"不重新编码"）。 */

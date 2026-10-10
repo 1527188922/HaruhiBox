@@ -4,6 +4,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
+import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.storage.LibraryDirs
@@ -83,16 +84,12 @@ class JmRepositoryTest {
         assertThat(album.name).isEqualTo("测试本子")
         // `<清洗后的标题>_JM<aid>`
         assertThat(album.albumFolderName).isEqualTo("测试本子_JM480854")
-        assertThat(album.seriesId).isEqualTo("12345")
         assertThat(album.description).isEqualTo("简介内容")
-        assertThat(album.totalViews).isEqualTo("12345")
-        assertThat(album.commentTotal).isEqualTo("7")
         // 列表字段存 JSON 数组字符串；解析回来顺序不变
         assertThat(parse(album.tags)).containsExactly("标签一", "标签二").inOrder()
         assertThat(parse(album.author)).containsExactly("作者A")
-        assertThat(parse(album.actors)).containsExactly("演员1")
-        assertThat(album.createTime).isNotNull()
-        assertThat(album.modifyTime).isNotNull()
+        // 入库同时写入书库成员，排序用的入库时间落在成员表里
+        assertThat(repo.findAlbum(480854L)).isNotNull()
     }
 
     @Test
@@ -366,7 +363,7 @@ class JmRepositoryTest {
         val favoriteId = repo.ensureDefaultFavorite().id
         repo.addToFavorite(480854L, favoriteId)
         // 取消 collected 但保留关联，验证"指定收藏夹时不叠加 collected 条件"
-        db.jmAlbumDao().setCollected(999L, true, "2026-01-01")
+        db.jmAlbumDao().setCollected(999L, true)
         repo.removeFromFavorite(999L, favoriteId)
 
         val inFolder = repo.observeLibrary(favoriteId = favoriteId).first()
@@ -448,6 +445,8 @@ class JmRepositoryTest {
 
         assertThat(repo.findAlbum(480854L)).isNull()
         assertThat(repo.imagesOf(480854, 500001)).isEmpty()
+        // 基础数据缓存**保留**（用户要求：缓存表不因移出书库而删除）
+        assertThat(db.jmAlbumDao().findById(480854L)?.name).isEqualTo("测试本子")
         // 本地文件不受"删除记录"影响（计划 §9.1 的删除语义区分）
         assertThat(File(chapterDir, "1.webp").exists()).isTrue()
     }
@@ -469,16 +468,22 @@ class JmRepositoryTest {
 
     @Test
     fun `adding to library from a search result does not hit the network when local data exists`() = runTest {
-        // 精确匹配那一条：搜索时已经请求过 /album 并写进最近浏览表
-        repo.saveToRecent(albumFixture())
+        // 精确匹配那一条：搜索时已经请求过 /album 并写进**基础数据表**（模拟：直接写 dao）
+        db.jmAlbumDao().insertIgnore(
+            JmAlbumEntity(
+                id = 480854L,
+                name = "测试本子",
+                albumFolderName = "测试本子_JM480854",
+            ),
+        )
 
         // 本测试的 api 客户端**一被调用就抛异常**，所以能跑通就说明没有联网
         val album = repo.addToLibraryLocalFirst(480854L)
 
         assertThat(album.id).isEqualTo(480854L)
         assertThat(repo.findAlbum(480854L)).isNotNull()
-        // 最近浏览里的那份也还在（两条来源并存）
-        assertThat(repo.findRecent(480854L)).isNotNull()
+        // **不是最近预览**：缓存详情不等于加入最近预览
+        assertThat(repo.findRecent(480854L)).isNull()
     }
 
     @Test
@@ -494,7 +499,7 @@ class JmRepositoryTest {
 
     @Test
     fun `adding to library falls back to the network when nothing is cached locally`() = runTest {
-        // 普通搜索结果：本地既没有书库记录也没有最近浏览记录
+        // 普通搜索结果：本地既没有书库成员也没有基础数据缓存
         val result = runCatching { repo.addToLibraryLocalFirst(111111L) }
 
         // 回落到了网络，而本测试的客户端禁止联网，所以必然是失败

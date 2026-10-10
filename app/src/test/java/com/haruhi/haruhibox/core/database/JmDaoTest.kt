@@ -7,6 +7,7 @@ import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
+import com.haruhi.haruhibox.core.database.entity.JmLibraryEntity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -24,6 +25,10 @@ import org.robolectric.annotation.Config
  *
  * 注意标签参数是 `tagsCsv`（逗号分隔）不是单个标签：多选标签是 **OR** 语义，
  * 对应参考实现 `applyTagFilter` 的动态 OR 拼接。
+ *
+ * v3 起"在书库"= 基础表有一行 + `t_jm_library` 有一行成员记录；
+ * 书库列表/详情/计数全部按这两张表拼接，所以下面凡是测书库语义的用例
+ * 都用 [seed library album][seedLibraryAlbum] 一次写两行。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -42,25 +47,41 @@ class JmDaoTest {
     @After
     fun tearDown() = db.close()
 
+    /** 基础数据 + 书库成员各写一行："这本在书库里"的完整形态。 */
+    private suspend fun seedLibraryAlbum(
+        id: Long,
+        name: String,
+        createTime: String? = null,
+        collected: Boolean? = null,
+        author: String? = null,
+        tags: String? = null,
+        description: String? = null,
+    ) {
+        db.jmAlbumDao().insertIgnore(
+            JmAlbumEntity(
+                id = id,
+                name = name,
+                collected = collected,
+                author = author,
+                tags = tags,
+                description = description,
+            ),
+        )
+        db.jmAlbumDao().insertLibraryRow(JmLibraryEntity(albumId = id, createTime = createTime))
+    }
+
     /**
      * 书库分页：**按入库时间倒序**（用户要求第 2 点）。
      *
-     * `create_time` 才是"入库时间"——刷新详情只会改 `modify_time`，
-     * 所以排序不再看收藏标记，也不再被刷新动作影响。
+     * `t_jm_library.create_time` 才是"入库时间"——刷新详情只会改基础数据，
+     * 所以排序不看收藏标记，也不会被刷新动作影响。
      */
     @Test
     fun `library pagination returns stable slices ordered by added time`() = runTest {
         val dao = db.jmAlbumDao()
         // 5 本：id 1..5，入库时间递增（id 5 最新）
         (1L..5L).forEach { id ->
-            dao.insertIgnore(
-                JmAlbumEntity(
-                    id = id,
-                    name = "本子$id",
-                    collected = id % 2 == 0L,
-                    createTime = "2026-01-0$id",
-                ),
-            )
+            seedLibraryAlbum(id = id, name = "本子$id", createTime = "2026-01-0$id", collected = id % 2 == 0L)
         }
 
         val firstPage = dao.observeLibrary(null, null, null, "", null, limit = 2, offset = 0).first()
@@ -75,22 +96,23 @@ class JmDaoTest {
     @Test
     fun `refreshing an album does not change its place in the library`() = runTest {
         val dao = db.jmAlbumDao()
-        dao.insertIgnore(JmAlbumEntity(id = 1, name = "旧的", createTime = "2026-01-01"))
-        dao.insertIgnore(JmAlbumEntity(id = 2, name = "新的", createTime = "2026-01-02"))
+        seedLibraryAlbum(id = 1, name = "旧的", createTime = "2026-01-01")
+        seedLibraryAlbum(id = 2, name = "新的", createTime = "2026-01-02")
 
-        // 刷新旧的那本：只改 modify_time
-        dao.update(JmAlbumEntity(id = 1, name = "旧的", createTime = "2026-01-01", modifyTime = "2026-06-01"))
+        // 刷新旧的那本：基础数据整行替换（保留 collected），入库时间在成员表里不受影响
+        dao.replaceAlbum(JmAlbumEntity(id = 1, name = "旧的（刷新后）"))
 
         val page = dao.observeLibrary(null, null, null, "", null, limit = 10, offset = 0).first()
         assertThat(page.map { it.id }).containsExactly(2L, 1L).inOrder()
+        assertThat(page.first { it.id == 1L }.name).isEqualTo("旧的（刷新后）")
     }
 
     @Test
     fun `library count matches the same filters`() = runTest {
+        seedLibraryAlbum(id = 1, name = "海贼王", author = "尾田", collected = true)
+        seedLibraryAlbum(id = 2, name = "火影", author = "岸本", collected = false)
+        seedLibraryAlbum(id = 3, name = "海贼王外传", author = "尾田", collected = false)
         val dao = db.jmAlbumDao()
-        dao.insertIgnore(JmAlbumEntity(id = 1, name = "海贼王", author = "尾田", collected = true))
-        dao.insertIgnore(JmAlbumEntity(id = 2, name = "火影", author = "岸本", collected = false))
-        dao.insertIgnore(JmAlbumEntity(id = 3, name = "海贼王外传", author = "尾田", collected = false))
 
         assertThat(dao.observeLibraryCount(null, null, null, "", null).first()).isEqualTo(3)
         assertThat(dao.observeLibraryCount("海贼", null, null, "", null).first()).isEqualTo(2)
@@ -101,8 +123,8 @@ class JmDaoTest {
     @Test
     fun `keyword search also matches the jm id`() = runTest {
         val dao = db.jmAlbumDao()
-        dao.insertIgnore(JmAlbumEntity(id = 480854, name = "标题"))
-        dao.insertIgnore(JmAlbumEntity(id = 123, name = "别的"))
+        seedLibraryAlbum(id = 480854, name = "标题")
+        seedLibraryAlbum(id = 123, name = "别的")
 
         val hit = dao.observeLibrary("480854", null, null, "", null, 10, 0).first()
         assertThat(hit.map { it.id }).containsExactly(480854L)
@@ -112,9 +134,9 @@ class JmDaoTest {
     fun `tag filter matches any of the selected tags`() = runTest {
         val dao = db.jmAlbumDao()
         // tags 列存的是 JSON 数组字符串（与参考实现一致）
-        dao.insertIgnore(JmAlbumEntity(id = 1, name = "A", tags = """["标签一","标签二"]"""))
-        dao.insertIgnore(JmAlbumEntity(id = 2, name = "B", tags = """["标签三"]"""))
-        dao.insertIgnore(JmAlbumEntity(id = 3, name = "C", tags = null))
+        seedLibraryAlbum(id = 1, name = "A", tags = """["标签一","标签二"]""")
+        seedLibraryAlbum(id = 2, name = "B", tags = """["标签三"]""")
+        seedLibraryAlbum(id = 3, name = "C", tags = null)
 
         // 单个标签
         assertThat(dao.observeLibrary(null, null, null, "标签一", null, 10, 0).first().map { it.id })
@@ -145,12 +167,28 @@ class JmDaoTest {
         val dao = db.jmAlbumDao()
         dao.insertIgnore(JmAlbumEntity(id = 1, name = "标题", description = "简介", collected = false))
 
-        dao.setCollected(1, true, "2026-01-01")
+        dao.setCollected(1, true)
 
         val album = dao.findById(1)!!
         assertThat(album.collected).isTrue()
         assertThat(album.name).isEqualTo("标题")
         assertThat(album.description).isEqualTo("简介")
+    }
+
+    /**
+     * "移出书库"只删成员行：基础数据（永久缓存）必须保留，
+     * 这样详情页/阅读器离线还能打开（用户要求：缓存表不因任何操作删除）。
+     */
+    @Test
+    fun `moving an album out of the library keeps its base data`() = runTest {
+        val dao = db.jmAlbumDao()
+        seedLibraryAlbum(id = 1, name = "本子", createTime = "2026-01-01")
+
+        dao.deleteLibraryRows(listOf(1))
+
+        assertThat(dao.findLibraryAlbum(1)).isNull()
+        assertThat(dao.findById(1)?.name).isEqualTo("本子")
+        assertThat(dao.existingIds(listOf(1))).isEmpty()
     }
 
     @Test
@@ -251,7 +289,7 @@ class JmDaoTest {
     fun `deleting a favorite removes links but keeps the album record`() = runTest {
         val albumDao = db.jmAlbumDao()
         val favoriteDao = db.jmFavoriteDao()
-        albumDao.insertIgnore(JmAlbumEntity(id = 1, name = "本子"))
+        seedLibraryAlbum(id = 1, name = "本子")
         val favoriteId = favoriteDao.insert(JmFavoriteEntity(name = "夹子"))
         favoriteDao.link(JmFavoriteAlbumEntity(favoriteId = favoriteId, albumId = 1))
 
@@ -260,15 +298,15 @@ class JmDaoTest {
         assertThat(favoriteDao.all()).isEmpty()
         assertThat(favoriteDao.favoriteIdsOf(1)).isEmpty()
         // 书库记录与文件不受影响（§9 第 6 条）
-        assertThat(albumDao.findById(1)).isNotNull()
+        assertThat(albumDao.findLibraryAlbum(1)).isNotNull()
     }
 
     @Test
     fun `library can be filtered by favorite folder`() = runTest {
         val albumDao = db.jmAlbumDao()
         val favoriteDao = db.jmFavoriteDao()
-        albumDao.insertIgnore(JmAlbumEntity(id = 1, name = "A"))
-        albumDao.insertIgnore(JmAlbumEntity(id = 2, name = "B"))
+        seedLibraryAlbum(id = 1, name = "A")
+        seedLibraryAlbum(id = 2, name = "B")
         val favoriteId = favoriteDao.insert(JmFavoriteEntity(name = "夹子"))
         favoriteDao.link(JmFavoriteAlbumEntity(favoriteId = favoriteId, albumId = 2))
 
@@ -280,18 +318,14 @@ class JmDaoTest {
      * 夹内排序：**按"加入这个收藏夹"的时间倒序**（用户要求第 4 点）。
      *
      * 与书库的入库顺序刻意相反：id=1 先入库但后加进夹子，所以它在 id=2 后面。
-     * 书库本身仍然按 `t_jm_album.create_time` 倒序。
+     * 书库本身仍然按 `t_jm_library.create_time` 倒序。
      */
     @Test
     fun `albums inside a favorite are ordered by the time they joined that folder`() = runTest {
         val albumDao = db.jmAlbumDao()
         val favoriteDao = db.jmFavoriteDao()
-        albumDao.insertIgnore(
-            JmAlbumEntity(id = 1, name = "先入库后加夹", createTime = "2026-01-01 10:00:00"),
-        )
-        albumDao.insertIgnore(
-            JmAlbumEntity(id = 2, name = "后入库先加夹", createTime = "2026-01-02 10:00:00"),
-        )
+        seedLibraryAlbum(id = 1, name = "先入库后加夹", createTime = "2026-01-01 10:00:00")
+        seedLibraryAlbum(id = 2, name = "后入库先加夹", createTime = "2026-01-02 10:00:00")
         val favoriteId = favoriteDao.insert(JmFavoriteEntity(name = "夹子"))
         favoriteDao.link(
             JmFavoriteAlbumEntity(favoriteId = favoriteId, albumId = 1, createTime = "2026-01-03 10:00:00"),

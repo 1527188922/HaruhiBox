@@ -1,7 +1,6 @@
 package com.haruhi.haruhibox.feature.jm.data
 
 import com.haruhi.haruhibox.core.database.JmChapterImageDao
-import com.haruhi.haruhibox.core.database.JmRecentAlbumDao
 import com.haruhi.haruhibox.core.database.PlaybackPositionDao
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
@@ -26,7 +25,6 @@ import kotlinx.coroutines.flow.map
 class JmReadingRepository(
     private val positionDao: PlaybackPositionDao,
     private val chapterDao: JmChapterImageDao,
-    private val recentDao: JmRecentAlbumDao,
 ) {
 
     // ------------------------------------------------------------------
@@ -99,9 +97,6 @@ class JmReadingRepository(
      */
     fun observeLastRead(): Flow<ReadingPosition?> =
         positionDao.observeLastForKind(KIND).map { it?.toReadingPosition() }
-
-    /** 最近浏览表里取本子信息（书库可能没有这本，例如只在最近浏览里读过）。 */
-    suspend fun albumForDisplay(albumId: Long) = recentDao.findById(albumId)
 
     private fun PlaybackPositionEntity.toReadingPosition() = ReadingPosition(
         albumId = bizKey.toLongOrNull() ?: 0L,

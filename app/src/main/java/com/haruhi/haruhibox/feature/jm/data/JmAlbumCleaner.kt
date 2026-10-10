@@ -17,11 +17,15 @@ import timber.log.Timber
  * | `files/library/jm/<本子目录>` | 章节图片 | [JmRepository.deleteAlbumFiles] |
  * | 系统下载目录 `Download/HaruHiBox` | 导出的 zip / pdf | [JmExportManager.deleteOutputs] |
  * | Coil 磁盘缓存 `files/covers` | 封面 | [CoverCache.evict] |
- * | 数据库四张表 | 书库 / 章节清单 / 收藏关联 / 阅读位置 | [JmRepository.deleteAlbums] |
+ * | 数据库 | 书库成员 / 章节清单 / 收藏关联 / 阅读位置 | [JmRepository.deleteAlbums] |
  *
- * 两个入口的差别只有"删不删数据库记录"：
+ * 注意：**漫画基础数据表（`t_jm_album`）不在这里删**——它是永久缓存，
+ * 移出书库后详情页/阅读器仍能离线打开；封面缓存也不以它为依据
+ * （它不做展示，展示来自书库、收藏夹、最近预览三个入口）。
+ *
+ * 两个入口的差别只有"删不删书库成员关系"：
  * - **删除本地文件**：只清前三处，保留书库记录（用户要求第 6 点）；
- * - **从书库移除**：四处全清（用户要求第 7 点）。
+ * - **从书库移除**：库表成员关系 + 文件 + 成品全清（用户要求第 7 点）。
  *
  * ## 封面什么时候才该清（用户第八轮要求第 3 点）
  *

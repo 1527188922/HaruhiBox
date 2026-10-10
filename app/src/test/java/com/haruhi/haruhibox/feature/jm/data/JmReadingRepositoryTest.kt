@@ -44,7 +44,6 @@ class JmReadingRepositoryTest {
         reading = JmReadingRepository(
             positionDao = db.playbackPositionDao(),
             chapterDao = db.jmChapterDao(),
-            recentDao = db.jmRecentAlbumDao(),
         )
     }
 

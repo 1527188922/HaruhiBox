@@ -6,10 +6,19 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
- * `t_jm_album`：JM 本子。主键 `id` = JM 号（**非自增**）。
+ * `t_jm_album`：**漫画基础数据表**（永久缓存）。
  *
- * 字段对应当前 SQLite 表（`JmAlbumSqlite`）。字符串时间戳保持参考实现的格式，
- * 不做类型转换，避免迁移时出现语义差异。
+ * 在线 `/album` 拿到的详情都落在这里。它**不表达**"在不在书库"，
+ * 也**不表达**"看没看过"：
+ * - 书库成员关系在 [JmLibraryEntity]（`t_jm_library`），只存 `album_id` 与入库时间；
+ * - 最近预览在 [JmRecentAlbumEntity]（`t_jm_recent_album`），只存 `id` 与浏览时间。
+ *
+ * 两张关联表都通过 `id` 引用本表，列表/详情渲染时与本表拼接。所以
+ * **清空最近浏览、移出书库都不会删除这里的任何数据**——这样"请求漫画详情接口"
+ * 与"加入最近预览"才能真正解耦，同时保留下载页、阅读器、精确匹配搜索
+ * 依赖的本地详情缓存。
+ *
+ * 字段只保留界面/逻辑真正使用到的列（其余对齐参考实现但本工程没用到的一律去掉）。
  */
 @Entity(
     tableName = "t_jm_album",
@@ -22,34 +31,33 @@ data class JmAlbumEntity(
     @PrimaryKey @ColumnInfo(name = "id") val id: Long,
     @ColumnInfo(name = "name") val name: String? = null,
     @ColumnInfo(name = "album_folder_name") val albumFolderName: String? = null,
-    @ColumnInfo(name = "images") val images: String? = null,
-    @ColumnInfo(name = "add_time") val addTime: String? = null,
     @ColumnInfo(name = "description") val description: String? = null,
-    @ColumnInfo(name = "total_views") val totalViews: String? = null,
-    @ColumnInfo(name = "likes") val likes: String? = null,
+    /** 章节列表的权威来源（JSON 字符串，见 `JmRepository.chaptersOf`）。 */
     @ColumnInfo(name = "series") val series: String? = null,
-    @ColumnInfo(name = "series_id") val seriesId: String? = null,
-    @ColumnInfo(name = "comment_total") val commentTotal: String? = null,
     @ColumnInfo(name = "author") val author: String? = null,
     @ColumnInfo(name = "tags") val tags: String? = null,
-    @ColumnInfo(name = "works") val works: String? = null,
-    @ColumnInfo(name = "actors") val actors: String? = null,
-    @ColumnInfo(name = "related_list") val relatedList: String? = null,
-    @ColumnInfo(name = "liked") val liked: Boolean? = null,
-    @ColumnInfo(name = "is_favorite") val isFavorite: Boolean? = null,
     /**
-     * 本地收藏标记（仅存本库；重新拉取 JM 数据不覆盖）。
+     * 本地收藏标记（重新拉取 JM 数据不覆盖）。
      *
-     * **注意**：不要给这个字段设默认值，否则更新已有记录时会把收藏状态重置
-     * （参考实现 `JmAlbumSqlite` 的注释明确写了这一点）。
+     * **注意**：不要给这个字段设默认值，否则更新已有记录时会把收藏状态重置。
+     * 它属于"书库语义"：移出书库时会被清零（与旧行为一致——旧实现直接删行）。
      */
     @ColumnInfo(name = "collected") val collected: Boolean? = null,
-    @ColumnInfo(name = "is_aids") val isAids: Boolean? = null,
-    @ColumnInfo(name = "price") val price: String? = null,
-    @ColumnInfo(name = "purchased") val purchased: String? = null,
-    @ColumnInfo(name = "raw") val raw: String? = null,
+)
+
+/**
+ * `t_jm_library`：**书库成员表**。只存"这本在书库里"与首次入库时间。
+ *
+ * 为什么不把成员关系放在基础表上：基础表是永久缓存，而"移出书库"要能把这本
+ * 从书库列表里去掉——成员关系必须可删、且删掉后基础数据仍在。
+ * 书库列表渲染时与 [JmAlbumEntity] 按 `album_id` 拼接。
+ *
+ * `create_time` 是**第一次入库时间**，书库默认排序用它（刷新详情不改变它）。
+ */
+@Entity(tableName = "t_jm_library")
+data class JmLibraryEntity(
+    @PrimaryKey @ColumnInfo(name = "album_id") val albumId: Long,
     @ColumnInfo(name = "create_time") val createTime: String? = null,
-    @ColumnInfo(name = "modify_time") val modifyTime: String? = null,
 )
 
 /**
@@ -120,17 +128,13 @@ data class JmFavoriteAlbumEntity(
 )
 
 /**
- * `t_jm_recent_album`：**最近浏览**。凡是点进过详情页的本子都在这里，
- * 再次进入只刷新 [viewedTime]，不新增行。
+ * `t_jm_recent_album`：**最近预览**。只记录"进过详情页/阅读页"这一事实与浏览时间。
  *
- * 字段与 [JmAlbumEntity] 保持一致（详情页可以用同一套渲染逻辑，
- * 也能在"没加入书库"的情况下完整展示在线信息），另外多一个 [viewedTime]。
+ * 内容字段全部去掉：渲染时与 [JmAlbumEntity]（基础数据表）按 `id` 拼接，
+ * 所以条目不会因为"有没有联网数据"而分叉，接口数据也只存一份。
  *
- * **为什么不复用 `t_jm_album` 加一列**：
- * 书库与"最近浏览"是两个不同的集合。用户从搜索点进一本**不想入库**的本子看详情，
- * 不应该污染书库列表（用户明确要求"点详情不等于加入书库"）；
- * 而 `collected` 是书库语义，在最近浏览里没有意义。
- * 两张表通过 `id`（JM 号）关联，不做外键：详情页要能在"只在最近浏览里"的状态下独立工作。
+ * 写入**只发生在进入详情页或阅读页时**（`JmRepository.touchRecent`）：
+ * 拉取 `/album` 接口本身不写这张表（用户要求：请求接口 ≠ 加入最近预览）。
  */
 @Entity(
     tableName = "t_jm_recent_album",
@@ -138,29 +142,6 @@ data class JmFavoriteAlbumEntity(
 )
 data class JmRecentAlbumEntity(
     @PrimaryKey @ColumnInfo(name = "id") val id: Long,
-    @ColumnInfo(name = "name") val name: String? = null,
-    @ColumnInfo(name = "album_folder_name") val albumFolderName: String? = null,
-    @ColumnInfo(name = "images") val images: String? = null,
-    @ColumnInfo(name = "add_time") val addTime: String? = null,
-    @ColumnInfo(name = "description") val description: String? = null,
-    @ColumnInfo(name = "total_views") val totalViews: String? = null,
-    @ColumnInfo(name = "likes") val likes: String? = null,
-    @ColumnInfo(name = "series") val series: String? = null,
-    @ColumnInfo(name = "series_id") val seriesId: String? = null,
-    @ColumnInfo(name = "comment_total") val commentTotal: String? = null,
-    @ColumnInfo(name = "author") val author: String? = null,
-    @ColumnInfo(name = "tags") val tags: String? = null,
-    @ColumnInfo(name = "works") val works: String? = null,
-    @ColumnInfo(name = "actors") val actors: String? = null,
-    @ColumnInfo(name = "related_list") val relatedList: String? = null,
-    @ColumnInfo(name = "liked") val liked: Boolean? = null,
-    @ColumnInfo(name = "is_favorite") val isFavorite: Boolean? = null,
-    @ColumnInfo(name = "is_aids") val isAids: Boolean? = null,
-    @ColumnInfo(name = "price") val price: String? = null,
-    @ColumnInfo(name = "purchased") val purchased: String? = null,
-    @ColumnInfo(name = "raw") val raw: String? = null,
-    @ColumnInfo(name = "create_time") val createTime: String? = null,
-    @ColumnInfo(name = "modify_time") val modifyTime: String? = null,
-    /** 浏览时间（毫秒）。**只在点进详情页时更新**；刷新详情不改它。 */
+    /** 浏览时间（毫秒）。**只在点进详情页/阅读页时更新**；刷新详情不改它。 */
     @ColumnInfo(name = "viewed_time") val viewedTime: Long = System.currentTimeMillis(),
 )

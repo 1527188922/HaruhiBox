@@ -4,6 +4,8 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
+import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
+import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.storage.LibraryDirs
 import com.haruhi.haruhibox.feature.jm.api.JmAlbumDto
 import com.haruhi.haruhibox.feature.jm.api.JmApiClient
@@ -21,12 +23,16 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * 最近浏览 + "点详情不入库" + 收藏夹数量刷新的验收测试。
+ * 最近预览 + "点详情不入库" + 收藏夹数量刷新的验收测试。
  *
  * 对应用户提出的改动：
  * - 第 1 点：收藏之后收藏页数量要更新（[favorite count flow emits after collecting]）；
  * - 第 2 点：点详情不等于加入书库（[touching recent does not add to the library]）；
- * - 第 3、4 点：最近浏览按浏览时间倒序、刷新不改浏览时间。
+ * - 第 3、4 点：最近预览按浏览时间倒序、刷新不改浏览时间。
+ *
+ * 本次修复的核心：**请求 `/album` ≠ 加入最近预览**。
+ * 详情数据落在永久缓存（基础数据表 `t_jm_album`）里，最近预览（`t_jm_recent_album`）
+ * 只在进入详情页/阅读页时写入，两张表通过 id 拼接。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -66,47 +72,69 @@ class JmRecentAndFavoriteTest {
     fun `touching recent does not add to the library`() = runTest {
         repo.touchRecent(480854L)
 
-        // 书库必须还是空的
+        // 书库成员与基础数据都必须还是空的
         assertThat(repo.findAlbum(480854L)).isNull()
         assertThat(db.jmAlbumDao().all()).isEmpty()
-        // 但最近浏览里已经有了
+        // 但最近预览里已经有了
         assertThat(repo.findRecent(480854L)).isNotNull()
     }
 
+    /**
+     * 本次修复的核心用例：**缓存详情数据 ≠ 加入最近预览**。
+     *
+     * 搜索精确匹配、详情页内部加载都可能把 `/album` 结果写进基础数据表（永久缓存），
+     * 但这不该让这本出现在"最近"列表——只有真正进过详情页/阅读页才算看过。
+     */
     @Test
-    fun `saveToRecent does not add to the library either`() = runTest {
-        // 模拟"进入详情页后联网拿到数据"：只写最近浏览，不写书库
-        repo.saveToRecent(albumFixture(480854, "只看不入库"))
+    fun `caching the detail does not add to the recent list`() = runTest {
+        // 模拟搜索等路径把在线详情落进基础数据表（直接写 dao）
+        db.jmAlbumDao().insertIgnore(albumEntity(480854, "只看不入库"))
 
+        assertThat(repo.findRecent(480854L)).isNull()
+        assertThat(repo.observeRecentAlbums().first()).isEmpty()
+        // 缓存存在：点进详情页可以离线秒开；但没有入库
+        assertThat(repo.localAlbumDetail(480854L)!!.fromLibrary).isFalse()
         assertThat(repo.findAlbum(480854L)).isNull()
-        assertThat(repo.findRecent(480854L)!!.name).isEqualTo("只看不入库")
     }
 
     @Test
-    fun `addToLibrary writes both the library and recent`() = runTest {
-        // addToLibrary 会先请求网络，这里直接验证 saveAlbum + saveToRecent 的组合语义
-        repo.saveToRecent(albumFixture(480854, "本子"))
+    fun `addToLibrary writes the library but not the recent list`() = runTest {
+        // addToLibrary 会先请求网络，这里直接验证 saveAlbum 的语义：只入库，不写最近
         repo.saveAlbum(albumFixture(480854, "本子"))
 
         assertThat(repo.findAlbum(480854L)).isNotNull()
-        assertThat(repo.findRecent(480854L)).isNotNull()
+        assertThat(repo.findRecent(480854L)).isNull()
     }
 
-    // ---------------- 第 3、4 点：最近浏览 ----------------
+    // ---------------- 第 3、4 点：最近预览 ----------------
+
+    /** 最近列表的内容直接来自基础数据表（不复制、不依赖"回填"）。 */
+    @Test
+    fun `recent list renders the cached base data`() = runTest {
+        repo.saveAlbum(albumFixture(480854, "在书库的本子"))
+        val library = repo.findAlbum(480854L)!!
+
+        repo.touchRecent(480854L)
+
+        val recent = repo.observeRecentAlbums().first().single()
+        assertThat(recent.name).isEqualTo(library.name)
+        assertThat(recent.albumFolderName).isEqualTo(library.albumFolderName)
+        assertThat(recent.series).isEqualTo(library.series)
+    }
 
     @Test
     fun `recent list is ordered by viewed time descending`() = runTest {
-        repo.saveToRecent(albumFixture(1L, "第一个"))
-        repo.saveToRecent(albumFixture(2L, "第二个"))
-        repo.saveToRecent(albumFixture(3L, "第三个"))
+        // 内容来自基础数据表；浏览时间来自最近表
+        db.jmAlbumDao().insertIgnore(albumEntity(1L, "第一个"))
+        db.jmAlbumDao().insertIgnore(albumEntity(2L, "第二个"))
+        db.jmAlbumDao().insertIgnore(albumEntity(3L, "第三个"))
+        db.jmRecentAlbumDao().upsert(JmRecentAlbumEntity(1L, 1_000L))
+        db.jmRecentAlbumDao().upsert(JmRecentAlbumEntity(2L, 2_000L))
+        db.jmRecentAlbumDao().upsert(JmRecentAlbumEntity(3L, 3_000L))
 
-        // viewedTime 用 System.currentTimeMillis()，同一毫秒内可能相等，所以显式错开
-        db.jmRecentAlbumDao().touch(1L, 1_000L)
-        db.jmRecentAlbumDao().touch(2L, 2_000L)
-        db.jmRecentAlbumDao().touch(3L, 3_000L)
-
-        val order = repo.observeRecentAlbums().first().map { it.id }
-        assertThat(order).containsExactly(3L, 2L, 1L).inOrder()
+        val recent = repo.observeRecentAlbums().first()
+        assertThat(recent.map { it.id }).containsExactly(3L, 2L, 1L).inOrder()
+        assertThat(recent.first().name).isEqualTo("第三个")
     }
 
     @Test
@@ -122,152 +150,106 @@ class JmRecentAndFavoriteTest {
         assertThat(repo.findRecent(480854L)!!.viewedTime).isGreaterThan(1_000L)
     }
 
-    // ---------------- 第十三轮：最近浏览的写入不能被对方覆盖 ----------------
-
     /**
-     * 已经在书库、但最近浏览里还没有记录的本子：进详情页时要**直接用书库数据**写完整记录，
-     * 不能只写一条"只有 JM 号"的骨架行——列表里那种行看着不像刚点过的那本
-     * （用户第十三轮要求第 1 点）。
+     * "只进过页面、还没缓存到在线数据"（例如首次进入时离线）的条目仍要显示，
+     * 界面回落成 "JM<id>"；稍后基础数据缓存到位后，同一行自动显示完整内容。
      */
     @Test
-    fun `touching an album in the library writes a complete recent row`() = runTest {
-        repo.saveAlbum(albumFixture(480854, "在书库的本子"))
-        val library = repo.findAlbum(480854L)!!
-
+    fun `a recent row without cached data still shows and picks up content later`() = runTest {
         repo.touchRecent(480854L)
 
-        val recent = repo.findRecent(480854L)!!
-        assertThat(recent.name).isEqualTo("在书库的本子")
-        assertThat(recent.albumFolderName).isEqualTo(library.albumFolderName)
-        assertThat(recent.viewedTime).isGreaterThan(0L)
-    }
+        val before = repo.observeRecentAlbums().first().single()
+        assertThat(before.id).isEqualTo(480854L)
+        assertThat(before.name).isNull()
 
-    /** 早期版本/联网失败留下的骨架行：再次进入时也要补全，别让最近列表长期显示 JM 号。 */
-    @Test
-    fun `touching heals a skeleton row with the library data`() = runTest {
-        repo.touchRecent(480854L)
-        assertThat(repo.findRecent(480854L)!!.name).isNull()
+        // 之后详情页联网成功：内容写进基础表（不是最近表）
+        db.jmAlbumDao().insertIgnore(albumEntity(480854, "拉到数据之后"))
 
-        repo.saveAlbum(albumFixture(480854, "后来入库"))
-
-        repo.touchRecent(480854L)
-
-        assertThat(repo.findRecent(480854L)!!.name).isEqualTo("后来入库")
+        val after = repo.observeRecentAlbums().first().single()
+        assertThat(after.name).isEqualTo("拉到数据之后")
     }
 
     /**
-     * 详情页的两条写入路径必须串行（见 `JmRepository.touchRecent` 的注释）：
-     * 进页面记下的浏览时间，随后"联网成功写内容"时**必须原样保留**，
-     * 否则刚更新的时间会被旧值覆盖，最近列表第一条就不会变成刚点过的这本。
+     * 进入详情页记下的浏览时间，不会被随后"详情联网成功写内容"覆盖——
+     * 现在两条写入路径彻底分离（最近表只写时间、基础表只写内容），不存在互相覆盖。
      */
     @Test
-    fun `a later save to recent keeps the time written when entering the page`() = runTest {
+    fun `caching the detail later keeps the viewed time`() = runTest {
         repo.touchRecent(480854L)
         val touchedAt = repo.findRecent(480854L)!!.viewedTime
 
-        // 详情页联网成功：写内容，但保留浏览时间
-        repo.saveToRecent(albumFixture(480854, "联网结果"))
+        // 模拟详情页联网成功：写基础数据
+        db.jmAlbumDao().insertIgnore(albumEntity(480854, "联网结果"))
 
-        val recent = repo.findRecent(480854L)!!
-        assertThat(recent.name).isEqualTo("联网结果")
-        assertThat(recent.viewedTime).isEqualTo(touchedAt)
+        assertThat(repo.findRecent(480854L)!!.viewedTime).isEqualTo(touchedAt)
+        assertThat(repo.observeRecentAlbums().first().single().name).isEqualTo("联网结果")
     }
 
     @Test
-    fun `refresh updates recent fields but keeps the viewed time`() = runTest {
-        repo.saveToRecent(albumFixture(480854, "旧标题"))
+    fun `refresh updates cached content but keeps the viewed time`() = runTest {
+        db.jmAlbumDao().insertIgnore(albumEntity(480854, "旧标题"))
+        repo.touchRecent(480854L)
         val viewedAt = repo.findRecent(480854L)!!.viewedTime
 
-        // 模拟点刷新：拿到新的在线数据
-        repo.saveToRecent(albumFixture(480854, "新标题"))
+        // 模拟点刷新：拿到新的在线数据（整行刷新基础数据）
+        db.jmAlbumDao().replaceAlbum(albumEntity(480854, "新标题"))
 
-        val recent = repo.findRecent(480854L)!!
-        assertThat(recent.name).isEqualTo("新标题")
-        // **浏览时间不变**（用户要求第 4 点：浏览时间只在点进详情页时更新）
-        assertThat(recent.viewedTime).isEqualTo(viewedAt)
+        assertThat(repo.observeRecentAlbums().first().single().name).isEqualTo("新标题")
+        // **浏览时间不变**（用户要求第 4 点：浏览时间只在进详情页时更新）
+        assertThat(repo.findRecent(480854L)!!.viewedTime).isEqualTo(viewedAt)
     }
 
     @Test
-    fun `refresh does not create a library row for an album that is not in the library`() = runTest {
-        repo.saveToRecent(albumFixture(480854, "只看不入库"))
-        repo.saveToRecent(albumFixture(480854, "刷新后"))
+    fun `refreshing does not create a library row for an album that is not in the library`() = runTest {
+        // 刷新只更新基础数据缓存，不产生书库成员
+        db.jmAlbumDao().insertIgnore(albumEntity(480854, "只看不入库"))
 
         assertThat(repo.findAlbum(480854L)).isNull()
     }
 
     @Test
-    fun `recent album carries the same fields as the library album`() = runTest {
-        val dto = albumFixture(480854, "完整字段")
-        repo.saveToRecent(dto)
-        repo.saveAlbum(dto)
-
-        val library = repo.findAlbum(480854L)!!
-        val recent = repo.findRecent(480854L)!!
-
-        assertThat(recent.name).isEqualTo(library.name)
-        assertThat(recent.albumFolderName).isEqualTo(library.albumFolderName)
-        assertThat(recent.series).isEqualTo(library.series)
-        assertThat(recent.tags).isEqualTo(library.tags)
-        assertThat(recent.author).isEqualTo(library.author)
-        assertThat(recent.description).isEqualTo(library.description)
-    }
-
-    @Test
-    fun `local detail prefers the library over recent`() = runTest {
-        repo.saveToRecent(albumFixture(480854, "最近浏览版本"))
+    fun `local detail prefers the library over the cache`() = runTest {
         repo.saveAlbum(albumFixture(480854, "书库版本"))
 
         val local = repo.localAlbumDetail(480854L)!!
         assertThat(local.fromLibrary).isTrue()
         assertThat(local.album.name).isEqualTo("书库版本")
+
+        // 移出书库后：缓存还在（永久保留），但从"已入库"变成"只在缓存里"
+        repo.deleteAlbums(listOf(480854L))
+        val cached = repo.localAlbumDetail(480854L)!!
+        assertThat(cached.fromLibrary).isFalse()
+        assertThat(cached.album.name).isEqualTo("书库版本")
     }
 
     @Test
-    fun `local detail falls back to recent when not in the library`() = runTest {
-        repo.saveToRecent(albumFixture(480854, "只在最近浏览"))
+    fun `local detail falls back to the cache when not in the library`() = runTest {
+        db.jmAlbumDao().insertIgnore(albumEntity(480854, "只在缓存里"))
 
         val local = repo.localAlbumDetail(480854L)!!
         assertThat(local.fromLibrary).isFalse()
-        assertThat(local.album.name).isEqualTo("只在最近浏览")
-        // 最近浏览里没有收藏语义
+        assertThat(local.album.name).isEqualTo("只在缓存里")
+        // 未入库、未收藏：没有收藏语义
         assertThat(local.album.collected).isNull()
     }
 
-    @Test
-    fun `local detail returns null when neither table has the album`() = runTest {
-        assertThat(repo.localAlbumDetail(999L)).isNull()
-    }
-
     /**
-     * 进入详情页时先建的"骨架行"不能被当成"本地已有数据"。
-     *
-     * 真机/模拟器实测：从搜索结果点进一本**没入库**的漫画时，
-     * `touchRecent` 会先写一条只有 id 的记录，如果详情页据此认为"本地有数据"，
-     * 页面就会显示一个只有 JM 号、"共 0 话"的空壳，**而且永远不会联网**。
+     * 只有最近预览的"骨架记录"（没缓存到在线数据）不能当成"本地详情数据"——
+     * 详情页必须去联网，否则会显示一个只有 JM 号、"共 0 话"的空壳且永远不联网。
      */
     @Test
-    fun `the touch placeholder does not count as local data`() = runTest {
+    fun `a recent placeholder does not count as local detail data`() = runTest {
         repo.touchRecent(480854L)
 
         assertThat(repo.findRecent(480854L)).isNotNull()
-        // 必须返回 null，详情页才会去请求 /album
         assertThat(repo.localAlbumDetail(480854L)).isNull()
-    }
-
-    @Test
-    fun `recent data becomes usable once the album has been fetched`() = runTest {
-        repo.touchRecent(480854L)
-        repo.saveToRecent(albumFixture(480854, "拉到数据之后"))
-
-        val local = repo.localAlbumDetail(480854L)!!
-        assertThat(local.fromLibrary).isFalse()
-        assertThat(local.album.name).isEqualTo("拉到数据之后")
+        assertThat(repo.localAlbumDetail(999L)).isNull()
     }
 
     @Test
     fun `recent can be cleared without touching the library`() = runTest {
         repo.saveAlbum(albumFixture(480854, "在书库"))
-        repo.saveToRecent(albumFixture(480854, "在书库"))
+        repo.touchRecent(480854L)
 
         val cleared = repo.clearRecent()
 
@@ -355,7 +337,8 @@ class JmRecentAndFavoriteTest {
     }
 
     @Test
-    fun `favorite summary marks the default folder`() = runTest {        repo.ensureDefaultFavorite()
+    fun `favorite summary marks the default folder`() = runTest {
+        repo.ensureDefaultFavorite()
         repo.createFavorite("普通夹")
 
         val summaries = repo.observeFavoritesWithCount().first()
@@ -364,6 +347,9 @@ class JmRecentAndFavoriteTest {
     }
 
     // ------------------------------------------------------------------
+
+    /** 基础数据表里的一行（模拟"已经缓存到在线详情"的状态）。 */
+    private fun albumEntity(id: Long, name: String) = JmAlbumEntity(id = id, name = name)
 
     private fun albumFixture(id: Long, name: String) = JmAlbumDto(
         id = id,

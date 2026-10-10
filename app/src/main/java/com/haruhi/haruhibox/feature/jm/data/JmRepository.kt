@@ -10,6 +10,7 @@ import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
+import com.haruhi.haruhibox.core.database.entity.JmLibraryEntity
 import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.jm.JmDefaults
@@ -24,8 +25,6 @@ import com.haruhi.haruhibox.feature.jm.api.JmSearchItemDto
 import com.haruhi.haruhibox.feature.jm.api.JmSeriesDto
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import timber.log.Timber
@@ -71,15 +70,6 @@ class JmRepository(
     private val saveSearchHistory: () -> Boolean = { true },
     private val albumNameMaxBytes: () -> Int = { FileNaming.DEFAULT_ALBUM_NAME_MAX_BYTES },
 ) {
-
-    /**
-     * 最近浏览表的写入锁。
-     *
-     * 见 [touchRecent] 的长注释：这张表有两条"先读后写"的路径
-     * （进页面记浏览时间 / 详情联网成功写内容），不加锁时会互相穿插、
-     * 把刚写进去的浏览时间又覆盖回旧值（用户反馈的"最近第一条不更新"）。
-     */
-    private val recentWriteLock = Mutex()
 
     // ------------------------------------------------------------------
     // 在线搜索
@@ -132,7 +122,8 @@ class JmRepository(
      * - 搜索没结果但详情有 → 最终就只有这一条；
      * - 两边都失败 → 按搜索的失败原因报错（详情失败不报错，它本来就是"试试看"）。
      *
-     * 详情数据顺手写进"最近浏览"，所以点进详情页时**不用再联网**。
+     * 详情数据只写进**基础数据表**（永久缓存），点进详情页时不用再联网；
+     * 但**不写最近预览**——请求接口不等于加入最近预览（用户要求，两者解耦）。
      *
      * 搜索历史记的是**合并之后**的结果（用户要求第 6 点①）：
      * 记合并前的搜索结果的话，点历史记录回显时就看不到置顶的"精确匹配"那一条。
@@ -148,7 +139,7 @@ class JmRepository(
         if (exactId == null) return base
 
         val dto = runCatching { api.album(exactId) }
-            .onSuccess { saveToRecent(it) }
+            .onSuccess { cacheAlbum(it) }
             .getOrNull()
             // 详情查不到就按普通搜索结果收尾（历史仍然要记一条，和以前一样）
             ?: return base.also { recordSearchHistory(it) }
@@ -169,7 +160,8 @@ class JmRepository(
             coverUrl = JmDefaults.buildCoverUrl(exactId),
             tags = dto.tags.orEmpty(),
             updateAt = null,
-            existsLocal = albumDao.findById(exactId) != null,
+            // "已入库"看的是书库成员关系，不是基础数据缓存
+            existsLocal = albumDao.existingIds(listOf(exactId)).isNotEmpty(),
             isExactIdMatch = true,
             raw = JmSearchItemDto(
                 id = exactId.toString(),
@@ -258,118 +250,46 @@ class JmRepository(
     }
 
     // ------------------------------------------------------------------
-    // 本子入库、最近浏览与详情
+    // 本子入库、最近预览与详情
     // ------------------------------------------------------------------
 
     /**
-     * 点进详情页（或阅读器）时调用：**只更新最近浏览的浏览时间**，不写书库。
+     * 点进详情页（或阅读器）时调用：**这是最近预览的唯一写入入口**。
      *
-     * 用户明确要求「点详情不等于加入书库」，所以入书库只发生在
-     * [addToLibrary] / 搜索结果里的「加入书库」按钮。
+     * 用户明确要求「请求漫画详情接口 ≠ 加入最近预览」：
+     * 拉取 `/album` 只写基础数据表（[cacheAlbum]），不碰这张表；
+     * 只有真正进入详情页/阅读页（搜索、书库、收藏夹三处入口 + 阅读器），
+     * 才来这里记一笔浏览时间。
      *
-     * 三种进入路径（搜索、书库、收藏夹）都会走这里，所以浏览时间一致更新；
-     * 阅读器也走这里（用户第八轮要求第 5 点）。
-     *
-     * ## 为什么这里必须和 [saveToRecent] 串行（用户第十三轮要求第 1 点）
-     *
-     * 这张表有**两条**写入路径，而且都是"先读、再写"：
-     * - 本方法：读不到行就 REPLACE 插一条骨架行，读到行就 UPDATE 浏览时间；
-     * - [saveToRecent]（详情页本地没有数据时联网拿到 `/album` 后调用）：
-     *   读出旧行的 `viewed_time`，然后 REPLACE 整行并"保留"那个旧值
-     *   ——这是"刷新不改浏览时间"的要求。
-     *
-     * 两条交错时就会丢更新：`saveToRecent` 先读到**旧**的浏览时间 →
-     * 本方法写进**新**时间 → `saveToRecent` 再拿旧值覆盖整行。
-     * 结果是"刚从详情页出来，最近浏览第一条却还是上一本"。
-     * 什么时候会交错？详情页的联网很快、而本方法的写被主线程/数据库线程池
-     * 推迟了一会儿时就会（真机反馈"有时正常有时不行"正是这个）。
-     * 阅读器只有本方法一条写入路径，所以从来不出问题。
-     *
-     * 加锁让"读—写"整段串行：后进入的那一方一定基于最新状态，谁都不会覆盖谁。
-     *
-     * ## 顺带把记录补全
-     *
-     * 记录不存在、或只有一条早期版本留下的"骨架行"（字段全空、列表里只显示 JM 号）时，
-     * 用书库里的数据直接补成完整记录——书库数据本来就在本地，不需要联网。
-     * 补不上的（书库里也没有这本）才留骨架行，等详情页联网结果来填。
+     * 表里只有 `id` 与 `viewed_time`，一条 REPLACE 天然原子，
+     * 不再需要旧版本那种"读旧时间再保留"的串行化处理。
      */
     suspend fun touchRecent(aid: Long) {
-        val now = System.currentTimeMillis()
-        recentWriteLock.withLock {
-            val existing = recentDao.findById(aid)
-            if (existing != null && !existing.name.isNullOrBlank()) {
-                // 已经有完整记录：只改浏览时间，其它列一个都不动
-                recentDao.touch(aid, now)
-                return@withLock
-            }
-            val fromLibrary = albumDao.findById(aid)?.toRecentEntity(viewedTime = now)
-            val base = fromLibrary ?: existing ?: JmRecentAlbumEntity(
-                id = aid,
-                albumFolderName = FileNaming.albumFolderName(null, aid.toString(), albumNameMaxBytes()),
-            )
-            recentDao.upsert(
-                base.copy(
-                    viewedTime = now,
-                    createTime = existing?.createTime ?: nowText(),
-                    modifyTime = nowText(),
-                ),
-            )
-        }
+        recentDao.upsert(JmRecentAlbumEntity(id = aid, viewedTime = System.currentTimeMillis()))
     }
 
-    /** 把在线详情写进最近浏览表，**保留原有的浏览时间**（刷新按钮用）。 */
-    suspend fun saveToRecent(dto: JmAlbumDto): JmRecentAlbumEntity {
-        val now = System.currentTimeMillis()
-        // 与 touchRecent 串行：这里"读旧时间 + 整行覆盖"才不会把并发写入的新时间吃掉
-        return recentWriteLock.withLock {
-            val existing = recentDao.findById(dto.id)
-            val entity = toRecentEntity(dto).copy(
-                viewedTime = existing?.viewedTime ?: now,
-                createTime = existing?.createTime ?: nowText(),
-                modifyTime = nowText(),
-            )
-            recentDao.upsert(entity)
-            entity
-        }
+    /**
+     * 把在线详情写进**基础数据表**（永久缓存），**保留本地收藏标记**。
+     *
+     * 这是所有 `/album` 拉取路径（详情页加载/刷新、精确匹配搜索、加入书库）的公共落点：
+     * **每次请求成功都会整行刷新基础表**（事务内先删后插，见 `JmAlbumDao.replaceAlbum`），
+     * 同时不写最近预览、不写书库成员——那两件事分别由 [touchRecent] 与 [addToLibrary] 负责。
+     */
+    private suspend fun cacheAlbum(dto: JmAlbumDto) {
+        albumDao.replaceAlbum(toAlbumEntity(dto))
     }
 
-    /** 书库实体 → 最近浏览实体（字段一一对应；`collected` 在最近浏览里没有语义）。 */
-    private fun JmAlbumEntity.toRecentEntity(viewedTime: Long) = JmRecentAlbumEntity(
-        id = id,
-        name = name,
-        albumFolderName = albumFolderName,
-        images = images,
-        addTime = addTime,
-        description = description,
-        totalViews = totalViews,
-        likes = likes,
-        series = series,
-        seriesId = seriesId,
-        commentTotal = commentTotal,
-        author = author,
-        tags = tags,
-        works = works,
-        actors = actors,
-        relatedList = relatedList,
-        liked = liked,
-        isFavorite = isFavorite,
-        isAids = isAids,
-        price = price,
-        purchased = purchased,
-        raw = raw,
-        viewedTime = viewedTime,
-    )
-
-    /** 最近浏览列表（按浏览时间倒序）。 */
-    fun observeRecentAlbums(limit: Int = 60, offset: Int = 0): Flow<List<JmRecentAlbumEntity>> =
+    /** 最近预览列表：按浏览时间倒序，内容与基础数据表拼接（见 DAO 里的 LEFT JOIN）。 */
+    fun observeRecentAlbums(limit: Int = 60, offset: Int = 0): Flow<List<JmAlbumEntity>> =
         recentDao.observeRecent(limit, offset)
 
     fun observeRecentCount(): Flow<Int> = recentDao.observeCount()
 
+    /** 最近预览记录本身（只有 id 与浏览时间）。 */
     suspend fun findRecent(aid: Long): JmRecentAlbumEntity? = recentDao.findById(aid)
 
     /**
-     * 最近浏览里的全部 id。
+     * 最近预览里的全部 id。
      *
      * 清空之前先取一份：清完就查不到"刚才有哪几本"了，
      * 而这几本的封面要不要一起清，正是靠这份名单判断的（见 `JmAlbumCleaner`）。
@@ -381,173 +301,98 @@ class JmRepository(
     suspend fun clearRecent(): Int = recentDao.clear()
 
     /**
-     * 详情页数据来源：**先本地（书库 → 最近浏览），都没有才请求网络**。
+     * 详情页数据来源：**先本地（书库 → 基础数据缓存），都没有才请求网络**。
      *
-     * `null` 表示两处都没有**可用数据**，调用方需要走一次网络。
-     *
-     * **注意最近浏览里的"骨架行"**：进入详情页时会先 [touchRecent] 建一条只有 id 的记录
-     * （这样"最近"页立刻就能看到这本），此时它的字段全是空的。
-     * 如果把它当成"本地已有数据"，详情页就会显示一个只有 JM 号、
-     * "共 0 话"的空壳，并且**永远不会去联网**——实测从搜索结果点进来就是这个现象。
-     * 所以这里要求最近浏览的记录必须**已经有过在线数据**（[hasOnlineData]）才算数。
+     * `null` 表示基础数据表里还没有这本的在线数据，调用方需要走一次网络。
+     * 基础数据只在拿到真实 `/album` 结果时写入，所以不存在旧版本"骨架行冒充数据"的问题；
+     * 而它永不删除，于是"看过一次 → 离线仍可进详情/阅读器"的能力得以保留。
      */
     suspend fun localAlbumDetail(aid: Long): LocalAlbumDetail? {
-        albumDao.findById(aid)?.let { return LocalAlbumDetail(it, fromLibrary = true) }
-        recentDao.findById(aid)
-            ?.takeIf { it.hasOnlineData }
-            ?.let { return LocalAlbumDetail(it.toAlbumEntity(), fromLibrary = false) }
+        albumDao.findLibraryAlbum(aid)?.let { return LocalAlbumDetail(it, fromLibrary = true) }
+        albumDao.findById(aid)?.let { return LocalAlbumDetail(it, fromLibrary = false) }
         return null
     }
 
     /**
-     * 拉取本子详情。
+     * 拉取本子详情：**只缓存基础数据**，不改书库成员、不写最近预览。
      *
-     * @param saveToLibrary 是否写入书库。点详情页时为 false（只进最近浏览）；
-     *        用户点「加入书库」或搜索结果点「加入书库」时为 true。
-     *
-     * 无论哪种情况都会写最近浏览表（用户要求"同时将请求结果存入最近浏览表"）。
+     * 详情页首次加载与「刷新」都走这里；刷新更新的是基础数据，
+     * 书库列表与详情页因为都拼这张表，看到的也是新内容，浏览时间不受影响。
      */
-    suspend fun fetchAlbumDetail(aid: Long, saveToLibrary: Boolean): JmAlbumDto {
+    suspend fun fetchAlbumDetail(aid: Long): JmAlbumDto {
         val dto = api.album(aid)
-        saveToRecent(dto)
-        if (saveToLibrary) saveAlbum(dto)
+        cacheAlbum(dto)
         return dto
     }
 
-    /** 把本子加入书库（先拉一次 `/album`，用于只有 aid 的场景，例如搜索结果）。 */
-    suspend fun addToLibrary(aid: Long): JmAlbumEntity {
-        val dto = api.album(aid)
-        saveToRecent(dto)
-        return saveAlbum(dto)
+    /** 加入书库成员；已存在时保留原入库时间（IGNORE）。 */
+    private suspend fun addLibraryRow(id: Long) {
+        albumDao.insertLibraryRow(JmLibraryEntity(albumId = id, createTime = nowText()))
     }
+
+    /** 把本子加入书库（先拉一次 `/album`，用于只有 aid 的场景，例如搜索结果）。 */
+    suspend fun addToLibrary(aid: Long): JmAlbumEntity = saveAlbum(api.album(aid))
 
     /**
      * 用**已有的**详情数据入库，不再请求网络。
      *
-     * 详情页手里已经有完整的本子数据（本地缓存或刚拉到的），
-     * 收藏时没必要再拉一次 `/album`。之前收藏按钮走的是 [addToLibrary]（含一次网络往返），
-     * 所以"从未收藏过的漫画点收藏"会明显卡一下；取消再收藏时本地已有记录就很快
-     * ——用户反馈的现象正是这个原因。
+     * 详情页手里已经有完整的本子数据（基础数据缓存或刚拉到的），
+     * 收藏时没必要再拉一次 `/album`（之前"从未收藏过的漫画点收藏"会明显卡一下，
+     * 用户反馈的现象正是这个原因）。
      */
-    suspend fun addToLibrary(dto: JmAlbumDto): JmAlbumEntity {
-        saveToRecent(dto)
-        return saveAlbum(dto)
-    }
+    suspend fun addToLibrary(dto: JmAlbumDto): JmAlbumEntity = saveAlbum(dto)
 
     /**
-     * 把内存里的书库实体直接落库（不请求网络）。
+     * 把内存里的实体入库（不请求网络）：写基础数据 + 加书库成员。
      *
-     * 详情页在"未入库"状态下只有最近浏览的副本，它本身就是完整的本子数据，
-     * 直接写书库即可。收藏标记由调用方随后设置。
+     * 详情页在"未入库"状态下手里的数据就来自基础数据表，直接落库即可；
+     * 收藏标记由调用方随后设置。
      */
     suspend fun addToLibrary(album: JmAlbumEntity): JmAlbumEntity {
-        val existing = albumDao.findById(album.id)
-        val now = nowText()
-        if (existing == null) {
-            albumDao.insertIgnore(album.copy(createTime = now, modifyTime = now))
-        } else {
-            albumDao.update(album.copy(collected = existing.collected, modifyTime = now))
-        }
-        return albumDao.findById(album.id) ?: album
+        albumDao.replaceAlbum(album)
+        addLibraryRow(album.id)
+        return albumDao.findLibraryAlbum(album.id) ?: album
     }
 
     /**
      * 搜索结果点「加入书库」：**本地已经有完整详情就不联网**。
      *
-     * 精确匹配那一条本来就是 `/album` 的结果（`searchOnlineByExactId` 已经把它写进最近浏览表），
-     * 再走一遍 [addToLibrary] 会重新请求一次详情接口——用户看到的就是"点一下卡住"
-     * （第十一轮之后的反馈第 1 点）。用户之前看过的本子也一样，最近浏览里就有完整数据。
+     * 精确匹配那一条本来就是 `/album` 的结果（`searchOnlineByExactId` 已经把它
+     * 写进基础数据表），再走一遍 [addToLibrary] 会重新请求一次详情接口
+     * ——用户看到的就是"点一下卡住"。用户之前看过/缓存过的本子也一样，基础数据表里就有完整数据。
      *
      * 只有"本地真的没有"（普通搜索结果、且从没点进去过）才回落到网络。
      */
     suspend fun addToLibraryLocalFirst(aid: Long): JmAlbumEntity {
-        // localAlbumDetail 会先看书库、再看最近浏览；两处都没有才返回 null
+        // localAlbumDetail 会先看书库、再看基础数据缓存；两处都没有才返回 null
         localAlbumDetail(aid)?.let { local ->
             return addToLibrary(local.album)
         }
         return addToLibrary(aid)
     }
 
-    /** 把接口返回的本子写库（不请求网络）。 */
+    /**
+     * 入库（不请求网络）：写基础数据 + 加书库成员；返回书库视角的实体。
+     *
+     * 成员行的 `create_time` 是首次入库时间——**已存在时不动**，
+     * 所以重复入库/刷新详情不会改变它在书库里的排序位置。
+     */
     suspend fun saveAlbum(dto: JmAlbumDto): JmAlbumEntity {
-        val now = nowText()
-        val incoming = toAlbumEntity(dto)
-
-        val existing = albumDao.findById(dto.id)
-        if (existing == null) {
-            albumDao.insertIgnore(incoming.copy(createTime = now, modifyTime = now))
-        } else {
-            // **保留本地的 collected 与 createTime**（参考实现的 delete+insert 也做同样的事）
-            albumDao.update(
-                incoming.copy(
-                    collected = existing.collected,
-                    createTime = existing.createTime ?: now,
-                    modifyTime = now,
-                ),
-            )
-        }
-        return albumDao.findById(dto.id) ?: error("本子入库失败：${dto.id}")
+        cacheAlbum(dto)
+        addLibraryRow(dto.id)
+        return albumDao.findLibraryAlbum(dto.id) ?: error("本子入库失败：${dto.id}")
     }
 
-    /** 接口 DTO → 书库实体。 */
+    /** 接口 DTO → 基础数据实体（只映射界面/逻辑用到的字段）。 */
     private fun toAlbumEntity(dto: JmAlbumDto) = JmAlbumEntity(
         id = dto.id,
         name = dto.name,
         albumFolderName = FileNaming.albumFolderName(dto.name, dto.id.toString(), albumNameMaxBytes()),
-        images = encodeStringList(dto.images),
-        addTime = dto.addTime,
         description = dto.description,
-        totalViews = dto.totalViews,
-        likes = dto.likes,
         // series 原样存 JSON 字符串：详情页的章节列表以它为准（见类注释第 2 条）
         series = dto.series?.let { JmJson.encodeToString(ListSerializer(JmSeriesDto.serializer()), it) },
-        seriesId = dto.seriesId,
-        commentTotal = dto.commentTotal,
         author = encodeStringList(dto.author),
         tags = encodeStringList(dto.tags),
-        works = encodeStringList(dto.works),
-        actors = encodeStringList(dto.actors),
-        relatedList = dto.relatedList?.let {
-            JmJson.encodeToString(
-                ListSerializer(com.haruhi.haruhibox.feature.jm.api.JmRelatedDto.serializer()),
-                it,
-            )
-        },
-        liked = dto.liked,
-        isFavorite = dto.isFavorite,
-        isAids = dto.isAids,
-        price = dto.price,
-        purchased = dto.purchased,
-    )
-
-    /** 接口 DTO → 最近浏览实体（字段与书库实体一致，只是多一个浏览时间）。 */
-    private fun toRecentEntity(dto: JmAlbumDto) = JmRecentAlbumEntity(
-        id = dto.id,
-        name = dto.name,
-        albumFolderName = FileNaming.albumFolderName(dto.name, dto.id.toString(), albumNameMaxBytes()),
-        images = encodeStringList(dto.images),
-        addTime = dto.addTime,
-        description = dto.description,
-        totalViews = dto.totalViews,
-        likes = dto.likes,
-        series = dto.series?.let { JmJson.encodeToString(ListSerializer(JmSeriesDto.serializer()), it) },
-        seriesId = dto.seriesId,
-        commentTotal = dto.commentTotal,
-        author = encodeStringList(dto.author),
-        tags = encodeStringList(dto.tags),
-        works = encodeStringList(dto.works),
-        actors = encodeStringList(dto.actors),
-        relatedList = dto.relatedList?.let {
-            JmJson.encodeToString(
-                ListSerializer(com.haruhi.haruhibox.feature.jm.api.JmRelatedDto.serializer()),
-                it,
-            )
-        },
-        liked = dto.liked,
-        isFavorite = dto.isFavorite,
-        isAids = dto.isAids,
-        price = dto.price,
-        purchased = dto.purchased,
     )
 
     /** 拉取章节详情（图片清单）并入库。返回入库后的图片数。 */
@@ -575,9 +420,11 @@ class JmRepository(
     /** 某章的 `scramble_id`（解扰块数的输入），异常时返回兜底值。 */
     suspend fun scrambleIdOf(chapterId: Long): Long = api.scrambleId(chapterId)
 
-    suspend fun findAlbum(aid: Long): JmAlbumEntity? = albumDao.findById(aid)
+    /** 书库视角读一本（基础数据 + 成员关系）。未入库返回 null。 */
+    suspend fun findAlbum(aid: Long): JmAlbumEntity? = albumDao.findLibraryAlbum(aid)
 
-    fun observeAlbum(aid: Long): Flow<JmAlbumEntity?> = albumDao.observeById(aid)
+    /** 书库视角观察一本（详情页"是否已入库"与阅读器收藏状态用）。 */
+    fun observeAlbum(aid: Long): Flow<JmAlbumEntity?> = albumDao.observeLibraryAlbum(aid)
 
     /**
      * 章节图片清单入库（整章替换）。
@@ -834,7 +681,7 @@ class JmRepository(
         favoriteDao.link(
             JmFavoriteAlbumEntity(favoriteId = target, albumId = albumId, createTime = nowText()),
         )
-        albumDao.setCollected(albumId, true, nowText())
+        albumDao.setCollected(albumId, true)
         return target
     }
 
@@ -842,13 +689,13 @@ class JmRepository(
     suspend fun removeFromFavorite(albumId: Long, favoriteId: Long) {
         favoriteDao.unlink(favoriteId, albumId)
         val remaining = favoriteDao.favoriteIdsOf(albumId)
-        albumDao.setCollected(albumId, remaining.isNotEmpty(), nowText())
+        albumDao.setCollected(albumId, remaining.isNotEmpty())
     }
 
     /** 取消收藏：移出所有收藏夹。 */
     suspend fun uncollect(albumId: Long) {
         favoriteDao.deleteLinksOfAlbum(albumId)
-        albumDao.setCollected(albumId, false, nowText())
+        albumDao.setCollected(albumId, false)
     }
 
     suspend fun favoriteIdsOf(albumId: Long): List<Long> = favoriteDao.favoriteIdsOf(albumId)
@@ -857,7 +704,7 @@ class JmRepository(
     fun observeFavoriteIdsOf(albumId: Long): Flow<List<Long>> = favoriteDao.observeFavoriteIdsOf(albumId)
 
     suspend fun setCollected(albumId: Long, collected: Boolean) =
-        albumDao.setCollected(albumId, collected, nowText())
+        albumDao.setCollected(albumId, collected)
 
     // ------------------------------------------------------------------
     // 书库
@@ -870,7 +717,7 @@ class JmRepository(
      * - `tags` 的多选是 **OR**（命中所选标签之一即可），用 `INSTR(tags, "\"tag\"") > 0`
      *   做子串匹配——因为 `tags` 列存的是 JSON 数组字符串；
      * - **指定收藏夹时不再叠加 `collected` 条件**（收藏夹本身已隐含"已收藏"）；
-     * - 默认按 `createTime` 倒序；本工程把收藏置顶，更符合"内容优先"的入口语义。
+     * - 默认按**首次入库时间**（`t_jm_library.create_time`）倒序。
      */
     fun observeLibrary(
         keyword: String? = null,
@@ -915,15 +762,19 @@ class JmRepository(
     /**
      * 从书库移除：**删掉这本漫画在本地的数据库记录**（用户要求第 7 点）。
      *
-     * 覆盖四张表：
-     * - `t_jm_album`（书库记录本身）
+     * 覆盖的库表：
+     * - `t_jm_library`（书库**成员关系**本身）
      * - `t_jm_chapter_image`（章节图片清单）
      * - `t_jm_favorite_album`（收藏夹关联）
      * - `t_playback_position`（阅读位置）
      *
-     * **`t_jm_recent_album`（最近浏览）刻意不动**（用户要求第 5 点）：
+     * **`t_jm_recent_album`（最近预览）刻意不动**（用户要求第 5 点）：
      * "移出书库"影响的是书库与本地文件，"刚看过什么"是另一件事——
-     * 保留后近期列表里还能看到这本，点进去也能重新加入书库。
+     * 保留后最近列表里还能看到这本，点进去也能重新加入书库。
+     *
+     * **`t_jm_album`（基础数据缓存）也刻意不动**（用户要求：缓存表不因任何操作删除）：
+     * 移出书库后再进详情页/阅读器仍然有完整数据可看；`collected` 属于书库语义，
+     * 这里顺手清零，与旧实现"整行删掉"的效果一致。
      *
      * **本地文件不在这里删**：图片在本子目录、成品在系统下载目录、封面在 Coil 缓存，
      * 三处都要清，由调用方（详情页 / 书库多选）统一编排。
@@ -933,10 +784,10 @@ class JmRepository(
         ids.forEach { id ->
             favoriteDao.deleteLinksOfAlbum(id)
             chapterDao.deleteByAlbum(id)
-            // recentDao.delete(id)
             positionDao?.delete(READING_KIND, id.toString())
+            albumDao.setCollected(id, false)
         }
-        albumDao.deleteByIds(ids)
+        albumDao.deleteLibraryRows(ids)
     }
 
     /**
@@ -972,49 +823,10 @@ class JmRepository(
     fun localSize(albumFolderName: String?): Long =
         albumFolderName?.takeIf { it.isNotBlank() }?.let { dirs.sizeOf(dirs.albumDir(it)) } ?: 0L
 
-    /** 列表用：把最近浏览记录当作书库实体来渲染（字段一致，所以直接映射）。 */
-    private fun JmRecentAlbumEntity.toAlbumEntity() = JmAlbumEntity(
-        id = id,
-        name = name,
-        albumFolderName = albumFolderName,
-        images = images,
-        addTime = addTime,
-        description = description,
-        totalViews = totalViews,
-        likes = likes,
-        series = series,
-        seriesId = seriesId,
-        commentTotal = commentTotal,
-        author = author,
-        tags = tags,
-        works = works,
-        actors = actors,
-        relatedList = relatedList,
-        liked = liked,
-        isFavorite = isFavorite,
-        // 最近浏览里没有收藏语义，留空
-        collected = null,
-        isAids = isAids,
-        price = price,
-        purchased = purchased,
-        raw = raw,
-        createTime = createTime,
-        modifyTime = modifyTime,
-    )
-
     private fun nowText(): String = TEXT_FORMAT.format(LocalDateTime.now())
 
     private fun encodeStringList(list: List<String>?): String? =
         list?.let { JmJson.encodeToString(ListSerializer(String.serializer()), it) }
-
-    /**
-     * 最近浏览的记录里是否已经有**真实的在线数据**。
-     *
-     * [touchRecent] 建的是骨架行（只有 id / 目录名 / 时间），字段全空；
-     * 只有 [saveToRecent] 写过的记录才有标题。详情页靠这个判断要不要联网。
-     */
-    private val JmRecentAlbumEntity.hasOnlineData: Boolean
-        get() = !name.isNullOrBlank()
 
     companion object {
         const val DEFAULT_FAVORITE_NAME = "默认收藏夹"
@@ -1134,8 +946,8 @@ data class ChapterSummary(
  * 详情页的本地数据。
  *
  * [fromLibrary] 区分数据来源：
- * - true：来自书库表，详情页显示"已在书库"；
- * - false：只来自最近浏览表，详情页显示「加入书库」按钮。
+ * - true：已在书库（基础数据 + 成员关系），详情页显示"已在书库"；
+ * - false：只在基础数据缓存里（没入库），详情页显示「加入书库」按钮。
  */
 data class LocalAlbumDetail(
     val album: JmAlbumEntity,

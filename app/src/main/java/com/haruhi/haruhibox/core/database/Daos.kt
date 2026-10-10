@@ -15,6 +15,7 @@ import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
+import com.haruhi.haruhibox.core.database.entity.JmLibraryEntity
 import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.database.entity.PlaybackPositionEntity
@@ -24,32 +25,87 @@ import kotlinx.coroutines.flow.Flow
 // JM 本子
 // ======================================================================
 
+/**
+ * `t_jm_album`（基础数据表）+ `t_jm_library`（书库成员表）。
+ *
+ * 成员表与基础表分开之后：
+ * - **读取书库**（列表 / 详情 / "是否已入库"）都要拼成员表；
+ * - **写入基础数据**（在线详情缓存）不碰成员表；
+ * - "移出书库"只删成员行，基础数据保留（用户要求：缓存表不因任何操作删除）。
+ */
 @Dao
 interface JmAlbumDao {
+
+    // ---------------- 基础数据表（永久缓存） ----------------
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIgnore(album: JmAlbumEntity): Long
 
-    @Update
-    suspend fun update(album: JmAlbumEntity)
+    /** 整行替换（`INSERT OR REPLACE` = 先删后插）；不要在事务外直接调，优先用 [replaceAlbum]。 */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertReplace(album: JmAlbumEntity)
 
+    /**
+     * 刷新基础数据：**事务内先删后插**（用户要求）。
+     *
+     * 每次 `/album` 请求成功都会走到这里，整段替换是原子的：
+     * Android 的 SQLite 支持事务（Room 的 `@Transaction` 会把整个方法包进
+     * BEGIN/END，并在同一连接上串行执行），所以"读旧 `collected` → 删旧行 → 插新行"
+     * 不会与收藏/移出书库等并发写入交错，也不会出现"删了还没插"的中间态。
+     *
+     * 保留本地 `collected`：`/album` 响应里没有这个字段，整行替换时必须自己带过来。
+     */
+    @Transaction
+    suspend fun replaceAlbum(album: JmAlbumEntity) {
+        val collected = findById(album.id)?.collected
+        insertReplace(album.copy(collected = collected ?: album.collected))
+    }
+
+    /** 基础数据（不看是否入库）。 */
     @Query("SELECT * FROM t_jm_album WHERE id = :id")
     suspend fun findById(id: Long): JmAlbumEntity?
 
-    @Query("SELECT * FROM t_jm_album WHERE id = :id")
-    fun observeById(id: Long): Flow<JmAlbumEntity?>
+    @Query("SELECT * FROM t_jm_album")
+    suspend fun all(): List<JmAlbumEntity>
 
-    @Query("SELECT COUNT(*) FROM t_jm_album WHERE id IN (:ids)")
-    suspend fun countExisting(ids: List<Long>): Int
+    // ---------------- 书库成员表 ----------------
 
-    @Query("SELECT id FROM t_jm_album WHERE id IN (:ids)")
+    /** 加入书库成员；已存在时保留原入库时间（IGNORE）。 */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertLibraryRow(row: JmLibraryEntity): Long
+
+    /** 移出书库：只删成员行，基础数据不动。 */
+    @Query("DELETE FROM t_jm_library WHERE album_id IN (:ids)")
+    suspend fun deleteLibraryRows(ids: List<Long>)
+
+    /** 已入库的本子 id（搜索结果"已入库"标识用）。 */
+    @Query("SELECT album_id FROM t_jm_library WHERE album_id IN (:ids)")
     suspend fun existingIds(ids: List<Long>): List<Long>
+
+    /** 书库视角读一本（基础数据 + 成员关系）。未入库返回 null。 */
+    @Query(
+        """
+        SELECT b.* FROM t_jm_album b
+        INNER JOIN t_jm_library l ON l.album_id = b.id
+        WHERE b.id = :id
+        """,
+    )
+    suspend fun findLibraryAlbum(id: Long): JmAlbumEntity?
+
+    @Query(
+        """
+        SELECT b.* FROM t_jm_album b
+        INNER JOIN t_jm_library l ON l.album_id = b.id
+        WHERE b.id = :id
+        """,
+    )
+    fun observeLibraryAlbum(id: Long): Flow<JmAlbumEntity?>
 
     /**
      * 书库列表（含筛选与排序）。
      *
-     * **排序：入库时间倒序**（用户要求第 2 点）——`create_time` 是本子第一次进书库的时间，
-     * 之后刷新详情只会改 `modify_time`，所以用 `create_time` 才是"入库顺序"。
+     * **排序：入库时间倒序**（用户要求第 2 点）——`t_jm_library.create_time` 是本子
+     * 第一次进书库的时间，之后刷新详情只会更新基础数据，所以用它才是"入库顺序"。
      * 时间戳是 `yyyy-MM-dd HH:mm:ss` 文本，字典序即时间序；同一秒内用 id 兜底。
      *
      * **指定收藏夹时改按"加入这个夹的时间"倒序**（用户要求第 4 点）：
@@ -60,23 +116,21 @@ interface JmAlbumDao {
      *
      * **标签多选是 OR 语义**，与参考实现 `applyTagFilter` 一致：
      * `tags` 列存的是 JSON 数组字符串，所以用 `INSTR(tags, '"标签"') > 0` 做子串匹配。
-     * 参考实现用 `wrapper.and(... or ...)` 拼动态 OR；Room 不支持动态 SQL，
-     * 这里用子查询 + `HAVING SUM(...) > 0` 表达同一语义（列表为空时条件恒假，
-     * 所以调用方必须传空列表表示"不筛选"）。
      * 要求标签本身不含 `"` 与 `,`，否则会破坏匹配（JM 的标签不含这两种字符）。
      */
     @Query(
         """
-        SELECT * FROM t_jm_album
-        WHERE (:keyword IS NULL OR name LIKE '%' || :keyword || '%'
-               OR author LIKE '%' || :keyword || '%'
-               OR tags LIKE '%' || :keyword || '%'
-               OR CAST(id AS TEXT) = :keyword)
-          AND (:onlyCollected IS NULL OR collected = :onlyCollected)
-          AND (:author IS NULL OR author LIKE '%' || :author || '%')
+        SELECT b.* FROM t_jm_album b
+        INNER JOIN t_jm_library l ON l.album_id = b.id
+        WHERE (:keyword IS NULL OR b.name LIKE '%' || :keyword || '%'
+               OR b.author LIKE '%' || :keyword || '%'
+               OR b.tags LIKE '%' || :keyword || '%'
+               OR CAST(b.id AS TEXT) = :keyword)
+          AND (:onlyCollected IS NULL OR b.collected = :onlyCollected)
+          AND (:author IS NULL OR b.author LIKE '%' || :author || '%')
           AND (:tagsCsv = '' OR EXISTS (
                 SELECT 1 FROM (
-                    SELECT (INSTR(tags, '"' || value || '"') > 0) AS hit
+                    SELECT (INSTR(b.tags, '"' || value || '"') > 0) AS hit
                     FROM (SELECT TRIM(value) AS value FROM (
                         WITH RECURSIVE split(value, rest) AS (
                             SELECT '', :tagsCsv || ','
@@ -87,15 +141,15 @@ interface JmAlbumDao {
                         ) SELECT value FROM split WHERE value <> ''
                     ))
                 ) WHERE hit = 1))
-          AND (:favoriteId IS NULL OR id IN (
+          AND (:favoriteId IS NULL OR b.id IN (
                 SELECT album_id FROM t_jm_favorite_album WHERE favorite_id = :favoriteId))
         ORDER BY
             CASE WHEN :favoriteId IS NULL THEN NULL ELSE (
                 SELECT fa.create_time FROM t_jm_favorite_album fa
-                WHERE fa.favorite_id = :favoriteId AND fa.album_id = t_jm_album.id
+                WHERE fa.favorite_id = :favoriteId AND fa.album_id = b.id
             ) END DESC,
-            COALESCE(create_time, '') DESC,
-            id DESC
+            COALESCE(l.create_time, '') DESC,
+            b.id DESC
         LIMIT :limit OFFSET :offset
         """,
     )
@@ -111,16 +165,17 @@ interface JmAlbumDao {
 
     @Query(
         """
-        SELECT COUNT(*) FROM t_jm_album
-        WHERE (:keyword IS NULL OR name LIKE '%' || :keyword || '%'
-               OR author LIKE '%' || :keyword || '%'
-               OR tags LIKE '%' || :keyword || '%'
-               OR CAST(id AS TEXT) = :keyword)
-          AND (:onlyCollected IS NULL OR collected = :onlyCollected)
-          AND (:author IS NULL OR author LIKE '%' || :author || '%')
+        SELECT COUNT(*) FROM t_jm_album b
+        INNER JOIN t_jm_library l ON l.album_id = b.id
+        WHERE (:keyword IS NULL OR b.name LIKE '%' || :keyword || '%'
+               OR b.author LIKE '%' || :keyword || '%'
+               OR b.tags LIKE '%' || :keyword || '%'
+               OR CAST(b.id AS TEXT) = :keyword)
+          AND (:onlyCollected IS NULL OR b.collected = :onlyCollected)
+          AND (:author IS NULL OR b.author LIKE '%' || :author || '%')
           AND (:tagsCsv = '' OR EXISTS (
                 SELECT 1 FROM (
-                    SELECT (INSTR(tags, '"' || value || '"') > 0) AS hit
+                    SELECT (INSTR(b.tags, '"' || value || '"') > 0) AS hit
                     FROM (SELECT TRIM(value) AS value FROM (
                         WITH RECURSIVE split(value, rest) AS (
                             SELECT '', :tagsCsv || ','
@@ -131,7 +186,7 @@ interface JmAlbumDao {
                         ) SELECT value FROM split WHERE value <> ''
                     ))
                 ) WHERE hit = 1))
-          AND (:favoriteId IS NULL OR id IN (
+          AND (:favoriteId IS NULL OR b.id IN (
                 SELECT album_id FROM t_jm_favorite_album WHERE favorite_id = :favoriteId))
         """,
     )
@@ -144,17 +199,8 @@ interface JmAlbumDao {
     ): Flow<Int>
 
     /** 详情页的收藏开关。**只改这一个字段**，不动其它（避免覆盖已拉取的在线数据）。 */
-    @Query("UPDATE t_jm_album SET collected = :collected, modify_time = :modifyTime WHERE id = :id")
-    suspend fun setCollected(id: Long, collected: Boolean, modifyTime: String)
-
-    @Query("DELETE FROM t_jm_album WHERE id = :id")
-    suspend fun deleteById(id: Long)
-
-    @Query("DELETE FROM t_jm_album WHERE id IN (:ids)")
-    suspend fun deleteByIds(ids: List<Long>)
-
-    @Query("SELECT * FROM t_jm_album")
-    suspend fun all(): List<JmAlbumEntity>
+    @Query("UPDATE t_jm_album SET collected = :collected WHERE id = :id")
+    suspend fun setCollected(id: Long, collected: Boolean)
 }
 
 // ======================================================================
@@ -372,25 +418,22 @@ data class FavoriteWithCount(
 )
 
 // ======================================================================
-// JM 最近浏览
+// JM 最近预览
 // ======================================================================
 
 /**
- * 最近浏览。凡是点进过详情页的本子都进这张表，
- * 再次进入只刷新 `viewed_time`（`upsert` + 显式带新时间）。
+ * 最近预览：只存"进过详情页/阅读页"与时间。
+ * 列表内容与 `t_jm_album`（基础数据表）拼接，见 [observeRecent]。
  */
 @Dao
 interface JmRecentAlbumDao {
 
     /**
-     * 写入/更新一条最近浏览。
+     * 写入/更新一条最近预览。
      *
-     * `REPLACE` 语义在这里是安全的：这张表**没有需要保留的本地字段**
-     * （不像 `t_jm_album` 有 `collected`），整行覆盖正是想要的行为。
-     *
-     * 但**调用方必须保证"读—改—写"是串行的**：`viewed_time` 需要"读旧值再保留"，
-     * 与另一个并发写入交错时会被回写成旧值（详见 `JmRepository.touchRecent`
-     * 的注释与 `recentWriteLock`）。
+     * `REPLACE` 语义在这里是安全的：这张表只有 `id` 与 `viewed_time`，
+     * 没有需要保留的本地字段，整行覆盖正是想要的行为；
+     * 单条语句也天然原子，不再需要"先读旧值再保留"的串行化处理。
      */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(album: JmRecentAlbumEntity)
@@ -398,21 +441,38 @@ interface JmRecentAlbumDao {
     @Query("SELECT * FROM t_jm_recent_album WHERE id = :id")
     suspend fun findById(id: Long): JmRecentAlbumEntity?
 
-    @Query("SELECT * FROM t_jm_recent_album WHERE id = :id")
-    fun observeById(id: Long): Flow<JmRecentAlbumEntity?>
-
-    /** 按浏览时间倒序（用户要求：最近浏览降序）。 */
-    @Query("SELECT * FROM t_jm_recent_album ORDER BY viewed_time DESC LIMIT :limit OFFSET :offset")
-    fun observeRecent(limit: Int, offset: Int = 0): Flow<List<JmRecentAlbumEntity>>
+    /**
+     * 按浏览时间倒序（用户要求：最近降序），内容与基础数据表**左连接**拼出来。
+     *
+     * 用 LEFT JOIN：只进过页面、还没缓存到基础数据（例如首次进入时离线）的条目
+     * 仍然显示（此时除 id 外字段为空，界面回落成 "JM<id>"），与旧行为一致。
+     */
+    @Query(
+        """
+        SELECT r.id AS id,
+               b.name AS name,
+               b.album_folder_name AS album_folder_name,
+               b.description AS description,
+               b.series AS series,
+               b.author AS author,
+               b.tags AS tags,
+               b.collected AS collected
+        FROM t_jm_recent_album r
+        LEFT JOIN t_jm_album b ON b.id = r.id
+        ORDER BY r.viewed_time DESC
+        LIMIT :limit OFFSET :offset
+        """,
+    )
+    fun observeRecent(limit: Int, offset: Int = 0): Flow<List<JmAlbumEntity>>
 
     @Query("SELECT COUNT(*) FROM t_jm_recent_album")
     fun observeCount(): Flow<Int>
 
-    /** 全部 id；"清空最近浏览"前先取一份，用来判断哪些封面还能删。 */
+    /** 全部 id；"清空最近预览"前先取一份，用来判断哪些封面还能删。 */
     @Query("SELECT id FROM t_jm_recent_album")
     suspend fun allIds(): List<Long>
 
-    /** 只更新浏览时间（进入详情页时调用），不动其它字段。 */
+    /** 只更新浏览时间（进入详情页/阅读页时调用）。 */
     @Query("UPDATE t_jm_recent_album SET viewed_time = :viewedTime WHERE id = :id")
     suspend fun touch(id: Long, viewedTime: Long)
 

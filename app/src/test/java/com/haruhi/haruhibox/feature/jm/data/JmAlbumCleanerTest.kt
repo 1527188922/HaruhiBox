@@ -10,6 +10,7 @@ import com.haruhi.haruhibox.core.database.entity.DownloadStatus
 import com.haruhi.haruhibox.core.database.entity.DownloadType
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmChapterImageEntity
+import com.haruhi.haruhibox.core.database.entity.JmLibraryEntity
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
 import com.haruhi.haruhibox.core.storage.LibraryDirs
 import com.haruhi.haruhibox.feature.jm.api.JmApiClient
@@ -82,7 +83,6 @@ class JmAlbumCleanerTest {
         reading = JmReadingRepository(
             positionDao = db.playbackPositionDao(),
             chapterDao = db.jmChapterDao(),
-            recentDao = db.jmRecentAlbumDao(),
         )
         publisher = FakeExportPublisher(temp.newFolder("downloads"))
         covers = RecordingCoverCache()
@@ -167,6 +167,9 @@ class JmAlbumCleanerTest {
         assertThat(runBlocking { db.playbackPositionDao().find(READING_KIND, albumId.toString()) }).isNull()
         // 但最近浏览**必须保留**（用户第八轮要求第 5 点）：移出书库不影响"刚看过什么"
         assertThat(runBlocking { repo.findRecent(albumId) }).isNotNull()
+        // 基础数据缓存也**必须保留**（本次要求：缓存表不因任何操作删除），离线仍能看详情
+        assertThat(runBlocking { db.jmAlbumDao().findById(albumId) }).isNotNull()
+        assertThat(runBlocking { repo.localAlbumDetail(albumId) }!!.fromLibrary).isFalse()
         // 既然它还在最近页上露面，封面就不能删（用户第九轮要求第 3 点）
         assertThat(covers.evicted).isEmpty()
     }
@@ -265,8 +268,17 @@ class JmAlbumCleanerTest {
 
     private fun album() = JmAlbumEntity(id = albumId, name = "测试本子", albumFolderName = folderName)
 
+    /** 基础数据 + 书库成员各写一行：模拟"已入库"的完整形态。 */
     private fun seedAlbum() {
-        runBlocking { db.jmAlbumDao().insertIgnore(album()) }
+        runBlocking {
+            db.jmAlbumDao().insertIgnore(album())
+            db.jmAlbumDao().insertLibraryRow(
+                JmLibraryEntity(
+                    albumId = albumId,
+                    createTime = "2026-01-01 00:00:00",
+                ),
+            )
+        }
     }
 
     private fun seedChapter() {

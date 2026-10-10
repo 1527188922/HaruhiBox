@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
-import com.haruhi.haruhibox.core.database.entity.JmRecentAlbumEntity
 import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.database.entity.DownloadStatus
 import com.haruhi.haruhibox.core.download.DownloadTaskRepository
@@ -310,12 +309,12 @@ class JmLibraryViewModel(
      * 把阅读位置翻译成卡片内容。
      *
      * 位置可能指向一本**已经不在书库**的本子（用户移除了记录但没删文件），
-     * 这时退回最近浏览表取标题；两处都没有就干脆不显示卡片。
+     * 这时退回基础数据缓存取标题（它永不删除）；两处都没有就干脆不显示卡片。
      */
     private suspend fun resolveContinueReading(position: ReadingPosition?): ContinueReadingCard? {
         val chapterId = position?.chapterId ?: return null
         val album = runCatching { repo.findAlbum(position.albumId) }.getOrNull()
-            ?: runCatching { reading.albumForDisplay(position.albumId)?.toAlbumEntityForDisplay() }.getOrNull()
+            ?: runCatching { repo.localAlbumDetail(position.albumId)?.album }.getOrNull()
             ?: return null
         val chapterTitle = runCatching { reading.chapterFolderName(position.albumId, chapterId) }
             .getOrNull()
@@ -764,7 +763,7 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
      * 加入书库（不下载）。已入库时是幂等操作，UI 只提示不报错。
      *
      * 走 `addToLibraryLocalFirst`：精确匹配那一条的详情**搜索时就已经拿到了**
-     * （存在最近浏览表里），这里不必再请求一次 `/album`——用户反馈的"点一下特别慢"
+     * （缓存在基础数据表里），这里不必再请求一次 `/album`——用户反馈的"点一下特别慢"
      * 就是那次多余的网络往返。只有本地完全没有数据时才回落到网络。
      */
     fun addToLibrary(item: OnlineSearchItem) {
@@ -995,9 +994,10 @@ class JmRecentViewModel(
     val state: StateFlow<RecentUiState> = repo.observeRecentAlbums()
         .map { rows ->
             RecentUiState(
-                albums = rows.map { row ->
+                // 列表条目本身就是"基础数据 + 浏览时间"拼出来的，直接渲染
+                albums = rows.map { album ->
                     AlbumCard(
-                        album = row.toAlbumEntityForDisplay(),
+                        album = album,
                         totalChapters = 0,
                         downloadedChapters = 0,
                         localSizeBytes = 0L,
@@ -1059,7 +1059,7 @@ data class AlbumDetailUiState(
     val loading: Boolean = true,
     val refreshing: Boolean = false,
     /**
-     * 数据来源：true = 已在书库；false = 只在最近浏览里（或刚从网络拿到）。
+     * 数据来源：true = 已在书库；false = 只在基础数据缓存里（刚拉到的在线数据也走这条）。
      * 决定详情页显示「加入书库」还是「已在书库」。
      */
     val inLibrary: Boolean = false,
@@ -1188,9 +1188,10 @@ internal fun readingProgressLabel(chapterTitle: String?, hasPage: Boolean, pageN
  *
  * ## 数据读取顺序（用户要求第 4 点）
  *
- * 1. **先读本地**：书库表 → 最近浏览表；任一命中就直接渲染，不发网络请求；
- * 2. 都没有才请求 `/album`，成功后写入最近浏览表（[JmRepository.fetchAlbumDetail]）；
- * 3. 「刷新」按钮：请求成功后**更新书库记录（若已入库）与最近浏览记录，但不改浏览时间**。
+ * 1. **先读本地**：书库 → 基础数据缓存；任一命中就直接渲染，不发网络请求；
+ * 2. 都没有才请求 `/album`，成功后**只更新基础数据缓存**（[JmRepository.fetchAlbumDetail]）；
+ * 3. 「刷新」按钮：同样只更新基础数据缓存——它不改浏览时间，
+ *    书库列表与详情页因为都拼这张表，看到的也是新内容。
  *
  * ## 浏览时间（用户要求第 3、4 点）
  *
@@ -1199,7 +1200,7 @@ internal fun readingProgressLabel(chapterTitle: String?, hasPage: Boolean, pageN
  *
  * ## 点详情 ≠ 加入书库（用户要求第 2 点）
  *
- * 构造时只 [JmRepository.touchRecent]，不写 `t_jm_album`。
+ * 构造时只 [JmRepository.touchRecent]（最近预览），不写书库成员表。
  * 入书库只发生在用户点「加入书库」时。
  */
 class JmAlbumDetailViewModel(
@@ -1357,7 +1358,8 @@ class JmAlbumDetailViewModel(
     /**
      * 刷新详情。
      *
-     * 与"进入页面"的区别：这里**不改浏览时间**（[JmRepository.saveToRecent] 保留原值）。
+     * 与"进入页面"的区别：这里**不改浏览时间**——`/album` 只更新基础数据缓存，
+     * 最近预览的浏览时间只由进入页面时写（[JmRepository.touchRecent]）。
      */
     fun refresh() {
         viewModelScope.launch { loadFromNetwork(initial = false) }
@@ -1369,15 +1371,15 @@ class JmAlbumDetailViewModel(
             it.copy(refreshing = true, refreshError = null, loading = initial && it.album == null)
         }
         runCatching {
-            // 已在书库就一并更新书库记录；只算最近浏览的话不写书库
-            repo.fetchAlbumDetail(albumId, saveToLibrary = inLibrary)
+            // 只拉取并缓存基础数据：不改书库成员、不写最近预览
+            repo.fetchAlbumDetail(albumId)
         }
-            .onSuccess { dto ->
+            .onSuccess {
                 val album = if (inLibrary) {
                     repo.findAlbum(albumId)
                 } else {
-                    // 未入库：用最近浏览里的副本渲染（字段一致）
-                    repo.findRecent(albumId)?.toAlbumEntityForDisplay()
+                    // 未入库：用基础数据缓存里的副本渲染
+                    repo.localAlbumDetail(albumId)?.album
                 }
                 _state.update {
                     it.copy(refreshing = false, loading = false, album = album ?: it.album, inLibrary = inLibrary)
@@ -1815,40 +1817,6 @@ class JmAlbumDetailViewModel(
     }
 }
 
-/**
- * 最近浏览记录 → 展示用的书库实体。
- *
- * 两张表字段一致，所以详情页与列表可以复用同一套渲染逻辑；
- * `collected` 在最近浏览里没有语义，留 null。
- */
-internal fun JmRecentAlbumEntity.toAlbumEntityForDisplay() = JmAlbumEntity(
-    id = id,
-    name = name,
-    albumFolderName = albumFolderName,
-    images = images,
-    addTime = addTime,
-    description = description,
-    totalViews = totalViews,
-    likes = likes,
-    series = series,
-    seriesId = seriesId,
-    commentTotal = commentTotal,
-    author = author,
-    tags = tags,
-    works = works,
-    actors = actors,
-    relatedList = relatedList,
-    liked = liked,
-    isFavorite = isFavorite,
-    collected = null,
-    isAids = isAids,
-    price = price,
-    purchased = purchased,
-    raw = raw,
-    createTime = createTime,
-    modifyTime = modifyTime,
-)
-
-/** 把异常翻译成可理解文案：实现已移到 `core.network`（下载执行器也要用），这里只做转发注释。 */
+/** 把异常翻译成可理解文案：实现已移到 `core/network`（下载执行器也要用），这里只做转发注释。 */
 // 详见 core/network/UserMessage.kt
 
