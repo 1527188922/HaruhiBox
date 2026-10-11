@@ -424,6 +424,15 @@ app/src/main/java/com/haruhi/haruhibox/
 > 画了一个：上下两段三次贝塞尔围成眼型，中间用**奇偶填充**挖出虹膜、再填一颗实心瞳孔，
 > 三层嵌套正好是"实 → 空 → 实"。爱心直接用 core 里的 `Icons.Default.Favorite`。
 
+### 第二十二轮反馈修复（2026-10-11）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| T1 | 批量操作模式的按钮别放上面、挪到下面（握着手机时拇指在屏幕下方，往上够很难），可点击区域要更大；删除按钮加删除图标、收藏夹按钮加爱心图标 | 批量操作只在 `JmLibraryScreen`（**书库页与收藏夹内页共用**），所以只改这一处：① `MultiSelectBar` 从"原筛选栏的位置"移到 `Column` 的**最后**——多选时顶部不再放任何东西，列表三个分支（加载中 / 空态 / 网格）改用 `Modifier.weight(1f)` 占满操作条以上的剩余高度，操作条吸底；② 操作条换成 `Surface`（`tonalElevation` + `shadowElevation` + 顶部一条整宽 `HorizontalDivider`）与列表分开；③ 新增 `MultiSelectAction`：**等分整行宽度、至少 56dp 高、图标在上文字在下、整块 `clickable`**（原来是 48dp 左右的小 `TextButton`）；④ 图标：删除文件 `Icons.Default.Delete`（错误色，提醒不可逆）、移出书库 `Icons.AutoMirrored.Filled.ExitToApp`、收藏夹/修改收藏夹 `Icons.Default.Favorite`（主题色，与底栏「收藏」同一个 icon）；上一行仍是"已选 N 本 / 全选 / 退出" | 代码（**按要求没有跑测试**）。设备上这样核对：长按进多选 → 操作条在屏幕**底部**（书库页在底部导航之上，夹内在导航栏之上）→ 三颗按钮都带图标、整块可点；收藏夹内只有一颗带爱心的「修改收藏夹」 |
+
+> 批量删除 / 收藏只在**书库页**与**收藏夹内页**，两处是同一个 `JmLibraryScreen`，
+> 改一处两处都生效；漫画详情页与其它页面没有改动。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |

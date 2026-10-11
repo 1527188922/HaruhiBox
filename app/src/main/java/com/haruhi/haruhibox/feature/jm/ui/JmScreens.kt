@@ -35,9 +35,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
@@ -49,12 +52,14 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -77,6 +82,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -187,21 +193,9 @@ fun JmLibraryScreen(
     )
 
     Column(modifier = modifier.fillMaxSize()) {
-        if (selecting) {
-            MultiSelectBar(
-                selectedCount = selection.size,
-                totalCount = state.albums.size,
-                onSelectAll = { selection = state.albums.map { it.album.id }.toSet() },
-                onClear = { selection = emptySet() },
-                onDeleteFiles = { confirmDeleteFiles = true },
-                onRemoveFromLibrary = { confirmRemove = true },
-                onMoveToFavorite = { showMoveSheet = true },
-                canDeleteFiles = onDeleteFiles != null,
-                canRemove = onRemoveFromLibrary != null,
-                canMove = onModifyFavorites != null,
-                moveLabel = moveFavoriteLabel,
-            )
-        } else {
+        // 多选时顶部只留列表：操作条挪到了屏幕**底部**（见 MultiSelectBar 的注释），
+        // 这里不再有东西跟它抢位置，标题和筛选栏也跟着收起来。
+        if (!selecting) {
             if (title != null) {
                 Text(
                     text = title,
@@ -232,7 +226,9 @@ fun JmLibraryScreen(
         }
 
         when {
-            state.loading -> LoadingBox()
+            // 三个分支都按"占满操作条以上的剩余高度"来排（weight），
+            // 底部要给多选操作条留位置，不能用 fillMaxSize 把整列撑满。
+            state.loading -> LoadingBox(Modifier.weight(1f))
             state.albums.isEmpty() -> EmptyBox(
                 title = if (state.filter.isActive) "没有符合条件的漫画" else "书库还是空的",
                 hint = if (state.filter.isActive) {
@@ -240,6 +236,7 @@ fun JmLibraryScreen(
                 } else {
                     "去「发现」搜索并加入书库"
                 },
+                modifier = Modifier.weight(1f),
             )
             else -> LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
@@ -247,7 +244,7 @@ fun JmLibraryScreen(
                 contentPadding = PaddingValues(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f),
             ) {
                 items(state.albums, key = { it.album.id }) { card ->
                     AlbumGridCard(
@@ -300,6 +297,24 @@ fun JmLibraryScreen(
                 }
             }
         }
+
+        // 多选操作条：**吸在屏幕底部**（用户要求）。
+        // 握手机时拇指自然落在下方，放在顶部要反手往上够，而且越靠上越够不着。
+        if (selecting) {
+            MultiSelectBar(
+                selectedCount = selection.size,
+                totalCount = state.albums.size,
+                onSelectAll = { selection = state.albums.map { it.album.id }.toSet() },
+                onClear = { selection = emptySet() },
+                onDeleteFiles = { confirmDeleteFiles = true },
+                onRemoveFromLibrary = { confirmRemove = true },
+                onMoveToFavorite = { showMoveSheet = true },
+                canDeleteFiles = onDeleteFiles != null,
+                canRemove = onRemoveFromLibrary != null,
+                canMove = onModifyFavorites != null,
+                moveLabel = moveFavoriteLabel,
+            )
+        }
     }
 
     if (showMoveSheet) {
@@ -350,11 +365,21 @@ fun JmLibraryScreen(
 private fun Set<Long>.toggle(id: Long): Set<Long> = if (id in this) this - id else this + id
 
 /**
- * 多选操作条。
+ * 多选操作条（**吸在屏幕底部**）。
  *
- * 放在原筛选栏的位置（不浮在列表上），所以不会挡住内容；
- * 左侧显示已选数量与"全选/取消"，右侧是批量操作（书库页三个：
- * 删除文件 / 移出书库 / 收藏夹；收藏夹内只留「修改收藏夹」）。
+ * 为什么在底部：人握住手机时，拇指的自然活动范围就在屏幕下方；原来这条放在
+ * 顶部（原筛选栏的位置），每次点都要反手往上够，越靠上的按钮越难按到
+ * （用户要求：挪到下方）。
+ *
+ * 两行：
+ * - 上一行是选择状态与「全选 / 退出」；
+ * - 下一行是批量动作，**等分整行宽度、每颗至少 56dp 高**，图标在上文字在下：
+ *   整块都是一颗大按钮，拇指扫过去就能按到，不用瞄准文字
+ *   （用户要求：可点击区域增大）。图标让三颗按钮一眼分清（用户要求：
+ *   删除加删除图标、收藏夹加爱心图标）。
+ *
+ * 动作按钮按页面给：书库页三颗（删除文件 / 移出书库 / 收藏夹），
+ * 收藏夹内只剩一颗「修改收藏夹」。最多三颗，一行放得下。
  */
 @Composable
 private fun MultiSelectBar(
@@ -370,36 +395,108 @@ private fun MultiSelectBar(
     canMove: Boolean,
     moveLabel: String,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        // 抬起来一点，和下面的列表分开；顶部再压一条分隔线更清楚
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onClear) {
-                Icon(Icons.Default.Close, contentDescription = "退出多选")
-            }
-            Text(
-                text = "已选 $selectedCount 本",
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.weight(1f),
-            )
-            if (selectedCount < totalCount) {
-                TextButton(onClick = onSelectAll) { Text("全选") }
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // 分隔线横跨整宽（不跟着内边距缩进），先把操作条和列表分开
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "已选 $selectedCount 本",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 8.dp),
+                    )
+                    if (selectedCount < totalCount) {
+                        TextButton(onClick = onSelectAll) { Text("全选") }
+                    }
+                    IconButton(onClick = onClear) {
+                        Icon(Icons.Default.Close, contentDescription = "退出多选")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (canDeleteFiles) {
+                        MultiSelectAction(
+                            icon = Icons.Default.Delete,
+                            // 删除是不可逆的，用错误色把"这是危险动作"说在前面
+                            tint = MaterialTheme.colorScheme.error,
+                            label = "删除文件",
+                            onClick = onDeleteFiles,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    if (canRemove) {
+                        MultiSelectAction(
+                            // 门+向外箭头 = "移出"（方向图标要用 AutoMirrored 版，跟随 RTL）
+                            icon = Icons.AutoMirrored.Filled.ExitToApp,
+                            label = "移出书库",
+                            onClick = onRemoveFromLibrary,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    if (canMove) {
+                        MultiSelectAction(
+                            icon = Icons.Default.Favorite,
+                            // 爱心用主题色：和底栏「收藏」tab 是同一个 icon、同一个含义
+                            tint = MaterialTheme.colorScheme.primary,
+                            label = moveLabel,
+                            onClick = onMoveToFavorite,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (canDeleteFiles) {
-                TextButton(onClick = onDeleteFiles) { Text("删除文件") }
-            }
-            if (canRemove) {
-                TextButton(onClick = onRemoveFromLibrary) { Text("移出书库") }
-            }
-            if (canMove) {
-                TextButton(onClick = onMoveToFavorite) { Text(moveLabel) }
-            }
-        }
+    }
+}
+
+/**
+ * 吸底操作条里的一颗动作按钮：**整块都能点**。
+ *
+ * 宽度由调用方 `weight(1f)` 等分，高度至少 56dp（超过 Material 的 48dp 最小触控目标），
+ * 图标在上、文字在下——这样文字长短不影响按钮大小，三颗按钮对齐成一条；
+ * 文字最多一行，超长省略，不会把按钮撑变形。
+ */
+@Composable
+private fun MultiSelectAction(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .heightIn(min = 56.dp)
+            .padding(horizontal = 4.dp, vertical = 8.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(22.dp),
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
