@@ -1064,7 +1064,7 @@ private fun JmSearchItemDto.toItem(localIds: Set<Long>): OnlineSearchItem? {
     return OnlineSearchItem(
         id = jmId,
         name = name,
-        author = author,
+        author = normalizeAuthors(author),
         description = description,
         // 封面走图片线路：`https://{cdn}/media/albums/{aid}.jpg`
         coverUrl = JmDefaults.buildCoverUrl(jmId),
@@ -1074,3 +1074,10 @@ private fun JmSearchItemDto.toItem(localIds: Set<Long>): OnlineSearchItem? {
         raw = this,
     )
 }
+
+internal fun normalizeAuthors(raw: String?): String? =
+    raw?.split(" ")
+        ?.map { it.trim() }
+        ?.filter { it.isNotEmpty() }
+        ?.takeIf { it.isNotEmpty() }
+        ?.joinToString(" / ")
