@@ -296,7 +296,7 @@ fun JmAlbumDetailScreen(
         // 直接把 refreshing 交给它，屏幕上会同时出现"居中的加载圈"和"顶部下拉圈"
         // 两个 loading（用户报的 bug）。有内容时两者互斥，才轮到下拉圈出场。
         PullToRefreshBox(
-            isRefreshing = state.refreshing && state.album != null,
+            isRefreshing = state.refreshing && !state.loading,
             onRefresh = { if (!state.refreshing && !state.loading) onRefresh() },
             modifier = Modifier
                 .fillMaxSize()
