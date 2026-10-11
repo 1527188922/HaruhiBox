@@ -86,6 +86,32 @@ class JmDisplayLogicTest {
         assertThat(formatBytes(3L * 1024 * 1024 * 1024)).isEqualTo("3.00 GB")
     }
 
+    // ---------------- 详情页头部统计 / 章节区标题 ----------------
+
+    @Test
+    fun `album stats drop blank counts and keep the raw numbers`() {
+        // 还没联网刷新过、或接口没给这一项时整项不显示（不留"♥ 0"这种假数字）
+        assertThat(formatStatCount(null)).isNull()
+        assertThat(formatStatCount("")).isNull()
+        assertThat(formatStatCount("   ")).isNull()
+        // 数字原样展示：不在客户端折算成"万"，免得跟网页端对不上
+        assertThat(formatStatCount(" 12345 ")).isEqualTo("12345")
+        assertThat(formatStatCount("0")).isEqualTo("0")
+    }
+
+    @Test
+    fun `chapter section title carries the progress and the local size`() {
+        // 占用体积从封面区挪到这里（用户要求）："章节 · 0/1 已下载（7.4 MB）"
+        assertThat(chapterSectionTitle(total = 1, downloaded = 0, localSizeBytes = 7759462))
+            .isEqualTo("章节 · 0/1 已下载（7.4 MB）")
+        // 本地没有文件时不加括号（不写"（0 B）"）
+        assertThat(chapterSectionTitle(total = 10, downloaded = 3, localSizeBytes = 0))
+            .isEqualTo("章节 · 3/10 已下载")
+        // 章节清单还没拿到时只留"章节"，但本地确实占了空间就要说
+        assertThat(chapterSectionTitle(total = 0, downloaded = 0, localSizeBytes = 2048))
+            .isEqualTo("章节（2.0 KB）")
+    }
+
     // ---------------- 库里 JSON 数组字段的解析 ----------------
 
     @Test

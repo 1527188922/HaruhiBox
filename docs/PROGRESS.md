@@ -412,6 +412,18 @@ app/src/main/java/com/haruhi/haruhibox/
 >    这次"撤回所有复制相关代码"时，把**跟复制无关的"点作者去搜索 + 返回回详情页"**
 >    也一起删了（见上面 R1/R2，用户指出后已恢复）。
 
+### 第二十一轮反馈修复（2026-10-11）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| S1 | 详情页作者下面那行「共 1 话 · 已下载 0 话 · 占用 7.4 MB」去掉（跟下方章节列表重复），改成**点赞数 + 观看数**（爱心图标 + 眼睛图标后跟数字） | 封面区那行 `Text` 换成 `AlbumStatRow(likes = album.likes, views = album.totalViews)`：`Icons.Default.Favorite`（爱心）+ 数字、眼睛图标 + 数字，都是 `labelMedium` 的小字。两个字段可能是 null / 空串（还没联网刷新过），这时整行不占位——不显示"♥ 0"这种假数字；数字原样展示，不在客户端折算成"万"（免得跟网页端对不上），格式化收在 `formatStatCount()` 里 | 代码（**按要求没有跑测试**，等你打 debug 包确认）。设备上这样核对：联网刷新过的本子在封面区看到「♥ 12345　👁 678」，断网进详情页（只有本地缓存、`likes` 为空）时这两项不显示 |
+| S2 | 占用储存大小移到下方章节区，例如「章节 · 0/1 已下载（7.4 MB）」 | `ChapterSectionHeader` 接上 `state.localSizeBytes`，文案抽成纯函数 `chapterSectionTitle()`：`章节` + ` · 下载数/总数 已下载` + `（体积）`（后两段按有没有数据决定）。本地没有文件时不加括号（不写"（0 B）"）；章节清单还没拿到时不写"0/0 已下载"，只留"章节"，本地占用照说 | `JmDisplayLogicTest` 新增 2 个用例（`chapterSectionTitle` 3 种形态 + `formatStatCount` 的空白/原样保留）；**按要求没有跑测试** |
+
+> **眼睛图标是自己画的**：工程不引 `material-icons-extended`（见 `app/build.gradle.kts` 那段注释），
+> 而 `material-icons-core` 里没有眼睛，所以按 core 里那些图标的同一种写法（`ImageVector.Builder` + `path { … }`）
+> 画了一个：上下两段三次贝塞尔围成眼型，中间用**奇偶填充**挖出虹膜、再填一颗实心瞳孔，
+> 三层嵌套正好是"实 → 空 → 实"。爱心直接用 core 里的 `Icons.Default.Favorite`。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |
@@ -634,7 +646,7 @@ OK (11 tests)
 ```powershell
 cd D:\Project\HaruhiBox
 
-# 开发机：271 个单元测试 + lint + 两种构建
+# 开发机：273 个单元测试 + lint + 两种构建
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease
 
 # 设备：instrumented test（迁移 + PDF/zip 加密 + 长图切片）
@@ -642,7 +654,7 @@ $env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**271 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
+当前基线：**273 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
 debug / release APK 均可构建（release 5.6 MB）。
 
 ### 测试清单（单元测试）
@@ -660,7 +672,7 @@ debug / release APK 均可构建（release 5.6 MB）。
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
 | `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
 | `feature.jm.data.JmExportManagerTest` | 15 | **导出编排**：缺图预检 / zip 与 pdf 跑通并交付 / 重复提交复用 / 无图时给出可读失败原因 / **成品是否存在、按名查 Uri、删单个与删两个格式 / `exportsOf` 的大小与生成时间 / `presentFormats` 整页只查一次** |
-| `feature.jm.ui.JmDisplayLogicTest` | 8 | 书库状态文案 / 章节状态 / 体积格式 / 空态与错误文案 |
+| `feature.jm.ui.JmDisplayLogicTest` | 10 | 书库状态文案 / 章节状态 / 体积格式 / **详情页点赞·观看数字段与章节区标题（含占用体积）** / 空态与错误文案 |
 | `core.codec.PdfPagePlanTest` | 8 | **PDF 切片**：未超限仍是一页 / 超限切片连续无重叠 / 宽度超限等比缩小 / 切片数上限 |
 | `feature.jm.data.JmAlbumCleanerTest` | 8 | **删除编排**：只删文件保留记录 / 从书库移除清四张表 / **封面按"还在不在书库或最近浏览里"决定**（四种组合）/ 移除前先取消任务 / 只删文件时任务照跑 |
 | `feature.jm.ui.FavoriteSortTest` | 7 | **收藏页排序**：默认夹置顶 / 三种方式都是降序 / 空夹排最后 / 同值按 id 稳定 |

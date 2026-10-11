@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
@@ -59,6 +60,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,12 +80,55 @@ import com.haruhi.haruhibox.ui.theme.WarningOrangeLight
 private const val DESCRIPTION_COLLAPSED_LINES = 3
 
 /**
+ * 眼睛图标（观看数）。
+ *
+ * 工程**不引 `material-icons-extended`**（见 `app/build.gradle.kts`），
+ * 而 `material-icons-core` 里没有眼睛，所以按 core 里那些图标的同一种写法自己画一个：
+ * 外圈是上下两段三次贝塞尔围成的眼型，中间用**奇偶填充**挖出虹膜、
+ * 再填一颗实心瞳孔——同一条 path 里三层嵌套正好是"实 → 空 → 实"。
+ *
+ * 尺寸按 24×24 视口画；实际显示多大由调用点的 `Icon(modifier = …size(…))` 决定，
+ * 颜色走 `Icon` 的 tint（这里填什么色都会被覆盖）。
+ */
+private val EyeIcon: ImageVector = ImageVector.Builder(
+    name = "Eye",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+        // 眼型：上眼皮 (2,12) → 顶点 (12,6.8) → (22,12)，下眼皮对称回来
+        moveTo(2f, 12f)
+        curveTo(7.33f, 5.07f, 16.67f, 5.07f, 22f, 12f)
+        curveTo(16.67f, 18.93f, 7.33f, 18.93f, 2f, 12f)
+        close()
+        // 虹膜（挖空）：半径 4.5 的圆，用四段贝塞尔近似
+        moveTo(12f, 7.5f)
+        curveTo(14.49f, 7.5f, 16.5f, 9.51f, 16.5f, 12f)
+        curveTo(16.5f, 14.49f, 14.49f, 16.5f, 12f, 16.5f)
+        curveTo(9.51f, 16.5f, 7.5f, 14.49f, 7.5f, 12f)
+        curveTo(7.5f, 9.51f, 9.51f, 7.5f, 12f, 7.5f)
+        close()
+        // 瞳孔（再填实）：半径 2.5 的圆
+        moveTo(12f, 9.5f)
+        curveTo(13.38f, 9.5f, 14.5f, 10.62f, 14.5f, 12f)
+        curveTo(14.5f, 13.38f, 13.38f, 14.5f, 12f, 14.5f)
+        curveTo(10.62f, 14.5f, 9.5f, 13.38f, 9.5f, 12f)
+        curveTo(9.5f, 10.62f, 10.62f, 9.5f, 12f, 9.5f)
+        close()
+    }
+}.build()
+
+/**
  * 漫画详情页（核心中转页，计划 §9 第 7 条）。
  *
  * 关键交互：
  * - **本地优先**：先展示本地（书库或最近浏览）的章节，联网刷新只作为增强；
  *   刷新失败不阻断本地阅读；
  * - **点详情不等于加入书库**（用户要求第 2 点）：未入库时显示「加入书库」按钮；
+ * - 封面区作者下面显示**点赞 / 观看数**（爱心 / 眼睛图标，`likes` / `total_views`），
+ *   本地占用体积归到章节区标题（"章节 · 0/1 已下载（7.4 MB）"），同一屏里不重复说两遍；
  * - 章节行显示"已下载 / 部分下载 x/y / 未下载"；
  * - 「收藏夹」面板支持加入/移出/移动（用户要求第 6 点）；
  * - 更多菜单承接 ZIP/PDF 导出（P4 接）、删除文件、从书库移除。
@@ -239,7 +288,7 @@ fun JmAlbumDetailScreen(
                     item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
                 }
                 // 已经导出过的 zip/pdf：放在章节前面——它属于"这本在我设备上有什么"，
-                // 与封面区的占用统计是同一类信息，不该被长长的章节列表压到最下面
+                // 与章节区标题里的占用体积是同一类信息，不该被长长的章节列表压到最下面
                 // （用户第九轮要求第 2 点）。正在导出的也算（用户第十一轮要求第 3 点）。
                 if (state.exports.isNotEmpty() || state.activeExports.isNotEmpty()) {
                     item {
@@ -262,6 +311,7 @@ fun JmAlbumDetailScreen(
                     ChapterSectionHeader(
                         total = state.totalChapters,
                         downloaded = state.downloadedChapters,
+                        localSizeBytes = state.localSizeBytes,
                         reversed = state.reversed,
                         onToggleReversed = onToggleReversed,
                     )
@@ -682,6 +732,54 @@ private fun ExportPasswordDialog(
     )
 }
 
+/**
+ * 封面区的点赞 / 观看数：爱心图标 + 点赞数、眼睛图标 + 观看数。
+ *
+ * 两个字段都来自在线详情接口（`likes` / `total_views`），可能是 null 或空串
+ * （还没联网刷新过、或接口没给这一项）。这时**整行不占位**——宁可不显示，
+ * 也不要在封面旁边挂一对"♥ 0 👁 0"的假数字。
+ */
+@Composable
+private fun AlbumStatRow(likes: String?, views: String?) {
+    val likeText = formatStatCount(likes)
+    val viewText = formatStatCount(views)
+    if (likeText == null && viewText == null) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        likeText?.let { StatItem(icon = Icons.Default.Favorite, text = it, description = "点赞数") }
+        viewText?.let { StatItem(icon = EyeIcon, text = it, description = "观看数") }
+    }
+}
+
+/** 一项统计：小图标 + 数字（图标只起"这是哪种数字"的作用，读屏靠 [description]）。 */
+@Composable
+private fun StatItem(icon: ImageVector, text: String, description: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(14.dp),
+        )
+        Spacer(Modifier.width(3.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * 点赞 / 观看数的展示文案。
+ *
+ * 空白（null、空串、只有空格）返回 null = 这一项不显示。数字本身原样展示：
+ * 接口给的就是 `"12345"` 这样的字符串，自己折算成"1.2 万"反而会跟网页端对不上。
+ */
+fun formatStatCount(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty() }
+
 @Composable
 private fun AlbumHeader(
     state: AlbumDetailUiState,
@@ -733,15 +831,10 @@ private fun AlbumHeader(
                     )
                 }
                 Spacer(Modifier.height(6.dp))
-                Text(
-                    text = buildString {
-                        append("共 ${state.totalChapters} 话")
-                        append(" · 已下载 ${state.downloadedChapters} 话")
-                        if (state.localSizeBytes > 0) append(" · 占用 ${formatBytes(state.localSizeBytes)}")
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                // 这里原来是"共 x 话 · 已下载 y 话 · 占用 z"，与下方章节区标题说的是同一件事、
+                // 在同一屏里重复了一遍；现在占用体积并到章节区标题，
+                // 这一行换成点赞 / 观看数（用户要求）。
+                AlbumStatRow(likes = album.likes, views = album.totalViews)
                 Spacer(Modifier.height(8.dp))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -940,6 +1033,7 @@ private fun FavoritePickerSheet(
 private fun ChapterSectionHeader(
     total: Int,
     downloaded: Int,
+    localSizeBytes: Long,
     reversed: Boolean,
     onToggleReversed: () -> Unit,
 ) {
@@ -951,7 +1045,7 @@ private fun ChapterSectionHeader(
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(
-            text = if (total == 0) "章节" else "章节 · $downloaded/$total 已下载",
+            text = chapterSectionTitle(total, downloaded, localSizeBytes),
             style = MaterialTheme.typography.titleSmall,
         )
         // 下载入口只留头部那一个（用户要求第 3 点），这里只负责正序/倒序切换
@@ -959,6 +1053,20 @@ private fun ChapterSectionHeader(
             Text(if (reversed) "倒序" else "正序")
         }
     }
+}
+
+/**
+ * 章节区标题，例如 `章节 · 0/1 已下载（7.4 MB）`。
+ *
+ * 本地占用体积原来写在封面区的元信息里（"共 x 话 · 已下载 y 话 · 占用 z"），
+ * 那与这里的下载进度本来就是同一件事，在同一屏里说了两遍；现在统一收到这里
+ * （用户要求）。本地没有文件时不加括号，不写"（0 B）"这种没有信息量的括号；
+ * 章节清单还没拿到（total == 0）时不写"0/0 已下载"，只留"章节"，本地占用照说。
+ */
+fun chapterSectionTitle(total: Int, downloaded: Int, localSizeBytes: Long): String = buildString {
+    append("章节")
+    if (total > 0) append(" · $downloaded/$total 已下载")
+    if (localSizeBytes > 0) append("（${formatBytes(localSizeBytes)}）")
 }
 
 /**
