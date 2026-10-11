@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,15 +20,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -51,6 +53,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -236,9 +239,9 @@ fun JmAlbumDetailScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onRefresh) {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新详情")
-                    }
+//                    IconButton(onClick = onRefresh) {
+//                        Icon(Icons.Default.Refresh, contentDescription = "刷新详情")
+//                    }
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Default.MoreVert, contentDescription = "更多")
                     }
@@ -268,77 +271,112 @@ fun JmAlbumDetailScreen(
             )
         },
     ) { padding ->
-        when {
-            state.loading -> LoadingBox(Modifier.padding(padding))
-            state.album == null -> EmptyBox(
-                title = "本地没有这个本子的数据",
-                hint = state.refreshError ?: "联网刷新失败，请检查网络",
-                modifier = Modifier.padding(padding),
-            )
-            else -> LazyColumn(
-                contentPadding = PaddingValues(bottom = 24.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-            ) {
-                item {
-                    AlbumHeader(
-                        state = state,
-                        onAddToLibrary = onAddToLibrary,
-                        onOpenFavoriteSheet = { showFavoriteSheet = true },
-                        onToggleDescription = onToggleDescription,
-                        onRead = onReadFromStart,
-                        onDownload = { showDownloadSheet = true },
-                        onSearchAuthor = onSearchAuthor,
-                    )
-                }
-                if (state.refreshing) {
-                    item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
-                }
-                // 已经导出过的 zip/pdf：放在章节前面——它属于"这本在我设备上有什么"，
-                // 与章节区标题里的占用体积是同一类信息，不该被长长的章节列表压到最下面
-                // （用户第九轮要求第 2 点）。正在导出的也算（用户第十一轮要求第 3 点）。
-                if (state.exports.isNotEmpty() || state.activeExports.isNotEmpty()) {
-                    item {
-                        ExportSection(
-                            exports = state.exports,
-                            active = state.activeExports,
-                            canOpenFolder = state.canOpenFolder,
-                            onOpen = onOpenOutput,
-                            onSend = onSendOutput,
-                            onDelete = { name -> pendingDeleteExport = name },
-                            onOpenFolder = onOpenFolder,
-                        )
+        // 下拉刷新（用户要求：把 TopAppBar 上那颗刷新按钮换成"下拉释放触发刷新"）。
+        //
+        // 为什么用 PullToRefreshBox 而不是在 LazyColumn 外再套一层滚动容器：
+        // 它就是 Material3 的 nested-scroll 方案，在"列表已经滑到顶部"时接管继续下拉，
+        // 列表没到顶时完全不动它——列表本身的滚动、fling 都不受影响。
+        //
+        // isRefreshing 直接用 state.refreshing：它与 ViewModel 里
+        // loadFromNetwork 的 refreshing 是同一个字段，所以"下拉转圈"和列表顶部那条
+        // LinearProgressIndicator 同时开始、同时结束；失败时 refreshing 也会归 false，
+        // 转圈不会卡住不退。已经在刷新时不再重复发起（refresh() 里没有去重）。
+        //
+        // ⚠ 外圈必须是**可滚动**的内容：`PullToRefreshBox` 完全靠 nested-scroll 拿手势，
+        // 而 "加载中 / 本地没数据" 这两支（LoadingBox / EmptyBox）是普通的 Box、不参与
+        // nested-scroll，直接放进去是拉不动的。所以给它们套一层 `verticalScroll`
+        // ——纵向滚动容器会把没被消费的下拉派发给外层的 PullToRefreshBox。
+        // 高度必须显式给到"整屏"：`verticalScroll` 发给子项的是**无限高约束**
+        // （foundation/Scroll.kt 里 maxHeight = Infinity），LoadingBox / EmptyBox
+        // 内部都用 fillMaxSize，直接把无限高传下去会崩；而给成固定 dp，
+        // 空状态在平板上就不会居中了。所以用 BoxWithConstraints 读真实视口高度再填回去。
+        PullToRefreshBox(
+            isRefreshing = state.refreshing,
+            onRefresh = { if (!state.refreshing && !state.loading) onRefresh() },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            when {
+                state.loading || state.album == null -> BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Box(modifier = Modifier.heightIn(min = maxHeight)) {
+                        if (state.loading) {
+                            LoadingBox()
+                        } else {
+                            EmptyBox(
+                                title = "本地没有这个本子的数据",
+                                hint = state.refreshError ?: "联网刷新失败，请下拉重试",
+                            )
+                        }
                     }
                 }
-                // 离线/刷新失败只提示，不阻断本地阅读（计划 §9 第 7 条）
-                state.refreshError?.let { error ->
-                    item { ErrorBanner(message = "在线刷新失败：$error", onRetry = onRefresh) }
-                }
-                item {
-                    ChapterSectionHeader(
-                        total = state.totalChapters,
-                        downloaded = state.downloadedChapters,
-                        localSizeBytes = state.localSizeBytes,
-                        reversed = state.reversed,
-                        onToggleReversed = onToggleReversed,
-                    )
-                }
-                if (state.chapters.isEmpty()) {
+                else -> LazyColumn(
+                    contentPadding = PaddingValues(bottom = 24.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
                     item {
-                        EmptyBox(
-                            title = "还没有章节数据",
-                            hint = "点右上角刷新试试",
-                            modifier = Modifier.height(160.dp),
+                        AlbumHeader(
+                            state = state,
+                            onAddToLibrary = onAddToLibrary,
+                            onOpenFavoriteSheet = { showFavoriteSheet = true },
+                            onToggleDescription = onToggleDescription,
+                            onRead = onReadFromStart,
+                            onDownload = { showDownloadSheet = true },
+                            onSearchAuthor = onSearchAuthor,
                         )
                     }
-                } else {
-                    items(state.chapters, key = { it.chapterId }) { chapter ->
-                        ChapterRowItem(
-                            chapter = chapter,
-                            onOpen = { onReadChapter(chapter.chapterId) },
-                            onDeleteFiles = { onDeleteChapterFiles(chapter.chapterId) },
+                    if (state.refreshing) {
+                        item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
+                    }
+                    // 已经导出过的 zip/pdf：放在章节前面——它属于"这本在我设备上有什么"，
+                    // 与章节区标题里的占用体积是同一类信息，不该被长长的章节列表压到最下面
+                    // （用户第九轮要求第 2 点）。正在导出的也算（用户第十一轮要求第 3 点）。
+                    if (state.exports.isNotEmpty() || state.activeExports.isNotEmpty()) {
+                        item {
+                            ExportSection(
+                                exports = state.exports,
+                                active = state.activeExports,
+                                canOpenFolder = state.canOpenFolder,
+                                onOpen = onOpenOutput,
+                                onSend = onSendOutput,
+                                onDelete = { name -> pendingDeleteExport = name },
+                                onOpenFolder = onOpenFolder,
+                            )
+                        }
+                    }
+                    // 离线/刷新失败只提示，不阻断本地阅读（计划 §9 第 7 条）
+                    state.refreshError?.let { error ->
+                        item { ErrorBanner(message = "在线刷新失败：$error", onRetry = onRefresh) }
+                    }
+                    item {
+                        ChapterSectionHeader(
+                            total = state.totalChapters,
+                            downloaded = state.downloadedChapters,
+                            localSizeBytes = state.localSizeBytes,
+                            reversed = state.reversed,
+                            onToggleReversed = onToggleReversed,
                         )
+                    }
+                    if (state.chapters.isEmpty()) {
+                        item {
+                            EmptyBox(
+                                title = "还没有章节数据",
+                                hint = "下拉刷新试试",
+                                modifier = Modifier.height(160.dp),
+                            )
+                        }
+                    } else {
+                        items(state.chapters, key = { it.chapterId }) { chapter ->
+                            ChapterRowItem(
+                                chapter = chapter,
+                                onOpen = { onReadChapter(chapter.chapterId) },
+                                onDeleteFiles = { onDeleteChapterFiles(chapter.chapterId) },
+                            )
+                        }
                     }
                 }
             }
