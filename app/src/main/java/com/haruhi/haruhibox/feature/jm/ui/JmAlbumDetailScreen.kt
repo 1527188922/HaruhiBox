@@ -277,10 +277,10 @@ fun JmAlbumDetailScreen(
         // 它就是 Material3 的 nested-scroll 方案，在"列表已经滑到顶部"时接管继续下拉，
         // 列表没到顶时完全不动它——列表本身的滚动、fling 都不受影响。
         //
-        // isRefreshing 直接用 state.refreshing：它与 ViewModel 里
-        // loadFromNetwork 的 refreshing 是同一个字段，所以"下拉转圈"和列表顶部那条
-        // LinearProgressIndicator 同时开始、同时结束；失败时 refreshing 也会归 false，
-        // 转圈不会卡住不退。已经在刷新时不再重复发起（refresh() 里没有去重）。
+        // `isRefreshing` 用 `state.refreshing`：它与 ViewModel 里 loadFromNetwork 的
+        // refreshing 是同一个字段，所以"下拉转圈"和列表顶部那条 LinearProgressIndicator
+        // 同时开始、同时结束；失败时 refreshing 也会归 false，转圈不会卡住不退。
+        // 已经在刷新时不再重复发起（refresh() 里没有去重）。
         //
         // ⚠ 外圈必须是**可滚动**的内容：`PullToRefreshBox` 完全靠 nested-scroll 拿手势，
         // 而 "加载中 / 本地没数据" 这两支（LoadingBox / EmptyBox）是普通的 Box、不参与
@@ -290,8 +290,13 @@ fun JmAlbumDetailScreen(
         // （foundation/Scroll.kt 里 maxHeight = Infinity），LoadingBox / EmptyBox
         // 内部都用 fillMaxSize，直接把无限高传下去会崩；而给成固定 dp，
         // 空状态在平板上就不会居中了。所以用 BoxWithConstraints 读真实视口高度再填回去。
+        //
+        // ⚠⚠ `isRefreshing` 必须以 `state.album != null` 为前提：首屏联网加载时
+        // `loading` 与 `refreshing` 是**同时为 true** 的（见 loadFromNetwork），
+        // 直接把 refreshing 交给它，屏幕上会同时出现"居中的加载圈"和"顶部下拉圈"
+        // 两个 loading（用户报的 bug）。有内容时两者互斥，才轮到下拉圈出场。
         PullToRefreshBox(
-            isRefreshing = state.refreshing,
+            isRefreshing = state.refreshing && state.album != null,
             onRefresh = { if (!state.refreshing && !state.loading) onRefresh() },
             modifier = Modifier
                 .fillMaxSize()
@@ -309,7 +314,7 @@ fun JmAlbumDetailScreen(
                         } else {
                             EmptyBox(
                                 title = "本地没有这个本子的数据",
-                                hint = state.refreshError ?: "联网刷新失败，请下拉重试",
+                                hint = "请检查网络后下拉重试",
                             )
                         }
                     }
@@ -348,10 +353,10 @@ fun JmAlbumDetailScreen(
                             )
                         }
                     }
-                    // 离线/刷新失败只提示，不阻断本地阅读（计划 §9 第 7 条）
-                    state.refreshError?.let { error ->
-                        item { ErrorBanner(message = "在线刷新失败：$error", onRetry = onRefresh) }
-                    }
+                    // 离线 / 刷新失败**不再挂横幅**（用户本轮要求第 1 点）：
+                    // 失败原因由 ViewModel 走 `message` 弹一句提示，用户想重试自己下拉释放一次。
+                    // 页面上的章节列表本来就不受刷新失败影响（本地优先，计划 §9 第 7 条），
+                    // 横幅只是把这块地方永久占住了。
                     item {
                         ChapterSectionHeader(
                             total = state.totalChapters,

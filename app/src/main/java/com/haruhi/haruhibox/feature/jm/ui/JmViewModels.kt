@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
 // ======================================================================
@@ -1121,8 +1123,6 @@ data class AlbumDetailUiState(
      * 决定详情页显示「加入书库」还是「已在书库」。
      */
     val inLibrary: Boolean = false,
-    /** 离线/刷新失败时的提示；**不清空本地数据**（计划 §9 第 7 条）。 */
-    val refreshError: String? = null,
     val message: String? = null,
     /** 章节倒序（正序/倒序切换）。 */
     val reversed: Boolean = false,
@@ -1242,6 +1242,14 @@ internal fun readingProgressLabel(chapterTitle: String?, hasPage: Boolean, pageN
 }
 
 /**
+ * 等本子数据就位的上限（毫秒）。
+ *
+ * 首屏是"本地读库 → 没有就联网拉"，正常几百毫秒内就有结果；给 5 秒是为了容忍
+ * 慢网络下第一次拉取，同时保证"本地没有、联网也失败"时协程会被放开并放弃这次重算。
+ */
+private const val ALBUM_WAIT_TIMEOUT_MS = 5_000L
+
+/**
  * 漫画详情。
  *
  * ## 数据读取顺序（用户要求第 4 点）
@@ -1310,6 +1318,20 @@ class JmAlbumDetailViewModel(
                 .collect { queued ->
                     _state.update { it.copy(queuedChapterIds = queued) }
                 }
+        }
+
+        // 3.5) **下载进度实时化**（用户本轮要求第 2、3 点）：
+        //    下载期间每隔一小段时间重算一次本地状态，于是章节行下面的"部分下载 1/100"
+        //    和章节区标题里的占用体积会自己往上走，不用退出页面再进来
+        //    （原来只在进页面 / 从别处返回时才重算一次）。
+        //
+        //    节流放在仓库层（`sample`），这里不再自己 delay：详情页每次重算都要逐话
+        //    核对磁盘文件、还要遍历整个本子目录算体积，而下载期间"进度变了"的信号是
+        //    连续的 —— 在这里去抖会把窗口一直往后推，结果整个下载过程一次都不刷新。
+        viewModelScope.launch {
+            tasks.observeChapterProgressEvents(albumId)
+                .catch { e -> Timber.tag("jm").w(e, "观察下载进度失败") }
+                .collect { loadLocalStats() }
         }
 
         // 4) 收藏状态跟着数据库走（用户反馈第 1、3 点）：
@@ -1426,7 +1448,7 @@ class JmAlbumDetailViewModel(
     private suspend fun loadFromNetwork(initial: Boolean) {
         val inLibrary = _state.value.inLibrary || runCatching { repo.findAlbum(albumId) }.getOrNull() != null
         _state.update {
-            it.copy(refreshing = true, refreshError = null, loading = initial && it.album == null)
+            it.copy(refreshing = true, loading = initial && it.album == null)
         }
         runCatching {
             // 只拉取并缓存基础数据：不改书库成员、不写最近预览
@@ -1450,8 +1472,11 @@ class JmAlbumDetailViewModel(
                     it.copy(
                         refreshing = false,
                         loading = false,
-                        // 离线时不阻断本地阅读，只提示（计划 §9 第 7 条）
-                        refreshError = e.toUserMessage(),
+                        // 离线时不阻断本地阅读，**只弹一句提示**（计划 §9 第 7 条）。
+                        // 页面上不再挂横幅 / 重试按钮：用户想再试就自己下拉释放一次
+                        // （用户本轮要求第 1 点）。这里走 message 这条既有的一次性提示通道，
+                        // 与"已加入书库"等提示同一条路——先消费再弹，切页不会重放。
+                        message = "在线刷新失败：${e.toUserMessage()}",
                     )
                 }
             }
@@ -1494,13 +1519,31 @@ class JmAlbumDetailViewModel(
     }
 
     /**
+     * 等本子数据就位后再取值（[loadLocalStats] 与下载进度通知都会用到）。
+     *
+     * 直接读 `_state.value.album` 会漏掉"通知比首次加载先到"的那一次（见 [loadLocalStats] 的注释），
+     * 所以这里挂起等一会儿；本子确实拉不到（本地没有、联网也失败）时由
+     * [ALBUM_WAIT_TIMEOUT_MS] 兜底返回 null，不会把协程永远挂住。
+     */
+    private suspend fun awaitAlbum(): JmAlbumEntity? {
+        _state.value.album?.let { return it }
+        return withTimeoutOrNull(ALBUM_WAIT_TIMEOUT_MS) {
+            _state.map { it.album }.filterNotNull().first()
+        }
+    }
+
+    /**
      * 重算章节状态与本地占用。
      *
      * **必须切到 IO**：`downloadedImageCount` 要逐张看文件在不在，`localSize` 要递归遍历
      * 整个本子目录。放在主线程就是"进详情页卡一下"（用户反馈第 9 点）。
      */
     private suspend fun loadLocalStats() {
-        val album = _state.value.album ?: return
+        // **等本子就位，而不是"还没有就放弃"**：下载进度的每一次通知都会走到这里，
+        // 而本子行本身要等"本地读库 / 联网详情"那一路跑完才填进 state。
+        // 首屏（基础表里没有这本、正在联网拉）时两者会赛跑，一旦这里直接 return，
+        // 那次进度更新就被吞掉，界面只能等下一次通知才动 —— 表现为"进度偶尔卡住不动"。
+        val album = awaitAlbum() ?: return
         val (rows, localSize, favoriteIds) = withContext(Dispatchers.IO) {
             val chapters = repo.chaptersOf(album)
             val rows = chapters.sortedBy { it.sort?.toIntOrNull() ?: Int.MAX_VALUE }.map { chapter ->

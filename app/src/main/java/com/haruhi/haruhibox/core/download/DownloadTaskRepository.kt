@@ -6,10 +6,13 @@ import com.haruhi.haruhibox.core.database.entity.DownloadTaskChapterEntity
 import com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity
 import com.haruhi.haruhibox.core.database.entity.DownloadType
 import com.haruhi.haruhibox.core.storage.LibraryDirs
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 import timber.log.Timber
 import java.io.File
 
@@ -79,6 +82,58 @@ class DownloadTaskRepository(
                     dao.observeChapters(task.id).map { rows -> rows.map { it.chapterId }.toSet() }
                 }
             }
+
+    /**
+     * 某个本子**下载进度发生过变化**的信号流。
+     *
+     * 详情页靠它把"部分下载 x/y 张"和本子占用体积做成实时的：执行器每下完一张图就
+     * 写一次 `t_download_task_chapter`（见 `JmDownloadManager` 的 `onFileDone`），
+     * 这里跟着发信号，调用方再去重算本地状态。
+     *
+     * 发的是**信号**而不是具体进度数字：调用方真正要的答案（磁盘上有几张、占了多大）
+     * 只存在于文件系统里，任务表里的 `doneImages` 只是个"该重算了"的提醒，
+     * 两者混用会在取消 / 重试 / 恢复之后对不上。
+     *
+     * 两种信号：
+     * - [ActiveTaskSignal.Progress]：下载进行中，**按 [PROGRESS_SAMPLE_MS] 周期取样**。
+     *   这里必须用 `sample` 而不是逐条转发：一话 100 张图就是 100 次写入，
+     *   逐条转发等于让界面在整个下载过程中不停扫盘；`sample` 才是"每 600ms 看一眼当前值"。
+     *   也**不能**让调用方自己去抖（debounce）：下载期间事件是连续的，
+     *   去抖窗口会被一直推迟、永远不触发，界面反而整个下载过程都不动。
+     * - [ActiveTaskSignal.Ended]：任务结束（成功 / 失败 / 取消）时发一次，
+     *   调用方据此按磁盘现状做最终重算，否则最后一话会停在"部分下载 99/100"。
+     *
+     * `sample` 目前还带 `@FlowPreview`，所以这里显式 opt-in（只有这一个函数用到）。
+     */
+    @OptIn(FlowPreview::class)
+    fun observeChapterProgressEvents(albumId: Long): Flow<ActiveTaskSignal> =
+        dao.observeActiveTask(DownloadType.JM_ALBUM, albumId.toString())
+            // ⚠ 必须先 `map` 成 **id** 再去重，不能直接对实体去重：
+            // 执行器每张图都会 `updateProgress` 改写整行任务（updateTime 也变），
+            // 实体每次都"不相等" → `flatMapLatest` 每次都被重启 → 下面的取样流
+            // 永远等不到 600ms 就被换掉，结果是整个下载过程中一次都不发信号。
+            // 只认"任务出现 / 消失"这两个变化，取样流才能安安静静跑完一个周期。
+            .map { task -> task?.id }
+            .distinctUntilChanged()
+            .flatMapLatest { taskId ->
+                if (taskId == null) {
+                    // 任务消失 = 这一轮跑完了（成功 / 失败 / 取消）：立刻做最终重算
+                    flowOf(ActiveTaskSignal.Ended)
+                } else {
+                    dao.observeChapters(taskId)
+                        .map { ActiveTaskSignal.Progress }
+                        .sample(PROGRESS_SAMPLE_MS)
+                }
+            }
+
+    /** [observeChapterProgressEvents] 的信号类型。 */
+    enum class ActiveTaskSignal {
+        /** 有活跃任务，进度可能变了（会按周期取样，不是每条都转发）。 */
+        Progress,
+
+        /** 活跃任务结束了（成功 / 失败 / 取消），要按磁盘现状做最终重算。 */
+        Ended,
+    }
 
     // ------------------------------------------------------------------
     // 提交（含去重）
@@ -426,5 +481,13 @@ class DownloadTaskRepository(
 
         const val STAGE_RECOVERED = "重新排队"
         const val STAGE_WAITING_NETWORK = "等待网络"
+
+        /**
+         * 详情页在下载过程中重算本地状态的取样周期（毫秒）。
+         *
+         * 一次重算要逐话核对磁盘文件、再遍历整个本子目录算体积，所以不能每张图都做；
+         * 600ms 对"进度条自己往上走"来说完全够用，扫盘次数却少了两个数量级。
+         */
+        const val PROGRESS_SAMPLE_MS = 600L
     }
 }
