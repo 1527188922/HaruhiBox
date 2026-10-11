@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Favorite
@@ -65,9 +66,16 @@ import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.haruhi.haruhibox.core.database.entity.JmFavoriteEntity
 import com.haruhi.haruhibox.core.storage.FileNaming
@@ -792,7 +800,10 @@ private fun AlbumHeader(
     onSearchAuthor: (String) -> Unit = {},
 ) {
     val album = state.album ?: return
-    val authorText = parseStringArray(album.author).joinToString(" / ")
+    val authors = parseStringArray(album.author)
+    // 作者行的**整体文案**：`作者A / 作者B`（分隔符也算在里面）。
+    // 链接是在这串文字上"挖"出来的，而不是把作者拆成几个 Text —— 复制出去仍是整串。
+    val authorText = authors.joinToString(AUTHOR_SEPARATOR)
     Column(modifier = Modifier.padding(12.dp)) {
         Row {
             JmCover(
@@ -805,30 +816,55 @@ private fun AlbumHeader(
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = album.name?.takeIf { it.isNotBlank() } ?: "JM${album.id}",
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                // 名称 / JM 号 / 作者行**各一个**可选区块（用户要求：这几段都要能复制）。
+                // Android 原生复制 = SelectionContainer + 长按起选 → 系统工具条上的「复制」。
+                //
+                // 每段各一个容器，是为了让「全选」只拿到**这一段自己的全文**（收起简介 / 被截断的书名
+                // 复制出来都是全文，见下方简介那段注释），不会把别的段落一起带上。
+                // 一个 SelectionState 只能绑一个 SelectionContainer（共用会抛 IllegalStateException），
+                // 所以每处都用默认 state，各管各的。
+                SelectionContainer {
+                    Text(
+                        text = album.name?.takeIf { it.isNotBlank() } ?: "JM${album.id}",
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "JM${album.id}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                SelectionContainer {
+                    Text(
+                        text = "JM${album.id}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (authorText.isNotEmpty()) {
                     Spacer(Modifier.height(2.dp))
-                    // 点作者 = 拿去在线搜索：切到发现页并把作者名填进搜索框（不自动搜）。
-                    // 用主色把它标出来，让用户知道这行可以点。
-                    Text(
-                        text = authorText,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clickable { onSearchAuthor(authorText) },
-                    )
+                    // 点作者 = 拿去在线搜索：切到发现页并把**被点的那一位**填进搜索框（不自动搜）。
+                    // 多个作者时点谁搜谁（每位作者一个 LinkAnnotation），分隔符保持次要色。
+                    //
+                    // 注意（已知且接受）：链接的点击区域是 foundation 的 TextLinkScope 生成的 Box
+                    // （combinedClickable），它在按下时就消费掉 down 事件，而文字选择手势要求"未被消费的
+                    // down"才启动，所以**长按作者名不会起选，而是点击作者**（跳发现页）；
+                    // 只有一个作者时整行都是链接，这一行就长按不了、复制不到。
+                    // 不要为了"这一行也能复制"把上面几段并进同一个容器 —— 那样「全选」会把名称和
+                    // JM 号一起复制出来，而用户要的是每段只拿自己这一段。
+                    SelectionContainer {
+                        // 整段文字仍是 `作者A / 作者B`，链接只是在这串文字上"挖"出来的可点范围，
+                        // 所以选中复制拿到的还是整串（用户要求）。
+                        Text(
+                            text = authorLinkText(
+                                authors = authors,
+                                authorColor = MaterialTheme.colorScheme.primary,
+                                separatorColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                onAuthorClick = onSearchAuthor,
+                            ),
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 // 这里原来是"共 x 话 · 已下载 y 话 · 占用 z"，与下方章节区标题说的是同一件事、
@@ -925,19 +961,26 @@ private fun AlbumHeader(
             // 只有真的被截断时才显示"展开简介"（用户反馈：内容本来就能全部显示时
             // 按钮是多余的）。判断方式是用 onTextLayout 看行数是否被 maxLines 限制。
             var descriptionOverflows by remember(description) { mutableStateOf(false) }
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = if (state.descriptionExpanded) Int.MAX_VALUE else DESCRIPTION_COLLAPSED_LINES,
-                overflow = TextOverflow.Ellipsis,
-                onTextLayout = { result ->
-                    // hasVisualOverflow 表示文本被 maxLines 截断了
-                    if (!state.descriptionExpanded) {
-                        descriptionOverflows = result.hasVisualOverflow ||
-                            result.lineCount > DESCRIPTION_COLLAPSED_LINES
-                    }
-                },
-            )
+            // 简介单独一个可选区块：收起时只画 3 行（末尾省略号），但**选择是按完整文本记的** ——
+            // Compose 复制取的是这个可选段落整段 AnnotatedString 的子串（不是可见的那几行），
+            // 所以长按后按「全选」复制出来的是整篇简介；把结束手柄拖到文字下方也一样能补到全文。
+            // 高亮只画在可见行上（SelectionController 会按 lastVisibleOffset 裁剪），
+            // 这是 Compose 的既有行为，不是漏了。
+            SelectionContainer {
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = if (state.descriptionExpanded) Int.MAX_VALUE else DESCRIPTION_COLLAPSED_LINES,
+                    overflow = TextOverflow.Ellipsis,
+                    onTextLayout = { result ->
+                        // hasVisualOverflow 表示文本被 maxLines 截断了
+                        if (!state.descriptionExpanded) {
+                            descriptionOverflows = result.hasVisualOverflow ||
+                                result.lineCount > DESCRIPTION_COLLAPSED_LINES
+                        }
+                    },
+                )
+            }
             if (descriptionOverflows || state.descriptionExpanded) {
                 TextButton(onClick = onToggleDescription) {
                     Text(if (state.descriptionExpanded) "收起简介" else "展开简介")
@@ -1301,6 +1344,63 @@ fun parseStringArray(json: String?): List<String> {
     return runCatching {
         com.haruhi.haruhibox.feature.jm.api.decodeStringList(json)
     }.getOrDefault(emptyList())
+}
+
+/**
+ * 作者之间的分隔符。
+ *
+ * 显示上是次要色的一小段 ` / `，但它**属于要复制的整体文案**（`作者A / 作者B`），
+ * 所以它和作者名在同一个 AnnotatedString 里，而不是两个 Text 拼出来的。
+ */
+internal const val AUTHOR_SEPARATOR = " / "
+
+/**
+ * 作者行的富文本：每位作者各挂一个 [LinkAnnotation.Clickable]（点谁搜谁），
+ * 作者之间是次要色的 [AUTHOR_SEPARATOR]。
+ *
+ * ## 为什么是 AnnotatedString + LinkAnnotation（用户方案）
+ *
+ * 这样"逐作者可点"与"整体可复制"不打架：**一份**文本既是若干个链接，又是完整的一串
+ * `作者A / 作者B`。换成"每位作者一个 Text"就会把整串切成几段，长按选中只能拿到其中一段。
+ *
+ * ## 一个必须知道的 Compose 限制
+ *
+ * 链接的点击区域不是我们自己画的，是 `TextLinkScope` 为每段链接生成的一个 `Box`
+ * （`combinedClickable`）。它在**按下时就消费掉 down 事件**，而文字选择的手势
+ * （`SelectionController`）要求一个没被消费的 down 才会启动，所以：
+ *
+ * - **长按作者名本身不会起选，而是点击作者**（跳发现页）——与点一下等价，符合"这行可点"的预期；
+ * - 多个作者时，长按作者之间的「 / 」（不是链接）仍能起选，之后按「全选」拿到整串；
+ * - **只有一个作者时整行都是链接，这一行就长按不了**。这是已确认接受的取舍：作者行"可点"优先，
+ *   且四段各占一个 SelectionContainer，不借别的段落把它带出来（用户要的是每段只复制自己这一段）。
+ *
+ * @param authors 作者名列表（详情接口 / 库里 JSON 数组解析来的）
+ * @param authorColor 作者名颜色（当前是主色，暗示可点）
+ * @param separatorColor 分隔符颜色（次要色）
+ * @param onAuthorClick 点某位作者：拿这个名字去在线搜索（上层切到发现页并填搜索框，不自动搜）
+ */
+fun authorLinkText(
+    authors: List<String>,
+    authorColor: Color,
+    separatorColor: Color,
+    onAuthorClick: (String) -> Unit,
+): AnnotatedString = buildAnnotatedString {
+    // 每位作者共用同一套链接样式，不要在循环里反复构造
+    val linkStyles = TextLinkStyles(style = SpanStyle(color = authorColor))
+    authors.forEachIndexed { index, author ->
+        if (index > 0) {
+            withStyle(SpanStyle(color = separatorColor)) { append(AUTHOR_SEPARATOR) }
+        }
+        withLink(
+            LinkAnnotation.Clickable(
+                tag = "author:$author",
+                styles = linkStyles,
+                linkInteractionListener = { onAuthorClick(author) },
+            ),
+        ) {
+            append(author)
+        }
+    }
 }
 
 /** 人类可读的占用体积。 */

@@ -1,5 +1,6 @@
 package com.haruhi.haruhibox.feature.jm.ui
 
+import androidx.compose.ui.graphics.Color
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.network.toUserMessage
@@ -122,6 +123,55 @@ class JmDisplayLogicTest {
         // 解析失败不抛异常：库里可能有旧版本写入的脏数据
         assertThat(parseStringArray("not json")).isEmpty()
         assertThat(parseStringArray("""["作者A","作者B"]""")).containsExactly("作者A", "作者B").inOrder()
+    }
+
+    // ---------------- 详情页作者行：逐作者可点 + 整体可复制 ----------------
+
+    @Test
+    fun `author line stays one whole string with one link per author`() {
+        val clicked = mutableListOf<String>()
+        val text = authorLinkText(
+            authors = listOf("作者A", "作者B"),
+            authorColor = Color.Red,
+            separatorColor = Color.Gray,
+            onAuthorClick = { clicked += it },
+        )
+
+        // 复制拿到的必须是**整体**文案：分隔符也在里面，没有被链接切成几段
+        assertThat(text.text).isEqualTo("作者A / 作者B")
+
+        // 每位作者一个链接，链接范围正好盖住作者名（分隔符不是链接）
+        val links = text.getLinkAnnotations(0, text.length)
+        assertThat(links).hasSize(2)
+        assertThat(text.text.substring(links[0].start, links[0].end)).isEqualTo("作者A")
+        assertThat(text.text.substring(links[1].start, links[1].end)).isEqualTo("作者B")
+
+        // 点谁就带走谁（上层拿这个名字去在线搜索）
+        links[1].item.linkInteractionListener?.onClick(links[1].item)
+        assertThat(clicked).containsExactly("作者B")
+    }
+
+    @Test
+    fun `author line with zero or one author is still the whole text`() {
+        val single = authorLinkText(
+            authors = listOf("有贺冬"),
+            authorColor = Color.Red,
+            separatorColor = Color.Gray,
+            onAuthorClick = {},
+        )
+        // 只有一个作者时不带分隔符，整行仍是一段可复制的文本
+        assertThat(single.text).isEqualTo("有贺冬")
+        assertThat(single.getLinkAnnotations(0, single.text.length)).hasSize(1)
+
+        // 没有作者（上层据此不渲染这一行）：空文本、零个链接，不抛
+        val none = authorLinkText(
+            authors = emptyList(),
+            authorColor = Color.Red,
+            separatorColor = Color.Gray,
+            onAuthorClick = {},
+        )
+        assertThat(none.text).isEmpty()
+        assertThat(none.getLinkAnnotations(0, none.text.length)).isEmpty()
     }
 
     // ---------------- 异常 → 用户可读文案 ----------------

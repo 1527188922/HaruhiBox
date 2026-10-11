@@ -433,6 +433,32 @@ app/src/main/java/com/haruhi/haruhibox/
 > 批量删除 / 收藏只在**书库页**与**收藏夹内页**，两处是同一个 `JmLibraryScreen`，
 > 改一处两处都生效；漫画详情页与其它页面没有改动。
 
+### 第二十三轮反馈修复（2026-10-11）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| U1 | 详情页的**漫画名称 / JM 号 / 作者名 / 简介**要能复制（Android 原生复制即可），**被省略号截掉的内容也要能复制** | 封面区改用 `SelectionContainer`：**四段各一个**（名称、JM 号、作者行、简介），这样「全选」只拿到**这一段自己的全文**，不会把别的段落带上（`SelectionState` 一个只能绑一个容器，共用会抛 `IllegalStateException`，所以每处都用默认 state、互不影响）。**省略内容能复制不是靠多包一层**，而是 Compose 的选择本来就按**完整文本**记：`SelectionManager.getSelectedText()` 取的是可选段落整段 `AnnotatedString` 的子串，`MultiWidgetSelectionDelegate.getSelectAllSelection()` 返回的也是 `0..text.length`（不是可见范围），所以收起状态下的 3 行简介、被 `maxLines` 截断的书名，长按后按工具条「全选」复制出来的是**全文**；把结束手柄拖到文字下方同样能补到文末。选择高亮只画在可见行上（`SelectionController.draw()` 按 `lastVisibleOffset` 裁剪），这是 Compose 既有行为，不是漏了 | 代码（**按要求没有跑测试**）。设备上这样核对：长按书名 → 系统工具条出现 → 「全选」→「复制」→ 粘贴得到完整书名（**不带 JM 号**）；收起简介同样操作得到整篇简介；点其它地方选择框消失；上下滑动列表照常 |
+| U2 | 多个作者现在是 ` / ` 拼成一整串、点哪儿都用整串去搜；要**点具体某位作者**跳发现页（分隔符保持次要色），**复制仍是整体复制** | 按用户方案用 `AnnotatedString` + `LinkAnnotation.Clickable`（抽成纯函数 `authorLinkText()`）：每位作者一个链接，`TextLinkStyles(style = SpanStyle(color = primary))` 保持主色；作者之间 `withStyle(SpanStyle(color = onSurfaceVariant)) { append(AUTHOR_SEPARATOR) }` 保持次要色。**整段文字仍是 `作者A / 作者B`**，链接只是在这串文字上"挖"出来的可点范围，所以复制拿到的还是整串——原来那行 `Modifier.clickable { onSearchAuthor(整串) }` 已删除 | `JmDisplayLogicTest` 新增 2 个用例：链接个数 / 每条链接的覆盖范围 / `text.text == "作者A / 作者B"` / 点第 2 个链接回调的是 `"作者B"` / 零个或一个作者时的文本；**按要求没有跑测试** |
+
+> **一个 Compose 层面的取舍（这轮翻 foundation 源码才确认，写下来免得以后再踩）**：
+> 链接的点击区域不是我们画的，是 `TextLinkScope.LinksComposables()` 为每段链接生成的一个
+> `Box`（`combinedClickable`），它在**按下时就 `consume()` 掉 down 事件**；而文字选择的手势
+> （`SelectionController` 的 `awaitSelectionGestures` → `awaitDown()` 用 `changedToDown()`，
+> 也就是要求 down **未被消费**）于是启动不了。表现：**长按作者名不会起选，而是点击作者**
+> （与点一下等价，跳发现页）；多个作者时，长按作者之间的「 / 」（不是链接）还能起选，
+> 之后按「全选」拿到整串。
+>
+> **只有一个作者时整行都是链接，这一行就长按不了、复制不到**——这是**用户明确接受的取舍**：
+> 作者行"可点"优先，且四段各占一个 `SelectionContainer`（用户要的是每段只复制自己这一段），
+> 不借别的段落把它带出来。**不要**为了"这一行也能复制"把几段并进同一个容器：那样「全选」
+> 会把名称和 JM 号一起复制出来，与"每段各一个容器"的要求相反。
+> 若以后要"长按作者名也能起选"，只能放弃 `LinkAnnotation`、自己写**完全不消费事件**的点击探测
+> （按下 / 抬起只观察不 consume，再按坐标判断落在哪位作者上），代价是 TalkBack 不再把这几个词读成链接。
+
+> 与第十八~二十轮那次**已撤回**的复制尝试的区别：这次不碰任何根节点手势（`focusable()` /
+> `detectTapGestures` / `PointerEventPass.Initial` 拦截一律没有），只对着要复制的文字包
+> `SelectionContainer`；作者行的"可点"交给 `LinkAnnotation`，不再叠 `Modifier.clickable`。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |
