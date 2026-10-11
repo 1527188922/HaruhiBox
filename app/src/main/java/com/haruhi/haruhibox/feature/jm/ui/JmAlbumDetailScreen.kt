@@ -800,10 +800,6 @@ private fun AlbumHeader(
     onSearchAuthor: (String) -> Unit = {},
 ) {
     val album = state.album ?: return
-    val authors = parseStringArray(album.author)
-    // 作者行的**整体文案**：`作者A / 作者B`（分隔符也算在里面）。
-    // 链接是在这串文字上"挖"出来的，而不是把作者拆成几个 Text —— 复制出去仍是整串。
-    val authorText = authors.joinToString(AUTHOR_SEPARATOR)
     Column(modifier = Modifier.padding(12.dp)) {
         Row {
             JmCover(
@@ -837,46 +833,47 @@ private fun AlbumHeader(
                         text = "JM${album.id}",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                if (authorText.isNotEmpty()) {
+                val authors = parseStringArray(album.author)
+                if (authors.isNotEmpty()) {
                     Spacer(Modifier.height(2.dp))
-                    // 点作者 = 拿去在线搜索：切到发现页并把**被点的那一位**填进搜索框（不自动搜）。
-                    // 多个作者时点谁搜谁（每位作者一个 LinkAnnotation），分隔符保持次要色。
-                    //
-                    // 注意（已知且接受）：链接的点击区域是 foundation 的 TextLinkScope 生成的 Box
-                    // （combinedClickable），它在按下时就消费掉 down 事件，而文字选择手势要求"未被消费的
-                    // down"才启动，所以**长按作者名不会起选，而是点击作者**（跳发现页）；
-                    // 只有一个作者时整行都是链接，这一行就长按不了、复制不到。
-                    // 不要为了"这一行也能复制"把上面几段并进同一个容器 —— 那样「全选」会把名称和
-                    // JM 号一起复制出来，而用户要的是每段只拿自己这一段。
                     SelectionContainer {
-                        // 整段文字仍是 `作者A / 作者B`，链接只是在这串文字上"挖"出来的可点范围，
-                        // 所以选中复制拿到的还是整串（用户要求）。
-                        Text(
-                            text = authorLinkText(
-                                authors = authors,
-                                authorColor = MaterialTheme.colorScheme.primary,
-                                separatorColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                onAuthorClick = onSearchAuthor,
-                            ),
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        if (authors.size == 2) {
+                            Text(
+                                text = authorLinkText(
+                                    authors = authors,
+                                    authorColor = MaterialTheme.colorScheme.primary,
+                                    separatorColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    onAuthorClick = onSearchAuthor,
+                                ),
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }else{
+                            val authorText = authors.joinToString(AUTHOR_SEPARATOR)
+                            Text(
+                                text = authorText,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.clickable { onSearchAuthor(authorText) },
+                            )
+                        }
                     }
                 }
                 Spacer(Modifier.height(6.dp))
-                // 这里原来是"共 x 话 · 已下载 y 话 · 占用 z"，与下方章节区标题说的是同一件事、
-                // 在同一屏里重复了一遍；现在占用体积并到章节区标题，
-                // 这一行换成点赞 / 观看数（用户要求）。
+                // 成点赞 / 观看数
                 AlbumStatRow(likes = album.likes, views = album.totalViews)
                 Spacer(Modifier.height(8.dp))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 用户要求第 2 点：**点详情不等于加入书库**，所以必须有显式入口
                     if (!state.inLibrary) {
                         TextButton(onClick = onAddToLibrary) { Text("加入书库") }
                     } else {
