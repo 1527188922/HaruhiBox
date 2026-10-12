@@ -180,11 +180,13 @@ class DownloadTaskRepository(
     // ------------------------------------------------------------------
 
     suspend fun markRunning(id: Long) {
-        val now = System.currentTimeMillis()
-        val task = dao.findById(id) ?: return
-        dao.update(task.copy(status = DownloadStatus.RUNNING, startTime = task.startTime ?: now, updateTime = now))
+        dao.markRunning(id, System.currentTimeMillis())
     }
 
+    /**
+     * 上报任务级进度。**只写进度列**（传 null 的项不动）：
+     * 下载期间进度心跳会高频重算任务行，整行读改写会把心跳/暂停刚写入的值覆盖掉。
+     */
     suspend fun updateProgress(
         id: Long,
         stageText: String? = null,
@@ -195,18 +197,16 @@ class DownloadTaskRepository(
         downloadedBytes: Long? = null,
         totalBytes: Long? = null,
     ) {
-        val task = dao.findById(id) ?: return
-        dao.update(
-            task.copy(
-                stageText = stageText ?: task.stageText,
-                doneChapters = doneChapters ?: task.doneChapters,
-                totalChapters = totalChapters ?: task.totalChapters,
-                doneImages = doneImages ?: task.doneImages,
-                totalImages = totalImages ?: task.totalImages,
-                downloadedBytes = downloadedBytes ?: task.downloadedBytes,
-                totalBytes = totalBytes ?: task.totalBytes,
-                updateTime = System.currentTimeMillis(),
-            ),
+        dao.updateProgress(
+            id = id,
+            stageText = stageText,
+            doneChapters = doneChapters,
+            totalChapters = totalChapters,
+            doneImages = doneImages,
+            totalImages = totalImages,
+            downloadedBytes = downloadedBytes,
+            totalBytes = totalBytes,
+            now = System.currentTimeMillis(),
         )
     }
 
@@ -218,15 +218,7 @@ class DownloadTaskRepository(
 
     /** 等待网络：不算失败，也不算"正在运行"（§9 第 9 条）。 */
     suspend fun markWaitingNetwork(id: Long, reason: String?) {
-        val task = dao.findById(id) ?: return
-        dao.update(
-            task.copy(
-                status = DownloadStatus.WAITING_NETWORK,
-                message = reason,
-                stageText = STAGE_WAITING_NETWORK,
-                updateTime = System.currentTimeMillis(),
-            ),
-        )
+        dao.markWaitingNetwork(id, reason, STAGE_WAITING_NETWORK, System.currentTimeMillis())
     }
 
     suspend fun markQueued(id: Long) = dao.updateStatus(id, DownloadStatus.QUEUED, System.currentTimeMillis())
@@ -281,19 +273,13 @@ class DownloadTaskRepository(
      *
      * **任务级数字永远由章节明细推导**，不单独累加：这样取消、重试、恢复
      * 都不会让任务进度和章节进度对不上。
+     *
+     * 实现是**一条 SQL 的子查询聚合**（见 [DownloadTaskDao.recomputeTotalsFromChapters]），
+     * 不是"读整行再写回"：下载期间进度心跳每 600ms 调它一次，
+     * 读改写会与 pause / 单张图进度写入互相覆盖。
      */
     suspend fun recomputeTaskTotals(taskId: Long) {
-        val task = dao.findById(taskId) ?: return
-        val chapters = dao.chapters(taskId)
-        dao.update(
-            task.copy(
-                totalChapters = chapters.size,
-                doneChapters = chapters.count { it.status == DownloadStatus.SUCCESS },
-                totalImages = chapters.sumOf { it.totalImages },
-                doneImages = chapters.sumOf { it.doneImages },
-                updateTime = System.currentTimeMillis(),
-            ),
-        )
+        dao.recomputeTotalsFromChapters(taskId, System.currentTimeMillis())
     }
 
     /**

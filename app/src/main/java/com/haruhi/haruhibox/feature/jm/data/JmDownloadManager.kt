@@ -15,6 +15,8 @@ import com.haruhi.haruhibox.feature.jm.api.JmJson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -77,7 +79,9 @@ data class JmDownloadPayload(
  * - **执行顺序**：任务 → 章节 → 图片。每章先保证"图片清单已入库"
  *   （没有就现场拉一次 `/chapter` 并持久化，§9 第 7 条），再取 `scramble_id`
  *   构造解扰钩子，然后走并发图片下载；
- * - **进度持久化**：每张图完成写一次章节计数，每章结束重算任务级数字；
+ * - **进度持久化**：每张图完成写一次章节计数；任务级数字（任务卡进度条、通知栏都读它）
+ *   由"进度心跳"按 [TASK_PROGRESS_REFRESH_MS] 周期从章节明细重算——每张图只写章节表，
+ *   任务行如果只在整话结束时才更新，界面在整话下载期间就是静止的（用户反馈第 1、2 点）；
  * - **网络策略**：每个安全检查点问一次闸门，不允许时进 `WAITING_NETWORK`
  *   并**挂起等待**网络恢复（不是失败），恢复后自动继续（§9.5「不偷偷开始大下载」）；
  * - **恢复**：交给 [DownloadTaskRepository.recoverInterrupted]，本类只负责"恢复之后接着跑"。
@@ -282,25 +286,19 @@ class JmDownloadManager(
         tasks.updateProgress(taskId, stageText = STAGE_DOWNLOADING)
         tasks.recomputeTaskTotals(taskId)
 
-        var previousRemaining = Int.MAX_VALUE
-        while (true) {
-            coroutineContext.ensureActive()
-            if (!isRunnable(taskId)) return
-
-            val pending = tasks.chapterList(taskId).filter { it.status != DownloadStatus.SUCCESS }
-            if (pending.isEmpty()) break
-            // 一轮下来没有任何章节完成 -> 再跑也是白跑（对齐参考实现的"需下载数不变就终止"）
-            if (pending.size >= previousRemaining) {
-                Timber.tag("dl").w("任务 %d 没有进展，停止重试（剩 %d 话）", taskId, pending.size)
-                break
+        coroutineScope {
+            val heartbeat = launch {
+                while (true) {
+                    delay(TASK_PROGRESS_REFRESH_MS)
+                    val status = tasks.findById(taskId)?.status ?: break
+                    // 只在真正下载时搬运；排队/等网络时数字不会变，不做无谓写入
+                    if (status == DownloadStatus.RUNNING) tasks.recomputeTaskTotals(taskId)
+                }
             }
-            previousRemaining = pending.size
-
-            for (row in pending) {
-                coroutineContext.ensureActive()
-                if (!isRunnable(taskId)) return
-                downloadChapter(taskId, payload.albumId, folderName, row)
-                tasks.recomputeTaskTotals(taskId)
+            try {
+                downloadPendingChapters(taskId, payload.albumId, folderName)
+            } finally {
+                heartbeat.cancel()
             }
         }
 
@@ -320,6 +318,37 @@ class JmDownloadManager(
         }
     }
 
+    /**
+     * 逐话推进，直到没有未完成章节（或"剩下的话数不再减少"这种没有进展的情况）。
+     *
+     * 单独抽出来是为了让进度心跳有明确的作用域：心跳在 [runTask] 的
+     * `coroutineScope` 里启动，这里所有 `return` 都只结束本方法，
+     * 由 [runTask] 统一决定要不要走收尾分支。
+     */
+    private suspend fun downloadPendingChapters(taskId: Long, albumId: Long, folderName: String) {
+        var previousRemaining = Int.MAX_VALUE
+        while (true) {
+            coroutineContext.ensureActive()
+            if (!isRunnable(taskId)) return
+
+            val pending = tasks.chapterList(taskId).filter { it.status != DownloadStatus.SUCCESS }
+            if (pending.isEmpty()) break
+            // 一轮下来没有任何章节完成 -> 再跑也是白跑（对齐参考实现的"需下载数不变就终止"）
+            if (pending.size >= previousRemaining) {
+                Timber.tag("dl").w("任务 %d 没有进展，停止重试（剩 %d 话）", taskId, pending.size)
+                break
+            }
+            previousRemaining = pending.size
+
+            for (row in pending) {
+                coroutineContext.ensureActive()
+                if (!isRunnable(taskId)) return
+                downloadChapter(taskId, albumId, folderName, row)
+                tasks.recomputeTaskTotals(taskId)
+            }
+        }
+    }
+
     private suspend fun downloadChapter(
         taskId: Long,
         albumId: Long,
@@ -329,6 +358,10 @@ class JmDownloadManager(
         val chapterId = row.chapterId
         awaitNetworkPermission(taskId)
         if (!isRunnable(taskId)) return
+
+        // 任务页与通知栏都要看出"正在下第几话"，阶段文案在这一话开始时就写
+        val stage = downloadStage(taskId, chapterId)
+        tasks.updateProgress(taskId, stageText = stage)
 
         tasks.updateChapterProgress(taskId, chapterId, row.doneImages, DownloadStatus.RUNNING)
 
@@ -345,6 +378,9 @@ class JmDownloadManager(
             return
         }
         tasks.setChapterTotal(taskId, chapterId, images.size)
+        // 任务行立刻知道"这一话有多少张"：否则新任务在整话下完之前 totalImages 一直是 0，
+        // 任务卡按"totalImages > 0"判断要不要画进度条，就会整话都不显示（用户反馈第 1 点）
+        tasks.recomputeTaskTotals(taskId)
 
         val folder = row.chapterTitle?.takeIf { it.isNotBlank() } ?: chapterId.toString()
         val chapterDir = dirs.chapterDir(albumFolder, folder)
@@ -368,7 +404,7 @@ class JmDownloadManager(
             previousMissing = pending.size
             round++
 
-            awaitNetworkPermission(taskId)
+            awaitNetworkPermission(taskId, stage)
             if (!isRunnable(taskId)) return
 
             val domain = environment.imageDomain()
@@ -425,8 +461,10 @@ class JmDownloadManager(
      * **不允许时进 `WAITING_NETWORK` 并挂起**，而不是抛错：
      * 计划 §9 第 9 条要求"等待网络"是一个独立状态，且不算失败。
      * 网络恢复（或用户在设置里放开策略）后这里自动返回，任务接着跑。
+     *
+     * @param stage 恢复后要写回的任务阶段文案（保持"第几话"这类上下文不丢）
      */
-    private suspend fun awaitNetworkPermission(taskId: Long) {
+    private suspend fun awaitNetworkPermission(taskId: Long, stage: String = STAGE_DOWNLOADING) {
         val now = environment.networkState.value
         if (now.online && environment.allowsTransfer(now.metered)) return
 
@@ -437,7 +475,24 @@ class JmDownloadManager(
         if (!isRunnable(taskId)) return
         tasks.markQueued(taskId)
         tasks.markRunning(taskId)
-        tasks.updateProgress(taskId, stageText = STAGE_DOWNLOADING)
+        // 恢复后把阶段文案写回去（等待网络时被 STAGE_WAITING_NETWORK 覆盖过）
+        tasks.updateProgress(taskId, stageText = stage)
+    }
+
+    /**
+     * 当前的阶段文案：`下载图片 · 第1话`。
+     *
+     * 话名优先用章节标题——就是章节列表、磁盘目录里显示的那个名字（JM 的标题
+     * 通常形如"第1話"，正好回答了"在下第几话"）；标题缺失时退回"第 N/M 话"，
+     * 序号按任务内章节顺序算（与 [DownloadTaskRepository.chapterList] 同序），
+     * 不依赖 `sort` 字段——部分本子的 `sort` 拿不到，会退化成 0。
+     */
+    private suspend fun downloadStage(taskId: Long, chapterId: Long): String {
+        val ordered = tasks.chapterList(taskId)
+        val index = ordered.indexOfFirst { it.chapterId == chapterId }
+        val chapter = ordered.getOrNull(index)?.chapterTitle?.takeIf { it.isNotBlank() }
+            ?: if (index >= 0) "第 ${index + 1}/${ordered.size} 话" else null
+        return if (chapter == null) STAGE_DOWNLOADING else "$STAGE_DOWNLOADING · $chapter"
     }
 
     /**
@@ -458,6 +513,13 @@ class JmDownloadManager(
         const val AUTO_CONCURRENCY = 4
 
         const val WAITING_REASON = "当前网络不允许下载，已暂停传输"
+
+        /**
+         * 进度心跳周期（毫秒）：把章节明细的聚合结果落一次任务行，
+         * 让任务卡进度条 / 通知栏在整话下载期间也能动起来。
+         * 节奏与详情页的 `PROGRESS_SAMPLE_MS`（600ms）一致。
+         */
+        const val TASK_PROGRESS_REFRESH_MS = 600L
 
         /** 任务的阶段文案，任务页与通知共用。 */
         const val STAGE_DOWNLOADING = "下载图片"

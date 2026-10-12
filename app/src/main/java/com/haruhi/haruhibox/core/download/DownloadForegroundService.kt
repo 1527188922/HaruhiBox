@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.ServiceCompat
 import com.haruhi.haruhibox.HaruhiBoxApp
+import com.haruhi.haruhibox.core.database.entity.DownloadType
 import com.haruhi.haruhibox.core.notification.DownloadNotifications
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -79,7 +80,7 @@ class DownloadForegroundService : Service() {
         task: com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity,
         activeCount: Int,
     ): String {
-        val stage = task.stageText ?: "下载中"
+        val stage = task.stageText ?: defaultStageText(task)
         val detail = when {
             task.totalImages > 0 -> "${task.doneImages}/${task.totalImages} 张"
             task.totalBytes > 0 -> "${task.downloadedBytes / 1024 / 1024}MB/" +
@@ -89,6 +90,22 @@ class DownloadForegroundService : Service() {
         }
         val suffix = if (activeCount > 1) "（共 $activeCount 个任务）" else ""
         return listOf(stage, detail).filter { it.isNotEmpty() }.joinToString(" · ") + suffix
+    }
+
+    /**
+     * 任务还没上报阶段文案时的兜底（刚提交、还在排队的那几秒）。
+     *
+     * 至少要让人看出这是"下载图片 / 生成 ZIP / 生成 PDF"哪一种，
+     * 而不是笼统的"下载中"——任务真正跑起来后由执行器写入带话数的完整文案。
+     */
+    private fun defaultStageText(
+        task: com.haruhi.haruhibox.core.database.entity.DownloadTaskEntity,
+    ): String = when (task.type) {
+        // core 层不反向依赖 feature，所以这里的文案与 JmDownloadManager.STAGE_DOWNLOADING 同字面量
+        DownloadType.JM_ALBUM -> "下载图片"
+        DownloadType.JM_EXPORT_ZIP -> "生成 ZIP"
+        DownloadType.JM_EXPORT_PDF -> "生成 PDF"
+        DownloadType.BILI_VIDEO -> "下载视频"
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

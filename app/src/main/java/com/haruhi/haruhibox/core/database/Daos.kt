@@ -710,6 +710,86 @@ interface DownloadTaskDao {
     suspend fun finish(id: Long, status: DownloadStatus, message: String?, endTime: Long)
 
     /**
+     * 进入运行中。`startTime` 只在第一次写入（已有时保留）。
+     *
+     * **列级 UPDATE 而不是"读整行 → copy → 写回"**：下载期间任务行会被进度心跳
+     * 高频改写，整行写回等于用旧快照覆盖别人刚写的值（最典型的是把 pause 写好的
+     * `PAUSED` 覆盖回 `RUNNING`）。所有"下载中会发生的写入"都必须只动自己那几列。
+     */
+    @Query(
+        """
+        UPDATE t_download_task
+        SET status = 'RUNNING', startTime = COALESCE(startTime, :now), updateTime = :now
+        WHERE id = :id
+        """,
+    )
+    suspend fun markRunning(id: Long, now: Long)
+
+    /** 等待网络：不算失败也不算"正在运行"，只动状态/原因/阶段三列。 */
+    @Query(
+        """
+        UPDATE t_download_task
+        SET status = 'WAITING_NETWORK', message = :message, stageText = :stageText, updateTime = :now
+        WHERE id = :id
+        """,
+    )
+    suspend fun markWaitingNetwork(id: Long, message: String?, stageText: String?, now: Long)
+
+    /**
+     * 更新任务进度。传 null 表示"这一项不动"（`COALESCE(:x, x)` 与原
+     * `x ?: task.x` 语义一致），所以**没有**"把某个计数改成 0"的用法——
+     * 需要归零请走 [recomputeTotalsFromChapters] 这类重算入口。
+     */
+    @Query(
+        """
+        UPDATE t_download_task SET
+            stageText = COALESCE(:stageText, stageText),
+            doneChapters = COALESCE(:doneChapters, doneChapters),
+            totalChapters = COALESCE(:totalChapters, totalChapters),
+            doneImages = COALESCE(:doneImages, doneImages),
+            totalImages = COALESCE(:totalImages, totalImages),
+            downloadedBytes = COALESCE(:downloadedBytes, downloadedBytes),
+            totalBytes = COALESCE(:totalBytes, totalBytes),
+            updateTime = :now
+        WHERE id = :id
+        """,
+    )
+    suspend fun updateProgress(
+        id: Long,
+        stageText: String?,
+        doneChapters: Int?,
+        totalChapters: Int?,
+        doneImages: Int?,
+        totalImages: Int?,
+        downloadedBytes: Long?,
+        totalBytes: Long?,
+        now: Long,
+    )
+
+    /**
+     * 把任务级进度按章节明细**一条 SQL**重算（图片数 / 已完成图片 / 已完成章节）。
+     *
+     * 下载期间进度心跳每 600ms 调一次，所以必须原子：子查询在语句内部读章节表，
+     * 不存在"读到旧行再写回"的窗口，与 pause / cancel / 单张图进度写入都不会互相覆盖。
+     * 只服务 JM 漫画任务（导出任务的进度由 [updateProgress] 直接上报）。
+     */
+    @Query(
+        """
+        UPDATE t_download_task SET
+            totalChapters = (SELECT COUNT(*) FROM t_download_task_chapter WHERE taskId = :taskId),
+            doneChapters = (SELECT COUNT(*) FROM t_download_task_chapter
+                            WHERE taskId = :taskId AND status = 'SUCCESS'),
+            totalImages = (SELECT COALESCE(SUM(totalImages), 0) FROM t_download_task_chapter
+                           WHERE taskId = :taskId),
+            doneImages = (SELECT COALESCE(SUM(doneImages), 0) FROM t_download_task_chapter
+                          WHERE taskId = :taskId),
+            updateTime = :now
+        WHERE id = :taskId
+        """,
+    )
+    suspend fun recomputeTotalsFromChapters(taskId: Long, now: Long)
+
+    /**
      * 应用被杀死后重启时的恢复：把所有 `RUNNING` / `WAITING_NETWORK` 任务打回 `QUEUED`。
      *
      * **不动 `PAUSED`**（等用户点恢复）与 `CANCELLED`（不复活，§D.3）。

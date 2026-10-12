@@ -349,7 +349,9 @@ class JmExportManager(
         }
 
         tasks.markRunning(taskId)
-        tasks.updateProgress(taskId, stageText = "导出${format.label}")
+        // 阶段文案统一带类型：任务页与通知栏都要能一眼看出这是 zip 还是 pdf（与任务卡的
+        // 类型标签「生成 ZIP / 生成 PDF」保持同一口径）
+        tasks.updateProgress(taskId, stageText = "生成 ${format.label}")
 
         val password = passwords[taskId].orEmpty()
         val out = File(dirs.export, task.displayName ?: "${payload.folderName}.${format.extension}")
@@ -392,7 +394,7 @@ class JmExportManager(
             scope.launch {
                 tasks.updateProgress(
                     id = taskId,
-                    stageText = "打包 $chapter",
+                    stageText = "生成 ZIP · $chapter",
                     doneImages = done,
                     totalImages = total,
                 )
@@ -416,7 +418,7 @@ class JmExportManager(
                 scope.launch {
                     tasks.updateProgress(
                         id = taskId,
-                        stageText = "生成 PDF $chapter",
+                        stageText = "生成 PDF · $chapter",
                         doneImages = done,
                         totalImages = total,
                     )

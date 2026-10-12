@@ -41,8 +41,7 @@ data class TaskRow(
         }
 
     /** 导出任务：**不能续做**，只能取消后重新生成（计划 §9 第 9 条），所以不给「重试」与「暂停」。 */
-    val isExport: Boolean
-        get() = task.type == DownloadType.JM_EXPORT_ZIP || task.type == DownloadType.JM_EXPORT_PDF
+    val isExport: Boolean get() = task.isExportTask
 
     /**
      * 任务类型标签（用户要求第 4 点）：导出任务要一眼看出是在生成 zip 还是 pdf。
@@ -261,12 +260,21 @@ fun taskProgressText(task: DownloadTaskEntity): String {
 /** 补充说明：等待网络的原因、失败原因。**只在有话说的时候返回内容**。 */
 fun taskDetailText(task: DownloadTaskEntity): String? = when {
     task.status == DownloadStatus.WAITING_NETWORK ->
-        task.message ?: "当前网络不允许下载，恢复后会自动继续"
+        task.message ?: "当前网络类型不允许下载，切换网络后自动继续"
 
     task.status == DownloadStatus.FAIL -> task.message
 
+    // 导出任务（zip/pdf）的 doneImages 是"已写入的条目数"，不是下载的图片数，
+    // 所以不能沿用"已下载 N 张"的说法（用户反馈的 pdf 任务文案错误）
+    task.status == DownloadStatus.RUNNING && task.isExportTask ->
+        "生成中"
+
     task.status == DownloadStatus.RUNNING && task.doneImages > 0 ->
-        "已下载 ${task.doneImages} 张，可以离开这个页面"
+        "已下载 ${task.doneImages} 张"
 
     else -> null
 }
+
+/** 导出任务（生成 ZIP / 生成 PDF）：**不能续做**，进度口径也不是"张"。 */
+val DownloadTaskEntity.isExportTask: Boolean
+    get() = type == DownloadType.JM_EXPORT_ZIP || type == DownloadType.JM_EXPORT_PDF
