@@ -430,6 +430,7 @@ fun JmAlbumDetailScreen(
                 "收藏夹里的关联也会取消。最近浏览记录会保留（封面也还在）。",
             confirmText = "移除",
             onConfirm = { showDeleteRecordDialog = false; onDeleteAlbumRecord() },
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { showDeleteRecordDialog = false },
         )
     }
@@ -1226,6 +1227,7 @@ private fun ChapterRowItem(
                 "之后可以重新下载。",
             confirmText = "删除文件",
             onConfirm = { confirmDelete = false; onDeleteFiles() },
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { confirmDelete = false },
         )
     }
