@@ -267,29 +267,53 @@ private fun TaskCard(
             }
 
             Spacer(Modifier.height(4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            // 动作按钮整行等分（用户要求）：一行两个按钮就各占 50% 宽度，
+            // 点按区域不再只有文字那么窄，手指不容易点空
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 if (row.canPause) {
-                    TextButton(onClick = { onPause(task.id) }) { Text("暂停") }
+                    TextButton(onClick = { onPause(task.id) }, modifier = Modifier.weight(1f)) {
+                        Text("暂停")
+                    }
                 }
                 if (row.canResume) {
-                    TextButton(onClick = { onResume(task.id) }) { Text("继续") }
+                    TextButton(onClick = { onResume(task.id) }, modifier = Modifier.weight(1f)) {
+                        Text("继续")
+                    }
                 }
                 if (row.canRetry) {
-                    TextButton(onClick = { onRetry(task.id) }) { Text("重试") }
+                    TextButton(onClick = { onRetry(task.id) }, modifier = Modifier.weight(1f)) {
+                        Text("重试")
+                    }
                 }
                 if (row.canCancel) {
-                    TextButton(onClick = { onCancel(task.id) }) { Text("取消") }
+                    TextButton(onClick = { onCancel(task.id) }, modifier = Modifier.weight(1f)) {
+                        Text("取消")
+                    }
                 } else {
-                    TextButton(onClick = { onRemove(task.id) }) { Text("删除记录") }
+                    TextButton(onClick = { onRemove(task.id) }, modifier = Modifier.weight(1f)) {
+                        Text("删除记录")
+                    }
                 }
             }
 
             // 导出成品的三颗按钮（用户要求第 4 点）：用其他应用打开 / 发送 / 删除文件
             row.outputName?.let { name ->
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = { onOpenOutput(name) }) { Text("打开至") }
-                    TextButton(onClick = { onSendOutput(name) }) { Text("发送至") }
-                    TextButton(onClick = { onDeleteOutput(task.id, name) }) { Text("删除文件") }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    TextButton(onClick = { onOpenOutput(name) }, modifier = Modifier.weight(1f)) {
+                        Text("打开至")
+                    }
+                    TextButton(onClick = { onSendOutput(name) }, modifier = Modifier.weight(1f)) {
+                        Text("发送至")
+                    }
+                    TextButton(onClick = { onDeleteOutput(task.id, name) }, modifier = Modifier.weight(1f)) {
+                        Text("删除文件")
+                    }
                 }
             }
 
