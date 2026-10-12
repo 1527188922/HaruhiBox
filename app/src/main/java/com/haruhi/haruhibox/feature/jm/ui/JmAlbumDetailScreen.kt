@@ -219,6 +219,9 @@ fun JmAlbumDetailScreen(
 
     Scaffold(
         modifier = modifier,
+        // 同 JmModeRoot：Scaffold 默认是 `background` 灰。本页的固定区（TopAppBar 与它下面的
+        // 标题栏）要纯白，与底栏 NavigationBar 一致。
+        containerColor = MaterialTheme.colorScheme.surface,
         // **不要再套一层系统栏内边距**：本页在 `JmModeRoot` 的 Scaffold 内容里，
         // 外层已经把状态栏高度作为 padding 给了 NavHost。这里若再让 Scaffold 与
         // TopAppBar 各加一次 windowInsets，标题上方就会空出约两倍状态栏的高度

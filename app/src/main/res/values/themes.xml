@@ -74,8 +74,12 @@
 <!--        <item name="android:windowLightNavigationBar">true</item>-->
 
         <!-- ④ 内容区底色 → 浅灰 -->
+        <!-- 注意：`windowBackground` 不能跟着用灰色。它是**首帧之前**整窗铺的底色，
+             edge-to-edge 下状态栏/导航栏那条露出的就是它；用灰色的话，顶栏与底栏
+             边缘会看到一圈灰边（App 起来后两侧仍有 1px 级的过渡）。
+             真正的"滚动内容区灰色"由 Compose 侧各页自己铺 `colorScheme.background`。 -->
         <item name="android:colorBackground">#FFF5F5F5</item>
-        <item name="android:windowBackground">#FFF5F5F5</item>
+        <item name="android:windowBackground">#FFFFFFFF</item>
 
         <!-- ⑤ 悬浮层 / 卡片 / 弹窗 / PopupMenu 背景 → 纯白 -->
         <item name="android:colorBackgroundFloating">#FFFFFFFF</item>

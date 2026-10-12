@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -165,6 +166,11 @@ fun JmModeRoot(
     CompositionLocalProvider(LocalImageLoader provides container.imageLoader) {
         Scaffold(
             modifier = modifier.fillMaxSize(),
+            // Scaffold 默认容器色是 `colorScheme.background`（本主题下是 #F5F5F5 灰）。
+            // 但状态栏那条（topBar 槽为空、由 contentWindowInsets 让出来）画的正是这个颜色，
+            // 必须是纯白才能和底栏 NavigationBar（surfaceContainer = #FFFFFF）一致。
+            // 各页真正的**滚动内容区**由各 Screen 自己铺 `background` 灰底。
+            containerColor = MaterialTheme.colorScheme.surface,
             snackbarHost = { SnackbarHost(snackbar) },
             bottomBar = {
                 if (showBottomBar) {

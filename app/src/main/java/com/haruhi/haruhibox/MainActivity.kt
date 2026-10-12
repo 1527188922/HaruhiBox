@@ -1,7 +1,9 @@
 package com.haruhi.haruhibox
 
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,15 +24,15 @@ import com.haruhi.haruhibox.ui.theme.HaruhiBoxTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableCardWhiteEdgeToEdge()
         val container = HaruhiBoxApp.from(this)
         setContent {
             HaruhiBoxTheme {
                 // 根背景用 `surface`（白）而不是内容区的 `background`（#F5F5F5）：
-                // 状态栏那条（edge-to-edge 下由根部 Scaffold 的 windowInsets 让出来）
-                // 露出的就是这个颜色，必须是白的，才能和底部导航栏
-                // （`NavigationBar` 读 `surfaceContainer`，同为白）以及各页的白色头部连成一片。
-                // 5 个 tab 页的**正文区**各自铺自己的 `background` 灰底，见各 Screen 的 body。
+                // 状态栏那条（edge-to-edge 下由根 Scaffold 的 windowInsets 让出来）
+                // 露出的就是这个颜色，必须是纯白，才能和底栏 NavigationBar
+                // （`surfaceContainer` = #FFFFFF）一致。
+                // 各页**滚动内容区**的灰底由各 Screen 自己铺 `background`。
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.surface,
@@ -39,6 +41,36 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * 边到边 + **真透明**的系统栏 + 固定深色图标。
+     *
+     * 两步都不能省：
+     *
+     * 1. **透明**：无参的 `enableEdgeToEdge()` 默认走 `SystemBarStyle.auto(...)`，会把状态栏
+     *    预涂成 `#E6FFFFFF`（90% 白）、导航栏预涂成 `#E6000000`。那层半透明白压在内容上，
+     *    顶栏就不再是纯白，跟底栏对不上色。这里两个栏都涂成真正的透明，露出页面自己的白。
+     * 2. **深色图标**：图标明暗由 `detectDarkMode` 决定，无参版本是按**系统深色模式**判断的。
+     *    现在状态栏恒为纯白，系统一旦处于深色模式就会被画上浅色图标 —— 白底白图标直接看不见。
+     *    所以这里恒返回 false（= 深色图标）。
+     *
+     * ⚠ 将来主题做成设置项（含深色）时，这个判断必须跟着 Compose 主题一起改成背景色感知
+     * （例如 `Color.luminance() > 0.5f`），否则深色主题下会反过来画错。
+     */
+    private fun enableCardWhiteEdgeToEdge() {
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                lightScrim = Color.TRANSPARENT,
+                darkScrim = Color.TRANSPARENT,
+                detectDarkMode = { false },
+            ),
+            navigationBarStyle = SystemBarStyle.auto(
+                lightScrim = Color.TRANSPARENT,
+                darkScrim = Color.TRANSPARENT,
+                detectDarkMode = { false },
+            ),
+        )
     }
 
     /**
