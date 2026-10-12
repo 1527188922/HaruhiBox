@@ -1,7 +1,9 @@
 package com.haruhi.haruhibox
 
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
@@ -10,6 +12,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import com.haruhi.haruhibox.feature.jm.ui.JmModeRoot
 import com.haruhi.haruhibox.ui.theme.HaruhiBoxTheme
+import com.haruhi.haruhibox.ui.theme.isDarkSystemBarUi
+
+/**
+ * 三键导航时导航栏底下的遮罩色。
+ *
+ * 取值与 androidx.activity 的默认值一致（`SystemBarStyle.DefaultLightScrim` /
+ * `DefaultDarkScrim`），写在这里只是为了把"深浅判定"换成主题感知的那一个。
+ */
+private val NAV_BAR_LIGHT_SCRIM = Color.argb(0xe6, 0xff, 0xff, 0xff)
+private val NAV_BAR_DARK_SCRIM = Color.argb(0x80, 0x1b, 0x1b, 0x1b)
 
 /**
  * 唯一的 Activity。
@@ -22,7 +34,21 @@ import com.haruhi.haruhibox.ui.theme.HaruhiBoxTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // 系统栏图标的深浅跟着**声明的主题**走（见 ThemeDeclaration.isDarkSystemBarUi），
+        // 不能直接交给系统判断：浅蓝主题固定浅色，系统深色时默认判断会给浅色图标，
+        // 落在 #E1E7FD 底上看不清。两侧遮罩取值保持 AndroidX 默认，只换深浅判定。
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                lightScrim = Color.TRANSPARENT,
+                darkScrim = Color.TRANSPARENT,
+                detectDarkMode = ::isDarkSystemBarUi,
+            ),
+            navigationBarStyle = SystemBarStyle.auto(
+                lightScrim = NAV_BAR_LIGHT_SCRIM,
+                darkScrim = NAV_BAR_DARK_SCRIM,
+                detectDarkMode = ::isDarkSystemBarUi,
+            ),
+        )
         val container = HaruhiBoxApp.from(this)
         setContent {
             HaruhiBoxTheme {

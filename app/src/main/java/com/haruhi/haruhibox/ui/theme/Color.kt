@@ -19,3 +19,11 @@ val Pink40 = Color(0xFF7D5260)
  */
 val WarningOrangeLight = Color(0xFFB45309)
 val WarningOrangeDark = Color(0xFFFFB74D)
+
+/**
+ * 浅蓝主题（`ThemeDeclaration` 声明启用）的固定配色。
+ *
+ * 基底色 #E1E7FD 是页面底色，内容区域 #FFFFFF 是卡片、列表等内容面。
+ */
+val LightBlueBackground = Color(0xFFE1E7FD)
+val LightBlueSurface = Color(0xFFFFFFFF)
