@@ -17,8 +17,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -216,6 +214,9 @@ private fun TaskCard(
                     )
                     Spacer(Modifier.width(10.dp))
                 }
+                // 有章节可看（或已知总话数）时整块名称+状态区都可点：点一下展开/收起章节。
+                // 这是原来右侧箭头按钮的位置与语义，按钮已经去掉，所以判断条件保持不变。
+                val expandable = row.chapters.isNotEmpty() || task.totalChapters > 0
                 Column(modifier = Modifier.weight(1f)) {
                     // 任务类型标签（用户要求第 4 点）：导出任务一眼看出是 zip 还是 pdf
                     row.typeLabel?.let { label ->
@@ -225,29 +226,31 @@ private fun TaskCard(
                             color = MaterialTheme.colorScheme.primary,
                         )
                     }
-                    Text(
-                        text = row.displayName,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = "${row.statusText} · ${row.progressText}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = statusColor(task.status),
-                    )
-                }
-                if (row.chapters.isNotEmpty() || task.totalChapters > 0) {
-                    TextButton(onClick = { onToggleExpanded(task.id) }) {
-                        Icon(
-                            imageVector = if (row.expanded) {
-                                Icons.Default.KeyboardArrowUp
-                            } else {
-                                Icons.Default.KeyboardArrowDown
-                            },
-                            contentDescription = if (row.expanded) "收起章节" else "展开章节",
+                    // 漫画名称 + 状态/进度两行合成一个点击区域——不再需要 KeyboardArrowUp/Down 按钮
+                    Column(
+                        modifier = if (expandable) {
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(
+                                    onClickLabel = if (row.expanded) "收起章节" else "展开章节",
+                                ) { onToggleExpanded(task.id) }
+                        } else {
+                            Modifier
+                        },
+                    ) {
+                        Text(
+                            text = row.displayName,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "${row.statusText} · ${row.progressText}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = statusColor(task.status),
                         )
                     }
                 }
