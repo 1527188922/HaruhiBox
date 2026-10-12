@@ -3,6 +3,8 @@ package com.haruhi.haruhibox.core.download
 import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.network.NetworkError
 import com.haruhi.haruhibox.core.storage.LibraryDirs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -16,6 +18,8 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 下载引擎验收（计划 §11.2「下载引擎：本地起一个 HTTP 服务模拟 Range 分片、超时、断流」，
@@ -285,6 +289,101 @@ class FileDownloaderTest {
         assertThat(downloader.isComplete(target, payload.size.toLong())).isTrue()
         // 长度未知时只要求"文件非空"
         assertThat(downloader.isComplete(target, 0L)).isTrue()
+    }
+
+    // ------------------------------------------------------------------
+    // 发布前处理（JM 解扰走的就是这个钩子）
+    // ------------------------------------------------------------------
+
+    /**
+     * 后处理必须在"图片对最终路径可见之前"完成。
+     *
+     * 调用方判断"这张图在不在"只看目标文件是否存在（`skipIfComplete`），所以**先发布再处理**
+     * 会留下一个"已经在最终路径上、内容却还是加扰的"中间态：阅读器会把它当成成品图显示出来，
+     * 而且之后永远不会再处理它（用户反馈的"快速退出阅读器再进来看到未解扰的图"）。
+     */
+    @Test
+    fun `beforePublish runs on the part file while the target is still invisible`() = runTest {
+        server.enqueue(bodyResponse(200, payload))
+        val target = File(dirs.bili, "00001.webp")
+        // 解扰会重新编码，长度也会变——钩子改的就是随后被发布的那份文件
+        val processed = "descrambled".toByteArray()
+        val calls = AtomicInteger()
+        val sawTarget = AtomicBoolean(false)
+        val sawPartFile = AtomicBoolean(false)
+
+        val outcome = downloader.download(
+            urlProvider = { server.url("/00001.webp").toString() },
+            target = target,
+            beforePublish = { file ->
+                calls.incrementAndGet()
+                if (target.exists()) sawTarget.set(true)
+                if (file.name.endsWith(FileDownloader.PART_SUFFIX)) sawPartFile.set(true)
+                file.writeBytes(processed)
+            },
+        )
+
+        assertThat(outcome).isInstanceOf(DownloadOutcome.Downloaded::class.java)
+        assertThat(calls.get()).isEqualTo(1)
+        // 钩子跑在中转文件上，此时最终路径还不存在
+        assertThat(sawPartFile.get()).isTrue()
+        assertThat(sawTarget.get()).isFalse()
+        // 发布出去的必须是处理后的内容，而且中转文件被清理干净
+        assertThat(target.readBytes()).isEqualTo(processed)
+        assertThat(partOf(target).exists()).isFalse()
+    }
+
+    /**
+     * "一边下载、一边看漫画"时，同一张图会被两个调用方同时要（阅读器 + 下载任务）。
+     * 后处理只能对**真正下载过的那一次**执行：解扰不可逆，跑两遍会把图毁掉。
+     */
+    @Test
+    fun `concurrent callers for the same file process it exactly once`() = runTest {
+        repeat(4) { server.enqueue(bodyResponse(200, payload)) }
+        val target = File(dirs.bili, "00001.webp")
+        val calls = AtomicInteger()
+
+        val outcomes = (1..4).map {
+            async {
+                downloader.download(
+                    urlProvider = { server.url("/00001.webp").toString() },
+                    target = target,
+                    beforePublish = { calls.incrementAndGet() },
+                )
+            }
+        }.awaitAll()
+
+        assertThat(outcomes.count { it is DownloadOutcome.Downloaded }).isEqualTo(1)
+        assertThat(outcomes.count { it is DownloadOutcome.Skipped }).isEqualTo(3)
+        // 只下载一次、只处理一次
+        assertThat(server.requestCount).isEqualTo(1)
+        assertThat(calls.get()).isEqualTo(1)
+    }
+
+    /**
+     * 后处理失败时**宁可判失败**，也不能把未处理的字节发布到最终路径：
+     * 调用方只按"文件在不在"判断完成，发出去的半成品会被永远当成成品图。
+     */
+    @Test
+    fun `a failing beforePublish hook publishes nothing and does not retry`() = runTest {
+        server.enqueue(bodyResponse(200, payload))
+        val target = File(dirs.bili, "00001.webp")
+
+        val outcome = downloader.download(
+            urlProvider = { server.url("/00001.webp").toString() },
+            target = target,
+            beforePublish = { error("解扰失败") },
+        )
+
+        assertThat(outcome).isInstanceOf(DownloadOutcome.Failed::class.java)
+        assertThat((outcome as DownloadOutcome.Failed).error)
+            .isInstanceOf(NetworkError.Malformed::class.java)
+        // 最终路径上什么都不能留下
+        assertThat(target.exists()).isFalse()
+        // 半成品也不留：后处理可能已经把 .part 写坏，留着续传会把坏数据拼进来
+        assertThat(partOf(target).exists()).isFalse()
+        // 本地处理失败重试没有意义（引擎配的是 maxAttempts = 2，这里只允许一次请求）
+        assertThat(server.requestCount).isEqualTo(1)
     }
 
     private fun partOf(target: File) = File(target.parentFile, target.name + FileDownloader.PART_SUFFIX)

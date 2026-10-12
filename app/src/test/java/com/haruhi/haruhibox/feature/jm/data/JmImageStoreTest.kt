@@ -6,12 +6,15 @@ import com.google.common.truth.Truth.assertThat
 import com.haruhi.haruhibox.core.database.HaruhiBoxDatabase
 import com.haruhi.haruhibox.core.database.entity.JmAlbumEntity
 import com.haruhi.haruhibox.core.download.FileDownloader
+import com.haruhi.haruhibox.core.download.ParallelImageDownloader
 import com.haruhi.haruhibox.core.network.NetworkState
 import com.haruhi.haruhibox.core.storage.LibraryDirs
 import com.haruhi.haruhibox.feature.jm.api.JmApiClient
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -48,6 +51,7 @@ class JmImageStoreTest {
     private lateinit var server: MockWebServer
     private lateinit var db: HaruhiBoxDatabase
     private lateinit var dirs: LibraryDirs
+    private lateinit var fileDownloader: FileDownloader
     private lateinit var store: JmImageStore
 
     private val album = JmAlbumEntity(
@@ -118,9 +122,10 @@ class JmImageStoreTest {
             searchHistoryDao = db.jmSearchHistoryDao(),
             dirs = dirs,
         )
+        fileDownloader = FileDownloader(client = client, dirs = dirs, maxAttempts = 1, retryDelayMs = 10L)
         store = JmImageStore(
             repo = repo,
-            downloader = FileDownloader(client = client, dirs = dirs, maxAttempts = 1, retryDelayMs = 10L),
+            downloader = fileDownloader,
             dirs = dirs,
             environment = FakeEnvironment(),
         )
@@ -205,6 +210,42 @@ class JmImageStoreTest {
         assertThat(dir.name).isEqualTo(folder)
         assertThat(dir.parentFile!!.name).isEqualTo("测试本子_JM480854")
         assertThat(File(dirs.jm, "测试本子_JM480854")).isEqualTo(dir.parentFile)
+    }
+
+    /**
+     * 用户实际问过的场景：**一边下载、一边看漫画**。
+     *
+     * 阅读器与下载任务同时要同一张图时，两边抢的是**同一个 [FileDownloader]** 的 per-file 锁，
+     * 所以这张图只会真正下载一次，也不会出现"后一次下载覆盖前一次"（后到者拿到锁时看到的
+     * 已经是解扰完的成品，于是安全地走 `Skipped`），后处理也只会对真正下载过的那一次执行。
+     */
+    @Test
+    fun `reader and download task racing for the same image download it once`() = runTest {
+        val chapterDir = store.chapterDir(album, folder)
+        val parallel = ParallelImageDownloader(downloader = fileDownloader, defaultConcurrency = 2)
+        val taskTransforms = AtomicInteger()
+
+        val reader = async { store.file(album, chapterId, folder, imageFile) }
+        val task = async {
+            parallel.downloadImages(
+                images = mapOf(imageFile to { server.url("/$imageFile").toString() }),
+                chapterDir = chapterDir,
+                transform = { _, _ ->
+                    taskTransforms.incrementAndGet()
+                    false
+                },
+            )
+        }
+        val published = reader.await()
+        task.await()
+
+        // 只下载一次：两边不会各下一份、也不会互相覆盖
+        assertThat(requests.getValue(imageFile).get()).isEqualTo(1)
+        // 后处理只对真正下载过的那一次执行（解扰不可逆，跑两遍会毁图）
+        assertThat(taskTransforms.get()).isAtMost(1)
+        // 两边看到的是同一个文件，且后续读取直接命中缓存
+        assertThat(published).isEqualTo(File(chapterDir, imageFile))
+        assertThat(store.cachedFile(album, folder, imageFile)).isEqualTo(published)
     }
 
     private class FakeEnvironment : JmDownloadEnvironment {

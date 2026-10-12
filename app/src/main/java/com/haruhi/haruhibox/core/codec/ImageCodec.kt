@@ -181,11 +181,25 @@ object ImageCodec {
 }
 
 /**
- * 给下载引擎用的"图片落盘后处理"钩子。
+ * 给下载引擎用的"图片**发布前**处理"钩子（JM 解扰）。
  *
  * 计划 §0 已确认的决策：**`blockNum == 0` 时直接落原图，不重新编码**；
  * 只有需要解扰（`blockNum > 0`）才 解码→解扰→编码。
  * 这里把这条规则收在一处，避免调用方各写一遍。
+ *
+ * ## 必须在发布到最终路径之前调用
+ *
+ * 调用方判断"这张图在不在"只看目标文件是否存在（`FileDownloader.download` 的
+ * `skipIfComplete` 与 `JmImageStore.cachedFile`）。所以解扰**不能**放在发布之后：
+ * 那样会留下一个"已经在最终路径上、内容却还是加扰的"中间态，而它会被当成成品图
+ * 显示出来，并且之后再也不会被重新处理。正确的位置是
+ * [com.haruhi.haruhibox.core.download.FileDownloader] 的 `beforePublish` 钩子。
+ *
+ * ## 为什么用传入的文件名，而不是 `file.name`
+ *
+ * 处理发生在 `.part` 上，物理名是 `00001.webp.part`：用它推扩展名会得到 `part`
+ * （于是**静默跳过**解扰），用它算块数会变成 `00001.webp`（于是块数算错、图被解坏）。
+ * 解扰参数一律只看**逻辑文件名**（章节里的图片名），物理文件只用于读写。
  *
  * @param scrambleId 章节的 `scramble_id`（由 `/chapter_view_template` 得到）
  * @param chapterId 章节 id
@@ -194,28 +208,40 @@ class ImageDownloadTransform(
     private val scrambleId: Long,
     private val chapterId: Long,
 ) {
-    /** 已处理过的文件名，避免重复解扰（解扰不可逆，重复执行会毁掉图片）。 */
-    private val processed = mutableSetOf<String>()
-
-    /** @return true 表示这张图被解扰过；false 表示按原文件保留。 */
+    /**
+     * 就地处理 [file]。
+     *
+     * 这里**不再**自己记录"处理过哪些文件名"：调用点是引擎的 per-file 锁内（见类注释），
+     * 一次真实下载只会调用一次。留着去重集合反而有害——文件被删掉后重新下载时，
+     * 它会让第二次解扰被静默跳过，于是把加扰的字节发布出去。
+     *
+     * @param file 物理文件（可能是 `<目标>.part`）
+     * @param fileName 逻辑文件名（章节图片名，如 `00001.webp`）
+     * @return true 表示做了实际处理；false 表示无需处理（原样发布）
+     * @throws Exception 处理失败。**调用方必须放弃发布**，否则最终路径上会出现加扰图。
+     */
     fun transform(file: File, fileName: String): Boolean {
-        if (!processed.add(fileName)) return false
-
         // 只对 webp 解扰（参考实现 `downloadChapter` 第 948～954 行）
-        val extension = file.name.substringAfterLast('.', "").lowercase()
+        val extension = fileName.substringAfterLast('.', "").lowercase()
         if (extension != "webp") return false
 
         val blockNum = com.haruhi.haruhibox.core.jm.JmCrypto.calculateBlockNum(
             scrambleId = scrambleId,
             chapterId = chapterId,
-            filenameWithoutExt = file.name.substringBeforeLast('.'),
+            filenameWithoutExt = fileName.substringBeforeLast('.'),
         )
         if (blockNum <= 0) {
             // 未加扰：**直接保留原文件**，不重新编码（已确认的决策，也是 P3 的验收项）
             return false
         }
-        return runCatching { ImageCodec.descrambleInPlace(file, blockNum) }
-            .onFailure { Timber.tag("jm").w(it, "解扰失败，保留原文件：%s", file.name) }
-            .getOrDefault(false)
+        return try {
+            ImageCodec.descrambleInPlace(file, blockNum)
+            true
+        } catch (e: Throwable) {
+            // 解扰不可逆、失败原因多半是本地解码：吞掉它就等于把加扰图当成品发布，
+            // 所以这里必须把异常交给引擎，由引擎放弃发布。
+            Timber.tag("jm").w(e, "解扰失败，放弃本次下载：%s", fileName)
+            throw e
+        }
     }
 }

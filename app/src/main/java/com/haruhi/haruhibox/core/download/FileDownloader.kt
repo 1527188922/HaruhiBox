@@ -111,6 +111,15 @@ class FileDownloader(
      * @param expectedTotal 已知的总长度（例如 B站接口返回的 size）。为 0 时以服务端响应为准。
      * @param skipIfComplete 目标文件已存在时是否直接跳过。JM 图片是 `true`
      *        （对齐参考实现），单文件 mp4 也是 `true`（"是否已下载以磁盘文件为准"）。
+     * @param beforePublish **发布前的后处理钩子**（JM 用它解扰）。收到的是**中转文件**
+     *        （`<目标>.part`），此时 [target] 还不存在。它跑在 per-file 锁内，所以
+     *        同一张图只会被处理一次；它抛异常就**放弃发布**（见 [PostProcessFailed]）。
+     *
+     *        **为什么后处理必须在这里做**：调用方判断"这张图在不在"只看目标文件是否存在
+     *        （`skipIfComplete` / `JmImageStore.cachedFile`）。如果先发布、再处理，那么
+     *        "已发布但还没处理"的中间态会被当成**成品**：阅读器会直接把它显示出来，
+     *        而且之后再也不会重新处理。所以不变量是
+     *        **"目标路径上可见 ⟹ 已经处理完成"**，处理只能发生在发布之前。
      */
     suspend fun download(
         urlProvider: suspend () -> String,
@@ -119,6 +128,7 @@ class FileDownloader(
         expectedTotal: Long = 0L,
         skipIfComplete: Boolean = true,
         etag: String? = null,
+        beforePublish: ((File) -> Unit)? = null,
     ): DownloadOutcome {
         // 同一个目标串行化（见 targetLocks 的说明）。等锁期间别人可能已经下好了，
         // 所以拿到锁之后要重新判断一次"是不是已经完成"。
@@ -127,7 +137,15 @@ class FileDownloader(
             if (skipIfComplete && target.isFile && target.length() > 0) {
                 return@withLock DownloadOutcome.Skipped(target, target.length())
             }
-            downloadLocked(urlProvider, target, onProgress, expectedTotal, skipIfComplete, etag)
+            downloadLocked(
+                urlProvider = urlProvider,
+                target = target,
+                onProgress = onProgress,
+                expectedTotal = expectedTotal,
+                skipIfComplete = skipIfComplete,
+                etag = etag,
+                beforePublish = beforePublish,
+            )
         }
     }
 
@@ -138,6 +156,7 @@ class FileDownloader(
         expectedTotal: Long,
         skipIfComplete: Boolean,
         etag: String?,
+        beforePublish: ((File) -> Unit)?,
     ): DownloadOutcome {
         val partFile = File(target.parentFile, target.name + PART_SUFFIX)
         target.parentFile?.mkdirs()
@@ -166,6 +185,7 @@ class FileDownloader(
                     expectedTotal = expectedTotal,
                     allowRange = allowRange,
                     onProgress = onProgress,
+                    beforePublish = beforePublish,
                 )
                 if (result != null) return result
                 // result == null 表示这次尝试没有可用的长度信息，需要重来
@@ -189,6 +209,19 @@ class FileDownloader(
             } catch (e: CancellationException) {
                 // 结构化并发取消：保留 .part 以便下次续传
                 throw e
+            } catch (e: PostProcessFailed) {
+                // 后处理（解扰）失败：**绝不发布**——发布出去的就是"没处理过的半成品"，
+                // 而调用方只按"文件在不在"判断完成，会把它永远当成成品图。
+                // 重试也没有意义（本地解码/编码问题，不是网络问题），所以直接判失败。
+                Timber.tag("dl").w(e, "落盘后处理失败，放弃发布：%s", target.name)
+                // 后处理阶段可能已经把 .part 写坏（`descrambleInPlace` 的拷贝兜底会原地截断），
+                // 所以不保留它续传，避免把坏数据拼进下一次下载。
+                partFile.delete()
+                return DownloadOutcome.Failed(
+                    // 这是本地处理失败，不是网络问题；`toUserMessage()` 会包成
+                    // 「返回内容异常（...）」，所以这里只写清"发生了什么 + 该做什么"
+                    NetworkError.Malformed(target.name, "图片已下载但无法解扰，请重试"),
+                )
             } catch (e: Throwable) {
                 val error = NetworkError.from(target.name, e)
                 lastError = error
@@ -208,6 +241,14 @@ class FileDownloader(
     private class RangeNotSatisfiable : Exception()
 
     /**
+     * 内部控制流异常：[download] 的 `beforePublish` 钩子失败。
+     *
+     * 与网络错误区分开：**不重试**（重试只会再跑一次同样的解码/编码），
+     * 而且必须保证最终路径上什么都没有留下。
+     */
+    private class PostProcessFailed(cause: Throwable) : Exception(cause.message, cause)
+
+    /**
      * 一次尝试。返回 null 表示"这次没拿到长度信息"，需要上层重试。
      */
     private suspend fun attemptOnce(
@@ -218,6 +259,7 @@ class FileDownloader(
         expectedTotal: Long,
         allowRange: Boolean,
         onProgress: ((FileProgress) -> Unit)?,
+        beforePublish: ((File) -> Unit)?,
     ): DownloadOutcome? = withContext(Dispatchers.IO) {
         val existing = if (allowRange && partFile.isFile) partFile.length() else 0L
         val request = Request.Builder()
@@ -250,7 +292,7 @@ class FileDownloader(
                         attempt = attempt,
                         onProgress = onProgress,
                     )
-                    publishAfterValidation(partFile, target, total, expectedTotal, existing)
+                    publishAfterValidation(partFile, target, total, expectedTotal, existing, beforePublish)
                 }
 
                 // 200：服务端忽略了 Range（或本来就没有 .part）。**必须从头写**。
@@ -270,7 +312,7 @@ class FileDownloader(
                         attempt = attempt,
                         onProgress = onProgress,
                     )
-                    publishAfterValidation(partFile, target, total, expectedTotal, 0L)
+                    publishAfterValidation(partFile, target, total, expectedTotal, 0L, beforePublish)
                 }
 
                 else -> throw NetworkError.HttpStatus(safeUrl(url), code)
@@ -334,6 +376,9 @@ class FileDownloader(
      * - 长度必须是已知的权威总长（服务端 Content-Length / Content-Range 总长 / 调用方给的
      *   B站接口 size）；对不上就抛错保留 `.part` 续传，**绝不发布半成品**；
      * - 权威总长未知时，至少要保证文件非空。
+     *
+     * 顺序是**先后处理、再发布**（见 [download] 的 `beforePublish`）：中间的 `renameTo`
+     * 才是"这张图对外可见"的那一刻，必须保证它看到的内容已经是能直接显示的成品。
      */
     private fun publishAfterValidation(
         partFile: File,
@@ -341,6 +386,7 @@ class FileDownloader(
         total: Long,
         expectedTotal: Long,
         resumedFrom: Long,
+        beforePublish: ((File) -> Unit)?,
     ): DownloadOutcome {
         val actual = partFile.length()
         val authoritativeTotal = if (total > 0) total else expectedTotal
@@ -351,6 +397,19 @@ class FileDownloader(
         } else if (actual <= 0) {
             throw NetworkError.Malformed(target.name, "下载结果为空文件")
         }
+
+        // 发布前处理（JM 解扰）。此时 target 还不存在，处理的输入输出都在 `.part` 上；
+        // 钩子跑在 per-file 锁内，所以"同一张图被处理两次"在结构上不可能发生。
+        if (beforePublish != null) {
+            try {
+                beforePublish(partFile)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                throw PostProcessFailed(e)
+            }
+        }
+
         publish(partFile, target)
         return DownloadOutcome.Downloaded(target, target.length(), resumedFrom)
     }
@@ -442,9 +501,11 @@ class ParallelImageDownloader(
      * @param images 目标文件名（相对 [chapterDir]）到下载地址的映射；地址用闭包以支持直链刷新
      * @param chapterDir 章节落盘目录
      * @param concurrency 并发数；`<= 0` 时用 [defaultConcurrency]
-     * @param transform 单张图落盘后的处理钩子（JM 用来解扰）；**返回 false 表示无需处理**。
-     *        注意它只在真正发生了下载（`Downloaded`）时调用，跳过的文件不重复处理
-     *        （解扰不可逆，重复执行会毁图）。
+     * @param transform 单张图**发布前**的处理钩子（JM 用来解扰）；返回 false 表示无需处理。
+     *        它由 [FileDownloader.download] 在 per-file 锁内、`rename` 到目标名之前调用，
+     *        所以：只在真正发生了下载（`Downloaded`）时执行一次，跳过的文件不重复处理
+     *        （解扰不可逆，重复执行会毁图）；处理失败会让这张图判为失败，**不会**把
+     *        未处理的字节发布到目标路径。
      * @param onProgress `(已存在+已成功的数量, 总数)`
      * @param onFileDone 单张图完成（用于仓库层持久化章节计数）
      */
@@ -490,13 +551,16 @@ class ParallelImageDownloader(
                             urlProvider = urlProvider,
                             target = target,
                             skipIfComplete = true,
+                            // 解扰放在"发布之前"：换成发布之后再处理的话，"已发布但还没解扰"
+                            // 的中间态会被阅读器当成成品图直接显示，而且再也不会被重新处理。
+                            beforePublish = if (transform == null) {
+                                null
+                            } else {
+                                { part: File -> transform(part, fileName) }
+                            },
                         )
                         when (outcome) {
                             is DownloadOutcome.Downloaded -> {
-                                if (transform != null) {
-                                    runCatching { transform(target, fileName) }
-                                        .onFailure { Timber.tag("dl").w(it, "后处理失败：%s", fileName) }
-                                }
                                 val done = doneCounter.incrementAndGet()
                                 onFileDone?.invoke(fileName, true)
                                 onProgress?.invoke(done.toInt(), total)

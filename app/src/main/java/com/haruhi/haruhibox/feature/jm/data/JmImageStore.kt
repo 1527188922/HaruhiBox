@@ -7,6 +7,7 @@ import com.haruhi.haruhibox.core.download.DownloadOutcome
 import com.haruhi.haruhibox.core.download.FileDownloader
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.storage.LibraryDirs
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -30,16 +31,25 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * ## 与下载引擎的分工
  *
- * 传输、Range 续传、原子发布都在 [FileDownloader] 里；
- * 这一层只负责三件事：**算路径**、**命中判断**、**下载后解扰**。
- * 解扰必须在这里做，否则阅读器直接拿到的会是加扰过的图。
+ * 传输、Range 续传、**发布前解扰**、原子发布都在 [FileDownloader] 里；
+ * 这一层只负责三件事：**算路径**、**命中判断**、**给引擎提供解扰钩子**。
+ * 解扰必须在这里接上，否则阅读器直接拿到的会是加扰过的图。
+ *
+ * **解扰跑在引擎的 `beforePublish` 钩子里，也就是"这张图在最终路径上可见之前"**。
+ * 这一点是硬要求：命中判断（[cachedFile]）只看"文件在不在、非不非空"，如果先发布
+ * 再解扰，那个中间态就会被后面的读取当成成品图——用户快速退出阅读器再进来时就会看到
+ * 没解扰的图，而且它再也不会被重新处理。
  *
  * ## 并发
  *
- * 同一张图可能被阅读器与下载任务同时要（一边看一边下）。
- * [FileDownloader] 内部对同一个目标文件加锁，所以不会出现两个写入者
- * 抢同一个 `.part`；这里的 [locks] 再保证**同一张图只解扰一次**
- * （解扰不可逆，重复执行会毁图）。
+ * 同一张图可能被阅读器与下载任务同时要（一边看一边下）。两边抢的是 [FileDownloader]
+ * 的**同一把 per-file 锁**（同一个实例），而且"下载 → 解扰 → 发布"全在锁内，所以：
+ * - 不会有两个写入者抢同一个 `.part`；
+ * - 同一张图只会被解扰一次（解扰不可逆，重复执行会毁图）；
+ * - 后到者拿到锁时看到的一定是**已经解扰完的成品**，于是安全地走 `Skipped`。
+ *
+ * 这里的 [locks] 是第二道闸：把"阅读器自己的多次并发请求"合并成一次网络往返
+ * （拿到锁后再查一次磁盘，别人已经下好就直接返回）。
  */
 class JmImageStore(
     private val repo: JmRepository,
@@ -91,6 +101,9 @@ class JmImageStore(
      * 调用方是 `viewModelScope`（主线程调度器），如果这里不切线程，
      * **每取一页就会把 UI 卡住一次**——用户反馈的"看漫画时 UI 卡住"正是这个原因。
      *
+     * 解扰通过 `beforePublish` 交给引擎，**发生在图片发布到最终路径之前**，所以
+     * 最终路径上只要看得见文件，它就已经是解扰好的成品。
+     *
      * @throws Exception 网络失败、解扰失败、写盘失败都会抛出来，由调用方转成用户文案
      */
     suspend fun file(
@@ -107,26 +120,29 @@ class JmImageStore(
             // 等锁期间别人可能已经下好了（阅读器与下载任务抢同一张图是常态）
             cachedFile(album, chapterFolder, imageFile)?.let { return@withLock it }
 
+            // scramble_id 要在下载之前拿到：解扰作为 `beforePublish` 跑在引擎内部，
+            // 那里不该再去发网络请求（会捏着 per-file 锁等接口）。
+            // 代价是"下载失败/被别人跳过"时这一次请求白做，但它是按话缓存的
+            // （[scrambleIds]），每话最多多打一次。
+            val transform = ImageDownloadTransform(
+                scrambleId = scrambleIdOf(chapterId),
+                chapterId = chapterId,
+            )
+
             val domain = environment.imageDomain()
             val outcome = downloader.download(
                 urlProvider = { JmDefaults.buildImgUrl(chapterId, imageFile, domain) },
                 target = target,
                 // 已经有了就不重复下载（上面已经提前返回，这里是二次保险）
                 skipIfComplete = true,
+                // 解扰在发布之前完成；它抛异常就放弃发布，绝不会把加扰图落到最终路径上
+                beforePublish = { part: File -> transform.transform(part, imageFile) },
             )
             when (outcome) {
                 is DownloadOutcome.Downloaded, is DownloadOutcome.Skipped -> Unit
                 is DownloadOutcome.Failed -> throw outcome.error
                 DownloadOutcome.Cancelled -> throw IllegalStateException("图片下载已取消：$imageFile")
             }
-
-            // 解扰（`blockNum == 0` 时原样保留，不重新编码）
-            val transform = ImageDownloadTransform(
-                scrambleId = scrambleIdOf(chapterId),
-                chapterId = chapterId,
-            )
-            runCatching { transform.transform(target, imageFile) }
-                .onFailure { Timber.tag("jm").w(it, "解扰失败，保留原图：%s", imageFile) }
 
             target
         }
@@ -151,11 +167,23 @@ class JmImageStore(
         }
     }
 
-    /** 这一话的 `scramble_id`；取不到时用参考实现的兜底值。同一话只请求一次。 */
+    /**
+     * 这一话的 `scramble_id`；取不到时用参考实现的兜底值。同一话只请求一次。
+     *
+     * **取消必须原样抛出**：`runCatching` 会把 `CancellationException` 一起吞掉，
+     * 于是"用户快速退出阅读器"就变成了"用兜底 id 继续解扰"。兜底值与真实值不一致时
+     * 块数就算错了，而解扰不可逆——图会被永久毁掉并落盘，之后还会被当成缓存命中。
+     */
     private suspend fun scrambleIdOf(chapterId: Long): Long {
         scrambleIds[chapterId]?.let { return it }
-        val value = runCatching { repo.scrambleIdOf(chapterId) }
-            .getOrDefault(JmDefaults.FALLBACK_SCRAMBLE_ID)
+        val value = try {
+            repo.scrambleIdOf(chapterId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Timber.tag("jm").w(e, "取 scramble_id 失败，使用兜底值：chapterId=%d", chapterId)
+            JmDefaults.FALLBACK_SCRAMBLE_ID
+        }
         scrambleIds[chapterId] = value
         return value
     }

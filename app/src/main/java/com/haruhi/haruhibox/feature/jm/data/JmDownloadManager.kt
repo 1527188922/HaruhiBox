@@ -386,9 +386,18 @@ class JmDownloadManager(
 
         val folder = row.chapterTitle?.takeIf { it.isNotBlank() } ?: chapterId.toString()
         val chapterDir = dirs.chapterDir(albumFolder, folder)
-        val scrambleId = runCatching { repo.scrambleIdOf(chapterId) }
-            .getOrDefault(JmDefaults.FALLBACK_SCRAMBLE_ID)
-        // 解扰不可逆：一话共用一个 transform，保证同一张图只处理一次
+        // 取消必须原样抛出：被 runCatching 吞掉就会"用兜底 id 继续解扰"，
+        // 兜底值与真实值不一致时块数算错，解扰不可逆 → 图被永久毁掉。
+        val scrambleId = try {
+            repo.scrambleIdOf(chapterId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Timber.tag("dl").w(e, "取 scramble_id 失败，使用兜底值：chapterId=%d", chapterId)
+            JmDefaults.FALLBACK_SCRAMBLE_ID
+        }
+        // 解扰不可逆，而且现在由引擎在**发布之前**调用（`FileDownloader` 的 beforePublish）：
+        // 一话共用一个 transform，同一张图不会被处理两次。
         val transform = ImageDownloadTransform(scrambleId = scrambleId, chapterId = chapterId)
 
         val concurrency = environment.concurrency()
