@@ -36,15 +36,25 @@ private val LightColorScheme = lightColorScheme(
 /**
  * 浅蓝主题配色（[ThemeDeclaration] 声明 [AppThemeVariant.LIGHT_BLUE] 时使用）。
  *
- * 基底色 #E1E7FD 给 `background`（页面底色）；内容区域 #FFFFFF 同时给 `surface`
- * 与 `surfaceVariant`——本 App 的卡片/内容块这两个角色都在用，只覆盖 `surface` 的话，
- * "继续阅读"卡片这类用 `surfaceVariant` 的内容块会停在默认的灰紫色上。
- * 其余颜色角色不覆盖，沿用 Material 浅色基线：文字仍是深色，读得清。
+ * 基底色 #E1E7FD 给 `background`（页面底色）；内容展示区域一律 #FFFFFF：
+ * - `surface` / `surfaceVariant`：显式指定了这两个角色的卡片自身在用
+ *   （书库/任务/继续阅读卡片用 `surfaceVariant`，章节卡片用 `surface`）；
+ * - `surfaceContainer*` 整族：没显式指定颜色的组件在用——底部 tab
+ *   （`surfaceContainer`）、弹层/下拉菜单、默认样式的 `Card` 等。
+ *   不并成同一种白的话，页面上会混着好几种"偏紫的灰白"。
+ *
+ * 其余颜色角色不覆盖，沿用 Material 浅色基线：文字仍是深色，读得清；
+ * 选中态（`secondaryContainer`）、强调色、Snackbar 反色等属于状态/语义色，不是内容面，不动。
  */
 private val LightBlueColorScheme = lightColorScheme(
     background = LightBlueBackground,
     surface = LightBlueSurface,
     surfaceVariant = LightBlueSurface,
+    surfaceContainerLowest = LightBlueSurface,
+    surfaceContainerLow = LightBlueSurface,
+    surfaceContainer = LightBlueSurface,
+    surfaceContainerHigh = LightBlueSurface,
+    surfaceContainerHighest = LightBlueSurface,
 )
 
 @Composable
