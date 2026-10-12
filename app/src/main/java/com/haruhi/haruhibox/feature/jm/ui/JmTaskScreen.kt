@@ -16,14 +16,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,7 +50,8 @@ import com.haruhi.haruhibox.core.database.entity.DownloadStatus
  * 1. **状态**：排队 / 下载中 / 已暂停 / 等待网络 / 未完成 / 已完成，各自独立文案，
  *    失败**不算**"正在运行"；
  * 2. **进度**：章节数与图片数一起给（"2/12 话 · 18/240 张"），这是 P3 的验收项；
- * 3. **能做什么**：暂停/继续、取消、重试、删除记录、清空完成历史。
+ * 3. **能做什么**：暂停/继续、取消、重试、清空完成历史；「删除记录」是卡片右上角的
+ *    叉叉（任务停下之后才出现，跑着的时候先「取消」）。
  *
  * 任务跑在应用级作用域上，所以离开这个页面不会影响下载——
  * 文案里明确写出这一点，避免用户以为"退出就停了"。
@@ -159,6 +162,7 @@ fun JmTaskScreen(
                 pendingDelete = null
                 onDeleteOutput(taskId, name)
             },
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { pendingDelete = null },
         )
     }
@@ -247,6 +251,27 @@ private fun TaskCard(
                         )
                     }
                 }
+                // 删除记录：从卡片底部的文字按钮挪到右上角的叉叉（用户要求），
+                // 一眼看清"这条记录可以拿掉"。语义没变——**只删记录，不动已下载的文件**。
+                //
+                // 任务在跑的时候不显示叉叉：那时候底部有「取消」，否则一个图标既要
+                // "停下"又要"删掉"，用户分不清点下去会发生什么。
+                if (!row.canCancel) {
+                    IconButton(
+                        onClick = { onRemove(task.id) },
+                        // 贴齐封面顶边（那一行是垂直居中的），落位在卡片右上角
+                        modifier = Modifier
+                            .align(Alignment.Top)
+                            .size(32.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "删除记录",
+                            tint = Color.Black,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
             }
 
             if (task.status == DownloadStatus.RUNNING && task.totalImages > 0) {
@@ -268,35 +293,37 @@ private fun TaskCard(
                 )
             }
 
-            Spacer(Modifier.height(4.dp))
             row.outputName?.let { name ->
+                Spacer(Modifier.height(4.dp))
                 Row( modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)
                 ) {
                     TextButton(onClick = { onOpenOutput(name) }) { Text("打开至") }
                     TextButton(onClick = { onSendOutput(name) }) { Text("发送至") }
                     TextButton(onClick = { onDeleteOutput(task.id, name) },
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)) { Text("删除文件") }
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("删除文件") }
                 }
             }
 
-            Row( modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)
-            ) {
-                if (row.canPause) {
-                    TextButton(onClick = { onPause(task.id) }) { Text("暂停") }
-                }
-                if (row.canResume) {
-                    TextButton(onClick = { onResume(task.id) }) { Text("继续") }
-                }
-                if (row.canRetry) {
-                    TextButton(onClick = { onRetry(task.id) }) { Text("重试") }
-                }
-                if (row.canCancel) {
-                    TextButton(onClick = { onCancel(task.id) }) { Text("取消") }
-                } else {
-                    TextButton(onClick = { onRemove(task.id) },
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)) { Text("删除记录") }
+            // 底部的动作行只剩"任务还在跑"相关的操作；删除记录已经移到右上角的叉叉，
+            // 所以一条动作都不剩时整行不占高度（否则卡片底部会多出一截空白）。
+            if (row.canPause || row.canResume || row.canRetry || row.canCancel) {
+                Spacer(Modifier.height(4.dp))
+                Row( modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)
+                ) {
+                    if (row.canPause) {
+                        TextButton(onClick = { onPause(task.id) }) { Text("暂停") }
+                    }
+                    if (row.canResume) {
+                        TextButton(onClick = { onResume(task.id) }) { Text("继续") }
+                    }
+                    if (row.canRetry) {
+                        TextButton(onClick = { onRetry(task.id) }) { Text("重试") }
+                    }
+                    if (row.canCancel) {
+                        TextButton(onClick = { onCancel(task.id) }) { Text("取消") }
+                    }
                 }
             }
 

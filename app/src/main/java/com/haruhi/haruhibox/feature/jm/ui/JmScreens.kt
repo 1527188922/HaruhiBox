@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -342,6 +343,7 @@ fun JmLibraryScreen(
                 onDeleteFiles?.invoke(selection.toList())
                 selection = emptySet()
             },
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { confirmDeleteFiles = false },
         )
     }
@@ -357,6 +359,7 @@ fun JmLibraryScreen(
                 onRemoveFromLibrary?.invoke(selection.toList())
                 selection = emptySet()
             },
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { confirmRemove = false },
         )
     }

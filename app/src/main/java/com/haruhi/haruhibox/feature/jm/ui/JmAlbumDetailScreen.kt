@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonColors
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -417,6 +419,7 @@ fun JmAlbumDetailScreen(
                 "以及已导出的 zip / PDF；书库记录与收藏会保留。",
             confirmText = "删除文件",
             onConfirm = { showDeleteFilesDialog = false; onDeleteAlbumFiles() },
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { showDeleteFilesDialog = false },
         )
     }
@@ -441,6 +444,7 @@ fun JmAlbumDetailScreen(
                 pendingDeleteExport = null
                 onDeleteExport(name)
             },
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { pendingDeleteExport = null },
         )
     }
@@ -1339,12 +1343,13 @@ fun ConfirmDialog(
     confirmText: String,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
+    confirmButtonColors: ButtonColors = ButtonDefaults.textButtonColors(),
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = { Text(text) },
-        confirmButton = { TextButton(onClick = onConfirm) { Text(confirmText) } },
+        confirmButton = { TextButton(onClick = onConfirm,colors = confirmButtonColors) { Text(confirmText) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
