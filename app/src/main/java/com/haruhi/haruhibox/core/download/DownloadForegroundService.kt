@@ -116,9 +116,22 @@ class DownloadForegroundService : Service() {
             }
             else -> startForegroundCompat()
         }
-        // 不用 START_STICKY：任务由数据库驱动，进程重启后由恢复流程重新排队，
-        // 让系统"复活"一个空服务没有意义。
+        // 不用 START_STICKY：任务状态由数据库驱动，进程重启后由启动恢复流程收尾
+        // （下载恢复为"已暂停"、导出直接删除），让系统"复活"一个空服务没有意义。
         return START_NOT_STICKY
+    }
+
+    /**
+     * 用户"划掉最近任务"退出时的收尾：**下载暂停、导出任务删除**（用户拍板的行为）。
+     *
+     * 具体逻辑统一放在 `AppContainer.handleAppExit()` 里，这里不自己实现一套——
+     * 返回键退出（`MainActivity.onDestroy`）走的是同一个入口，两条路径必须结果一致；
+     * 而且划掉任务时两个钩子可能都被调用，入口本身是幂等的。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        runCatching { HaruhiBoxApp.from(this).handleAppExit() }
+            .onFailure { Timber.tag("svc").w(it, "退出收尾失败") }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

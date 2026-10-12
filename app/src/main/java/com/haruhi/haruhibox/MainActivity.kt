@@ -35,4 +35,19 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * 退出收尾（返回键退出根页面时 `isFinishing == true`）：**下载暂停、导出任务删除**，
+     * 具体见 [com.haruhi.haruhibox.core.di.AppContainer.handleAppExit]（用户拍板的行为）。
+     *
+     * 必须判 [isFinishing]：转屏、深色模式切换这类配置变更也会销毁重建 Activity，
+     * 但那是"页面重建"不是"退出应用"，任务要继续跑。划掉最近任务由
+     * `DownloadForegroundService.onTaskRemoved` 触发，两边调同一个入口、且幂等。
+     */
+    override fun onDestroy() {
+        if (isFinishing) {
+            HaruhiBoxApp.from(this).handleAppExit()
+        }
+        super.onDestroy()
+    }
 }

@@ -277,4 +277,4 @@ fun taskDetailText(task: DownloadTaskEntity): String? = when {
 
 /** 导出任务（生成 ZIP / 生成 PDF）：**不能续做**，进度口径也不是"张"。 */
 val DownloadTaskEntity.isExportTask: Boolean
-    get() = type == DownloadType.JM_EXPORT_ZIP || type == DownloadType.JM_EXPORT_PDF
+    get() = type.isExport

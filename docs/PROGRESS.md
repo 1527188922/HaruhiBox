@@ -2,7 +2,7 @@
 
 > 计划原文：`docs/android-app-plan.md`（= `2026-10-05-android-jm-bilibili-app.md`）
 > 跨功能硬约束：`docs/CONVENTIONS.md`（封面加载规范等）
-> 最后更新：2026-10-10
+> 最后更新：2026-10-12
 
 ## 目录结构决策
 
@@ -73,7 +73,7 @@ app/src/main/java/com/haruhi/haruhibox/
 | 进度持久化到"第 N 话 x/y 张" | ✅ | 每张图落库一次；任务级数字由章节明细推导 |
 | 任务级防死循环（缺图数不下降就停） | ✅ | 章节内 3 轮上限 + 任务级"没有进展就停" |
 | 网络策略闸门（仅 Wi-Fi 时进"等待网络"而不是失败） | ✅ | `awaitNetworkPermission` + `core/network/NetworkMonitor` |
-| 杀进程后按磁盘现状重算并继续 | ✅ | `recoverInterrupted` → `requeueForResume` → 自动接着跑 |
+| 杀进程后按磁盘现状重算并**暂停**（不自动续跑，等用户点「继续」） | ✅ | `recoverInterrupted` 重算进度后置 `PAUSED`（第二十四轮改） |
 | 前台服务常驻通知 | ✅ | 有任务开始即 `DownloadForegroundService.ensureRunning` |
 | 任务页（进行中 / 已完成、暂停恢复取消重试、清空历史、角标） | ✅ 代码 | `feature/jm/ui/JmTaskScreen.kt` + `JmTaskViewModel.kt` |
 | 阅读器（纵向连续 / 横向分页 / 右到左） | ✅ 代码 | `feature/jm/ui/JmReaderScreen.kt` |
@@ -116,7 +116,7 @@ app/src/main/java/com/haruhi/haruhibox/
 | 点「下载」→ 面板选章节 → 确认 | ✅ 自动入库 + 建任务；角标出现 |
 | 任务页 | ✅ **等待网络 · 0/1 话** + "当前网络不允许下载，已暂停传输"（当时默认策略还是仅 Wi-Fi） |
 | 切到 Wi-Fi | ✅ 任务自动继续：`下载图片 · 0/1 话 · 0/11 张`，磁盘上出现 `第1话/0000N.webp.part` |
-| 杀进程再启动 | ✅ 日志 `恢复 1 个被中断的下载任务`，恢复后继续跑 |
+| 杀进程再启动 | ✅ 日志 `恢复 1 个被中断的下载任务`，恢复后继续跑（**该行为已在第二十四轮改为"恢复 = 暂停，等用户点继续"**） |
 | 下载中的失败与重试 | ✅ 读超时 → 章节标记未完成、任务判失败并给出"1 话没有下完（0/11 张），可点重试补下"；点「重试」后只补缺口，已发布的图片不再请求 |
 | 部分下载后的详情页 | ✅ `部分下载 4/11`，占用从 1.1 MB 涨到 5.1 MB |
 | 阅读器 | ✅ 顶栏「第1话 · 11 页 · 缺 7 页」，缺图页显示「第 N 页 · 图片缺失 + 重试」，底栏「补下缺图（7 页）」；已下载的页**正常显示解扰后的画面**，纵向滚动可用 |
@@ -459,6 +459,20 @@ app/src/main/java/com/haruhi/haruhibox/
 > `detectTapGestures` / `PointerEventPass.Initial` 拦截一律没有），只对着要复制的文字包
 > `SelectionContainer`；作者行的"可点"交给 `LinkAnnotation`，不再叠 `Modifier.clickable`。
 
+### 第二十四轮反馈修复（2026-10-12）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| V1 | 退出软件再进入，按理所有任务都该是暂停的，结果还在自动下载；zip/pdf 导出也要能"退出即停" | 用户最终拍板的方案（比"导出也暂停 + 任务页再点重新生成 + 密码回填"简单，少一类状态就不容易出错）：**退出 = 漫画图片下载暂停（可断点续传）、zip/pdf 导出直接删除（任务行 + 未完成中转文件）**。<br>① 统一入口 `AppContainer.handleAppExit()`：先 `jmExports.abortInProgressForExit()`（取消 Job → 删任务行 → 删 `files/library/export/` 下的中转文件），再 `jmDownloads.pauseAllForExit()`（批量置 `PAUSED`、卡在 `RUNNING` 的章节回队列、取消 Job），最后停前台服务撤通知——**先写库再撤服务**，通知不会停在"下载中"的旧快照上；<br>② 触发点是两个钩子、同一个入口且**幂等**：`DownloadForegroundService.onTaskRemoved`（划掉最近任务）与 `MainActivity.onDestroy`（只在 `isFinishing` 时做，转屏/重建不触发）；<br>③ 退出钩子没跑到（进程被杀）由启动时的 `recoverInterrupted` 兜底：**下载任务按磁盘重算进度后置 `PAUSED`（不再自动续跑）**，**导出任务连中转文件一起删**——顺带修掉旧 bug：被杀进程的导出任务以前被打回 `QUEUED` 却没有任何代码续跑，永远"排队中"还占着同 `(type, bizKey)` 的去重名额，用户再从详情页点导出会被 `submit` 判成"已有任务"挡住 | 代码（**按要求没有跑测试**）。设备上这样核对：下载中划掉最近任务 → 重新进入 → 任务页显示「已暂停」且不自动下载，点「继续」按磁盘续传（已下好的图不再请求）；zip/pdf 生成中划掉 → 重新进入 → 任务列表里没有这条任务，详情页立刻能重新点导出；转屏不打断下载 |
+
+> **明确不做（用户否掉的方案）**：导出任务加 `PAUSED` + 任务页「重新生成」按钮 + 导出密码写回
+> `SecretStore` 再回填。理由：导出不能续做，为它引入第四种收尾方式不值当。因此
+> `JmDownloadManager.resumeQueued` / `requeueForResume` 两个只为"恢复后自动跑"存在的方法一并删除。
+>
+> 新增/同步的用例（**未在本机运行**，本机无 Android/gradle 环境）：
+> `DownloadTaskDaoTest` 12→13（恢复=暂停、`pauseActive` 只动指定类型且章节回队列），
+> `DownloadTaskRepositoryTest` 11→13（恢复断言改 `PAUSED`、导出被删+中转文件清理、退出暂停批量语义）。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |
@@ -588,7 +602,7 @@ Expected identity hash: 7ecd5cfc..., found: 31e452937...
 | 通知显示进度 | ✅ | `DownloadForegroundService` 订阅活跃任务渲染通知（真机观感待 P7） |
 | 杀进程后任务与进度从数据库恢复 | ✅ | `recoverInterrupted` + `DownloadTaskRepositoryTest` 的 4 个恢复用例 |
 | 恢复后按磁盘现状重算（不回退、不重复累加） | ✅ | `recomputeChapterProgress`；0 字节残file 不计入 |
-| **恢复后自动接着跑**（P3 接上） | ✅ | `HaruhiBoxApp.recoverInterruptedDownloads` → `jmDownloads.resumeQueued` |
+| **恢复后不自动跑：下载置"已暂停"、导出被删干净**（P3/P4 接上，第二十四轮改） | ✅ | `recoverInterrupted` 分区处理；`AppContainer.handleAppExit` 为正常退出路径 |
 | WorkManager 约束调度（仅 Wi-Fi 时自动延后） | ⬜ | 前台服务已就绪；"等待网络"由执行器的闸门实现，Worker 留到 P6 |
 
 ## 已确认的决策（2026-10-08）
@@ -689,8 +703,9 @@ $env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 .\gradlew.bat :app:runDeviceTests
 ```
 
-当前基线：**273 个单元测试 + 11 个设备用例全绿**，lint 0 error（27 条 warning 均为既有项），
-debug / release APK 均可构建（release 5.6 MB）。
+当前基线（**第二十四轮改动前跑通**）：**273 个单元测试 + 11 个设备用例全绿**，lint 0 error
+（27 条 warning 均为既有项），debug / release APK 均可构建（release 5.6 MB）；
+第二十四轮新增 / 同步 4 个用例（273 → 277）**未在本机运行**（无 Android/gradle 环境）。
 
 ### 测试清单（单元测试）
 
@@ -703,9 +718,9 @@ debug / release APK 均可构建（release 5.6 MB）。
 | `core.storage.FileNamingGoldenTest` | 14 | 文件名清洗 / 本子目录名 / 章节与图片排序 |
 | `core.database.JmDaoTest` | 14 | 书库分页排序（入库时间倒序）/ 标签 OR / 章节分组 / 收藏唯一索引 |
 | `feature.jm.data.JmDownloadManagerTest` | 13 | **下载编排**：逐字节一致（块数 0 不重编码）/ 跳过已存在 / 断点只补缺口 / 等待网络 / 取消 / 追加章节 / 重试 |
-| `core.database.DownloadTaskDaoTest` | 12 | 任务去重 / 恢复 / 章节计数幂等 / 历史裁剪 |
+| `core.database.DownloadTaskDaoTest` | 13 | 任务去重 / **恢复=暂停** / `pauseActive` 只暂停指定类型且章节回队列 / 章节计数幂等 / 历史裁剪 |
 | `core.download.FileDownloaderTest` | 12 | Range 续传 / 不支持 Range / 断流 / 416 / 原子发布 |
-| `core.download.DownloadTaskRepositoryTest` | 11 | 杀进程恢复 / 按磁盘重算进度 / 章节状态不回退 / 取消不复活 |
+| `core.download.DownloadTaskRepositoryTest` | 13 | 杀进程恢复（**下载置暂停、导出被删+中转文件清理**）/ 按磁盘重算进度 / 退出暂停批量语义 / 章节状态不回退 / 取消不复活 |
 | `feature.jm.data.JmExportManagerTest` | 15 | **导出编排**：缺图预检 / zip 与 pdf 跑通并交付 / 重复提交复用 / 无图时给出可读失败原因 / **成品是否存在、按名查 Uri、删单个与删两个格式 / `exportsOf` 的大小与生成时间 / `presentFormats` 整页只查一次** |
 | `feature.jm.ui.JmDisplayLogicTest` | 10 | 书库状态文案 / 章节状态 / 体积格式 / **详情页点赞·观看数字段与章节区标题（含占用体积）** / 空态与错误文案 |
 | `core.codec.PdfPagePlanTest` | 8 | **PDF 切片**：未超限仍是一页 / 超限切片连续无重叠 / 宽度超限等比缩小 / 切片数上限 |

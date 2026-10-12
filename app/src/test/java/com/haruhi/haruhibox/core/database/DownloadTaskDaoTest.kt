@@ -82,7 +82,7 @@ class DownloadTaskDaoTest {
     }
 
     @Test
-    fun `interrupted tasks are requeued but paused and cancelled are untouched`() = runTest {
+    fun `interrupted tasks are paused on restart while paused and cancelled are untouched`() = runTest {
         val dao = db.downloadTaskDao()
         val running = dao.insert(task(bizKey = "a", status = DownloadStatus.RUNNING))
         val waiting = dao.insert(task(bizKey = "b", status = DownloadStatus.WAITING_NETWORK))
@@ -90,15 +90,43 @@ class DownloadTaskDaoTest {
         val cancelled = dao.insert(task(bizKey = "d", status = DownloadStatus.CANCELLED))
         val success = dao.insert(task(bizKey = "e", status = DownloadStatus.SUCCESS))
 
-        val requeued = dao.requeueInterrupted(now = 1_000L)
+        val pausedCount = dao.pauseInterrupted(now = 1_000L)
 
-        assertThat(requeued).isEqualTo(2)
-        assertThat(dao.findById(running)!!.status).isEqualTo(DownloadStatus.QUEUED)
-        assertThat(dao.findById(waiting)!!.status).isEqualTo(DownloadStatus.QUEUED)
+        assertThat(pausedCount).isEqualTo(2)
+        // 恢复 = 暂停（不自动续跑，等用户点"继续"）
+        assertThat(dao.findById(running)!!.status).isEqualTo(DownloadStatus.PAUSED)
+        assertThat(dao.findById(waiting)!!.status).isEqualTo(DownloadStatus.PAUSED)
         // 暂停等用户点恢复；取消**不复活**（§D.3）
         assertThat(dao.findById(paused)!!.status).isEqualTo(DownloadStatus.PAUSED)
         assertThat(dao.findById(cancelled)!!.status).isEqualTo(DownloadStatus.CANCELLED)
         assertThat(dao.findById(success)!!.status).isEqualTo(DownloadStatus.SUCCESS)
+    }
+
+    @Test
+    fun `pauseActive only pauses the given types and requeues their running chapters`() = runTest {
+        val dao = db.downloadTaskDao()
+        val album = dao.insert(task(bizKey = "1", type = DownloadType.JM_ALBUM, status = DownloadStatus.RUNNING))
+        val waiting = dao.insert(task(bizKey = "2", type = DownloadType.JM_ALBUM, status = DownloadStatus.WAITING_NETWORK))
+        val export = dao.insert(task(bizKey = "3", type = DownloadType.JM_EXPORT_ZIP, status = DownloadStatus.RUNNING))
+        dao.upsertChapters(
+            listOf(
+                DownloadTaskChapterEntity(taskId = album, chapterId = 10, sort = 1, status = DownloadStatus.RUNNING),
+                DownloadTaskChapterEntity(taskId = export, chapterId = 11, sort = 1, status = DownloadStatus.RUNNING),
+            ),
+        )
+
+        val types = listOf(DownloadType.JM_ALBUM, DownloadType.BILI_VIDEO)
+        val pausedCount = dao.pauseActive(types, now = 1_000L)
+        dao.requeueRunningChapters(types, now = 1_000L)
+
+        assertThat(pausedCount).isEqualTo(2)
+        assertThat(dao.findById(album)!!.status).isEqualTo(DownloadStatus.PAUSED)
+        assertThat(dao.findById(waiting)!!.status).isEqualTo(DownloadStatus.PAUSED)
+        // 导出任务不由这里暂停：它在退出时由导出管理器直接删除
+        assertThat(dao.findById(export)!!.status).isEqualTo(DownloadStatus.RUNNING)
+        // 正在跑的那一章回队列（界面不留"假下载中"），导出任务的章节不受影响
+        assertThat(dao.chapters(album).first().status).isEqualTo(DownloadStatus.QUEUED)
+        assertThat(dao.chapters(export).first().status).isEqualTo(DownloadStatus.RUNNING)
     }
 
     @Test

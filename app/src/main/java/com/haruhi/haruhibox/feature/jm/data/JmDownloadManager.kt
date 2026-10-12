@@ -84,7 +84,8 @@ data class JmDownloadPayload(
  *   任务行如果只在整话结束时才更新，界面在整话下载期间就是静止的（用户反馈第 1、2 点）；
  * - **网络策略**：每个安全检查点问一次闸门，不允许时进 `WAITING_NETWORK`
  *   并**挂起等待**网络恢复（不是失败），恢复后自动继续（§9.5「不偷偷开始大下载」）；
- * - **恢复**：交给 [DownloadTaskRepository.recoverInterrupted]，本类只负责"恢复之后接着跑"。
+ * - **恢复**：交给 [DownloadTaskRepository.recoverInterrupted]（恢复 = 暂停），
+ *   本类只在用户点"继续"后从断点续做——磁盘上已有的图片会被跳过。
  *
  * ## 它不负责什么
  *
@@ -203,17 +204,29 @@ class JmDownloadManager(
         }
     }
 
-    /** 启动恢复流程之后调用：把打回队列的任务接着跑完。 */
-    fun resumeQueued(taskIds: List<Long>) {
-        taskIds.forEach { start(it) }
-    }
-
     /** 暂停：先落库再取消协程，保证"暂停"一定赢过正在跑的那一轮。 */
     fun pause(taskId: Long) {
         scope.launch {
             runCatching { tasks.markPaused(taskId) }
             jobs[taskId]?.cancel()
         }
+    }
+
+    /**
+     * 退出应用时**暂停所有**漫画/视频下载任务（用户拍板：退出 = 暂停，回来不自动跑）。
+     *
+     * 与单任务 [pause] 同一条规则，只是批量口径：
+     * 1. 先把任务行批量置为 `PAUSED`（含"卡在 RUNNING 的章节"回队列），
+     * 2. 再取消所有正在跑的 Job。
+     *
+     * 顺序不能反：先取消协程的话，正在跑的代码可能在"取消生效"之前又把状态写回运行中。
+     * 已经下载的图片留在磁盘上，用户下次点"继续"时按"文件已存在即跳过"续做，
+     * 不需要保存任何额外的断点信息。
+     */
+    suspend fun pauseAllForExit() {
+        // BILI_VIDEO 目前还没有执行器，但一并暂停：将来 P5 接上时不必再回来改这里
+        tasks.pauseActive(listOf(DownloadType.JM_ALBUM, DownloadType.BILI_VIDEO))
+        jobs.values.forEach { it.cancel() }
     }
 
     /** 恢复暂停的任务。 */
@@ -246,17 +259,6 @@ class JmDownloadManager(
             tasks.recomputeTaskTotals(taskId)
             start(taskId)
         }
-    }
-
-    /**
-     * 把任务里**尚未完成**的章节重新排队，并按磁盘现状重算进度。
-     *
-     * 用于进程被杀之后的恢复：已经下好的图片留在磁盘上，
-     * 重跑时会被"文件存在即跳过"规则跳掉，只补缺口。
-     */
-    suspend fun requeueForResume(taskId: Long) {
-        tasks.requeueUnfinishedChapters(taskId)
-        tasks.recomputeTaskTotals(taskId)
     }
 
     // ------------------------------------------------------------------

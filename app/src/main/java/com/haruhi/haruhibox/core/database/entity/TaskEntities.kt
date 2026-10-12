@@ -6,7 +6,24 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /** 下载任务类型。 */
-enum class DownloadType { JM_ALBUM, BILI_VIDEO, JM_EXPORT_ZIP, JM_EXPORT_PDF }
+enum class DownloadType {
+    JM_ALBUM,
+    BILI_VIDEO,
+    JM_EXPORT_ZIP,
+    JM_EXPORT_PDF,
+    ;
+
+    /**
+     * 是否是"导出"类任务（zip/pdf 打包）。
+     *
+     * 导出与下载有两个本质区别，恢复 / 退出收尾 / 界面文案都要按它分流：
+     * - **不能续做**：中断了就整份重来，所以退出应用时是**删除**（任务行 + 中转文件），
+     *   而不是像下载那样暂停等用户继续；
+     * - **进度口径不同**：它的 `doneImages` 是"已写入的条目数"，不是下载的图片数。
+     */
+    val isExport: Boolean
+        get() = this == JM_EXPORT_ZIP || this == JM_EXPORT_PDF
+}
 
 /**
  * 下载任务状态。
@@ -15,8 +32,10 @@ enum class DownloadType { JM_ALBUM, BILI_VIDEO, JM_EXPORT_ZIP, JM_EXPORT_PDF }
  * §9 第 9 条要求任务页"明确区分排队、执行、暂停、等待网络及待处理失败，
  * **不将失败算作正在运行**"，所以"等待网络"必须是一个独立状态而不是 RUNNING 的注解。
  *
- * 恢复规则（§D.3 故障验收矩阵）：
- * - 进程被杀后，`RUNNING` 任务按磁盘现状重算进度后回到 `QUEUED`；
+ * 恢复规则（§D.3 故障验收矩阵，用户拍板的行为）：
+ * - 进程被杀后，`RUNNING` 任务按磁盘现状重算进度后回到 `PAUSED`（**不自动续跑**，
+ *   等用户点"继续"），因为退出应用时的语义就是"下载暂停、导出删除"；
+ * - 导出任务（zip/pdf）**直接删除**：不能续做，留着的任务行只会占住去重名额；
  * - `CANCELLED` 任务**不复活**；
  * - `PAUSED` 保持 `PAUSED`，等用户点恢复。
  */

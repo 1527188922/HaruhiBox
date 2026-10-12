@@ -71,14 +71,16 @@ data class ExportedFormat(
  * `t_download_task` 的 `type` 里本来就有 `JM_EXPORT_ZIP` / `JM_EXPORT_PDF`，
  * 任务页、角标、暂停/取消/重试都是现成的。导出与下载的区别只有两点，都在这里体现：
  * - **不能续做**：中途取消就整份重来（计划 §9 第 9 条「导出不支持中途续做时仅提供取消」），
- *   所以不提供"继续"，只提供取消 + 重新生成；
+ *   所以不提供"继续"，只提供取消 + 重新生成；**退出应用时不暂停而是直接删除**
+ *   （任务行 + 未完成的中转文件，见 [abortInProgressForExit]），用户回来重新点一次导出；
  * - **要落库到系统目录**：成品先写在 `files/library/export/`，完成后交给 [ExportPublisher]。
  *
  * ## 密码不进数据库
  *
  * 密码存在内存里（[passwords]），只活在本次进程内。理由：
  * 任务参数会进数据库与日志（计划 §D.2 第 6 条），凭据绝不能写进去。
- * 进程被杀 = 导出任务也不会恢复（本来就不能续做），密码随之消失是正确行为。
+ * 进程退出（不管是正常退出还是被杀）= 导出任务被删掉（本来就不能续做），
+ * 密码随之消失是正确行为，不需要也不应该持久化。
  */
 class JmExportManager(
     private val repo: JmRepository,
@@ -208,6 +210,34 @@ class JmExportManager(
             runCatching { tasks.markCancelled(taskId) }
             jobs[taskId]?.cancel()
             passwords.remove(taskId)
+        }
+    }
+
+    /**
+     * 退出应用时**删除所有正在进行的导出任务**（用户拍板：导出 = 直接删，不做暂停/恢复）。
+     *
+     * 为什么是删除而不是暂停：
+     * 1. 导出**不能续做**——zip/pdf 打包进行到一半，既没有"断点"可言，也没法像图片那样
+     *    "文件已存在即跳过"；
+     * 2. 任务行还在的话会**占住同 `(type, bizKey)` 的去重名额**：详情页再点导出会被
+     *    [submit] 判成"已有任务"而挡掉，而旧实现又没有续跑的代码，等于卡死。
+     *
+     * 所以收尾动作就是把任务从根上清掉：取消正在跑的协程 → 删任务行（连同章节明细）→
+     * 删掉未完成的中转文件。成品已在系统目录的不受影响；密码本来就只在内存，一并清掉。
+     *
+     * 与 `DownloadTaskRepository.recoverInterrupted` 里的"杀进程兜底删除"是同一语义的两条路径：
+     * 正常退出走这里，杀进程没跑到钩子就在下次启动时由恢复流程删。
+     */
+    suspend fun abortInProgressForExit() {
+        tasks.activeTasks().filter { it.type.isExport }.forEach { task ->
+            runCatching {
+                jobs.remove(task.id)?.cancel()
+                passwords.remove(task.id)
+                tasks.delete(task.id)
+                // 中转文件写在私有目录（files/library/export/），删任务行时顺带清掉
+                task.displayName?.let { File(dirs.export, it).delete() }
+                Timber.tag("export").i("退出：删除进行中的导出任务 %d（%s）", task.id, task.displayName)
+            }.onFailure { Timber.tag("export").w(it, "退出：清理导出任务失败 %d", task.id) }
         }
     }
 

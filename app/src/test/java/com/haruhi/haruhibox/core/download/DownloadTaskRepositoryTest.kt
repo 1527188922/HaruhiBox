@@ -22,8 +22,9 @@ import java.io.File
 /**
  * 任务仓库验收：去重、删除语义、**杀进程后按磁盘现状恢复进度**。
  *
- * 这一组用例直接对应计划 §10 P1 的验收语句：
- * 「杀掉进程再启动，任务列表和进度能从数据库恢复（**RUNNING 任务按磁盘现状重算进度后继续**）」
+ * 恢复语义（用户拍板"退出 = 下载暂停、导出删除"）：
+ * 「杀掉进程再启动，任务列表和进度能从数据库恢复，但 **RUNNING 任务按磁盘现状
+ * 重算进度后置为 PAUSED、不自动续跑**（等用户点"继续"）；中断的导出任务直接删除」，
  * 与 §D.1「恢复时协调文件与数据库；文件被删或损坏时进度应允许纠正」。
  */
 @RunWith(RobolectricTestRunner::class)
@@ -96,7 +97,7 @@ class DownloadTaskRepositoryTest {
     }
 
     @Test
-    fun `restart recomputes chapter progress from disk and requeues the task`() = runTest {
+    fun `restart recomputes chapter progress from disk and pauses the task`() = runTest {
         val taskId = newTask()
         repository.upsertChapters(
             taskId,
@@ -131,8 +132,8 @@ class DownloadTaskRepositoryTest {
 
         assertThat(recovered).hasSize(1)
         val task = recovered.first()
-        // RUNNING 被打回 QUEUED（等执行器再拉起）
-        assertThat(task.status).isEqualTo(DownloadStatus.QUEUED)
+        // RUNNING 恢复为 PAUSED：不自动续跑，等用户在任务页点"继续"
+        assertThat(task.status).isEqualTo(DownloadStatus.PAUSED)
         // 进度按磁盘重算：第 1 话 2/3，第 2 话 0/4
         assertThat(task.doneImages).isEqualTo(2)
         assertThat(task.totalImages).isEqualTo(7)
@@ -211,7 +212,7 @@ class DownloadTaskRepositoryTest {
         assertThat(recovered.map { it.id }).containsExactly(running)
         assertThat(repository.findById(paused)!!.status).isEqualTo(DownloadStatus.PAUSED)
         assertThat(repository.findById(cancelled)!!.status).isEqualTo(DownloadStatus.CANCELLED)
-        assertThat(repository.findById(running)!!.status).isEqualTo(DownloadStatus.QUEUED)
+        assertThat(repository.findById(running)!!.status).isEqualTo(DownloadStatus.PAUSED)
     }
 
     @Test
@@ -236,7 +237,49 @@ class DownloadTaskRepositoryTest {
 
         val recovered = repository.recoverInterrupted { emptyList() }
         assertThat(recovered.map { it.id }).containsExactly(taskId)
-        assertThat(repository.findById(taskId)!!.status).isEqualTo(DownloadStatus.QUEUED)
+        assertThat(repository.findById(taskId)!!.status).isEqualTo(DownloadStatus.PAUSED)
+    }
+
+    @Test
+    fun `interrupted export tasks are deleted together with their partial file`() = runTest {
+        // 导出任务：RUNNING + 私有目录里留着一份没写完的中转文件
+        val submitted = repository.submit(
+            type = DownloadType.JM_EXPORT_ZIP,
+            bizKey = "480854",
+            displayName = "标题_JM480854.zip",
+            payload = "{}",
+        )
+        val exportId = (submitted as DownloadTaskRepository.SubmitResult.Created).taskId
+        repository.markRunning(exportId)
+        val partial = File(dirs.export, "标题_JM480854.zip").apply { writeBytes(ByteArray(8)) }
+        // 同一本还有一条被打断的下载任务：它应该被暂停而不是删除
+        val albumTask = newTask()
+        repository.markRunning(albumTask)
+
+        val recovered = repository.recoverInterrupted { emptyList() }
+
+        // 导出任务被删干净：记录、中转文件都不留，同 (type, bizKey) 的去重名额也释放了
+        assertThat(recovered.map { it.id }).containsExactly(albumTask)
+        assertThat(repository.findById(exportId)).isNull()
+        assertThat(partial.exists()).isFalse()
+        assertThat(repository.activeTask(DownloadType.JM_EXPORT_ZIP, "480854")).isNull()
+        assertThat(repository.findById(albumTask)!!.status).isEqualTo(DownloadStatus.PAUSED)
+    }
+
+    @Test
+    fun `exit pause marks active downloads paused and requeues running chapters`() = runTest {
+        val taskId = newTask()
+        repository.upsertChapters(taskId, listOf(spec(1, "第1话", 1, totalImages = 2)))
+        repository.markRunning(taskId)
+        repository.updateChapterProgress(taskId, 1, doneImages = 1, status = DownloadStatus.RUNNING)
+
+        repository.pauseActive(listOf(DownloadType.JM_ALBUM, DownloadType.BILI_VIDEO))
+
+        assertThat(repository.findById(taskId)!!.status).isEqualTo(DownloadStatus.PAUSED)
+        val chapter = repository.observeChapters(taskId).first().first { it.chapterId == 1L }
+        assertThat(chapter.status).isEqualTo(DownloadStatus.QUEUED)
+        // 已下载张数不回退：点"继续"后按磁盘续传，不必从零重下
+        assertThat(chapter.doneImages).isEqualTo(1)
     }
 
     @Test

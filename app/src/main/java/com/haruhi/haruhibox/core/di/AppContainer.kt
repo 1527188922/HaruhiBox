@@ -273,6 +273,35 @@ class AppContainer(private val appContext: Context) {
         )
     }
 
+    // ---------------- 退出收尾 ----------------
+
+    /**
+     * 退出应用时的统一收尾（用户拍板的行为）。
+     *
+     * - **漫画图片下载 → 暂停**：退出后不继续跑，再进入 App 时任务显示"已暂停"，
+     *   用户点"继续"从断点续传；
+     * - **zip/pdf 导出 → 直接删除**：导出不能续做，任务行与未完成的中转文件一起清掉，
+     *   用户回来重新从详情页点一次导出即可（也顺带解决了"旧任务占着
+     *   同 `(type, bizKey)` 的去重名额、再点导出被挡住"的问题）。
+     *
+     * 两个退出触发点共用这里：`DownloadForegroundService.onTaskRemoved`（划掉最近任务）
+     * 与 `MainActivity.onDestroy`（返回键退出）。两者可能同时被调用，所以**必须幂等**：
+     * 暂停/删除都只对"还活跃的任务"动手，重复执行没有副作用。
+     *
+     * 顺序：先把任务状态写进数据库，再停前台服务撤通知——服务里的通知订阅的就是任务表，
+     * 服务先停的话通知可能停在"下载中"的旧快照上。进程若在写库之前就被杀死，
+     * 下次启动的 `DownloadTaskRepository.recoverInterrupted` 兜底会落到同一结果。
+     */
+    fun handleAppExit() {
+        appScope.launch {
+            runCatching { jmExports.abortInProgressForExit() }
+                .onFailure { Timber.tag("app").w(it, "退出时清理导出任务失败") }
+            runCatching { jmDownloads.pauseAllForExit() }
+                .onFailure { Timber.tag("app").w(it, "退出时暂停下载任务失败") }
+            com.haruhi.haruhibox.core.download.DownloadForegroundService.stop(appContext)
+        }
+    }
+
     /**
      * 封面缓存的逐条失效。
      *

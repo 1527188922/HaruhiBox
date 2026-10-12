@@ -21,8 +21,9 @@ import java.io.File
  *
  * 计划 §4.5 / §3.3 的核心约束都在这里落地：
  * 1. **同一 `(type, bizKey)` 只允许一个活跃任务**（照抄参考实现的去重规则）；
- * 2. 进程被杀后重启：`RUNNING`/`WAITING_NETWORK` 任务打回 `QUEUED`，
- *    并且**按磁盘现状重算进度**（§D.1）；`PAUSED` 保持、`CANCELLED` 不复活；
+ * 2. 进程被杀后重启：`RUNNING`/`WAITING_NETWORK` 任务按磁盘现状重算进度后置为 `PAUSED`
+ *    （**不自动续跑**，等用户点"继续"）；导出任务（zip/pdf）直接删除——它不能续做；
+ *    `PAUSED` 保持、`CANCELLED` 不复活；
  * 3. "是否已下载"**始终以磁盘文件是否存在为准**，不以任务状态为准
  *    （§3.3，B站下载的既定语义）；
  * 4. 完成历史保留最近 N 条（B站 20 条）。
@@ -53,6 +54,9 @@ class DownloadTaskRepository(
     fun observeFailedCount(): Flow<Int> = dao.observeFailedCount()
 
     suspend fun findById(id: Long): DownloadTaskEntity? = dao.findById(id)
+
+    /** 所有活跃任务（任务页"进行中"分组、退出收尾都从这里拿）。 */
+    suspend fun activeTasks(): List<DownloadTaskEntity> = dao.activeTasks()
 
     suspend fun activeTask(type: DownloadType, bizKey: String): DownloadTaskEntity? =
         dao.activeTask(type, bizKey)
@@ -216,6 +220,19 @@ class DownloadTaskRepository(
         dao.requeueUnfinishedChapters(id, System.currentTimeMillis())
     }
 
+    /**
+     * 退出应用时把指定类型的活跃任务**批量暂停**（漫画图片下载用）。
+     *
+     * 与单任务 [markPaused] 是同一条规则，只是批量口径：任务行改 `PAUSED`，
+     * 再把卡在 `RUNNING` 的章节打回队列。**先落库，协程取消由调用方随后做**——
+     * 执行器每个安全检查点都会读任务状态，状态落库之后"暂停"一定赢过正在跑的那一轮。
+     */
+    suspend fun pauseActive(types: List<DownloadType>) {
+        val now = System.currentTimeMillis()
+        dao.pauseActive(types, now)
+        dao.requeueRunningChapters(types, now)
+    }
+
     /** 等待网络：不算失败，也不算"正在运行"（§9 第 9 条）。 */
     suspend fun markWaitingNetwork(id: Long, reason: String?) {
         dao.markWaitingNetwork(id, reason, STAGE_WAITING_NETWORK, System.currentTimeMillis())
@@ -372,14 +389,18 @@ class DownloadTaskRepository(
     // ------------------------------------------------------------------
 
     /**
-     * 启动时恢复：把被中断的任务打回队列，并**按磁盘现状重算进度**。
+     * 启动时恢复：把被中断的任务收尾，并**按磁盘现状重算进度**。
      *
-     * 返回被打回的任务，调用方可据此决定是否立即开始执行。
+     * 返回**恢复后还在的任务**（被删掉的导出任务不在里面），调用方目前只用它记日志。
      *
-     * 边界（计划 §D.3）：
-     * - 只有 `RUNNING` / `WAITING_NETWORK` 会被恢复；设置页里"强行停止"之后
-     *   以**用户再次打开 App**为恢复边界，不承诺立即自动恢复；
-     * - `CANCELLED` 不复活；`PAUSED` 保持暂停等用户操作。
+     * 恢复语义（用户拍板"退出应用 = 下载暂停、导出删除"，这里是杀进程没跑到
+     * 退出钩子时的兜底路径）：
+     * - **下载任务**：`RUNNING` / `WAITING_NETWORK` 按磁盘现状重算进度后置为 `PAUSED`，
+     *   **不自动续跑**，等用户在任务页点"继续"（点继续后按磁盘跳过已下载的图片，续传）；
+     * - **导出任务**（zip/pdf）：**直接删除**——导出不能续做，留着的任务行只会占住
+     *   同 `(type, bizKey)` 的去重名额（旧实现把它打回"排队中"却没人继续执行，
+     *   用户从详情页再点导出时反被挡住）；同一份未完成的中转文件一并删掉；
+     * - `CANCELLED` 不复活；`PAUSED` 保持。
      */
     suspend fun recoverInterrupted(
         chapterResolver: suspend (DownloadTaskEntity) -> List<ChapterRediscovery>,
@@ -389,7 +410,18 @@ class DownloadTaskRepository(
         }
         if (interrupted.isEmpty()) return emptyList()
 
-        for (task in interrupted) {
+        // 导出任务先分流：不能续做，收尾方式就是"删干净"，不需要章节重算
+        val (exportTasks, downloadTasks) = interrupted.partition { it.type.isExport }
+        for (task in exportTasks) {
+            runCatching {
+                delete(task.id)
+                // 中转文件写在私有目录（files/library/export/），成品在系统目录、不受影响
+                task.displayName?.let { File(dirs.export, it).delete() }
+                Timber.tag("task").i("清理被中断的导出任务：%d %s", task.id, task.displayName)
+            }.onFailure { Timber.tag("task").w(it, "清理导出任务失败：%d", task.id) }
+        }
+
+        for (task in downloadTasks) {
             runCatching {
                 // 章节明细里卡在 RUNNING 的那一条也要打回队列，否则界面永远显示"下载中"
                 dao.requeueUnfinishedChapters(task.id, System.currentTimeMillis())
@@ -411,7 +443,8 @@ class DownloadTaskRepository(
                 }
                 dao.update(
                     task.copy(
-                        status = DownloadStatus.QUEUED,
+                        // 暂停而不是排队：再启动时**不自动下载**，等用户点"继续"
+                        status = DownloadStatus.PAUSED,
                         doneChapters = doneChapters,
                         totalChapters = if (discovered.isNotEmpty()) discovered.size else task.totalChapters,
                         doneImages = doneImages,
@@ -421,7 +454,7 @@ class DownloadTaskRepository(
                             task.totalImages
                         },
                         message = null,
-                        stageText = STAGE_RECOVERED,
+                        stageText = STAGE_PAUSED_ON_RECOVERY,
                         updateTime = System.currentTimeMillis(),
                     ),
                 )
@@ -429,8 +462,8 @@ class DownloadTaskRepository(
         }
 
         // 兜底：只要还有 RUNNING/WAITING_NETWORK 没被上面处理掉（例如 chapterResolver 抛错），
-        // 也统一打回队列，保证不存在"永远显示在运行中"的僵尸任务。
-        dao.requeueInterrupted(System.currentTimeMillis())
+        // 也统一置为 PAUSED，保证不存在"永远显示在运行中"或"自己跑起来"的僵尸任务。
+        dao.pauseInterrupted(System.currentTimeMillis())
 
         return interrupted.mapNotNull { dao.findById(it.id) }
     }
@@ -465,7 +498,8 @@ class DownloadTaskRepository(
         /** B站下载的完成历史保留条数（参考实现 §3.3）。 */
         const val FINISHED_HISTORY_LIMIT = 20
 
-        const val STAGE_RECOVERED = "重新排队"
+        /** 被杀进程的任务恢复后的阶段文案：恢复 = 暂停，等用户点"继续"（不再显示"重新排队"）。 */
+        const val STAGE_PAUSED_ON_RECOVERY = "已暂停"
         const val STAGE_WAITING_NETWORK = "等待网络"
 
         /**

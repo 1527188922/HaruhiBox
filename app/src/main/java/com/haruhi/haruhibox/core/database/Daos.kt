@@ -790,7 +790,12 @@ interface DownloadTaskDao {
     suspend fun recomputeTotalsFromChapters(taskId: Long, now: Long)
 
     /**
-     * 应用被杀死后重启时的恢复：把所有 `RUNNING` / `WAITING_NETWORK` 任务打回 `QUEUED`。
+     * 应用被杀死后重启时的恢复兜底：把**还没被恢复流程处理掉**的
+     * `RUNNING` / `WAITING_NETWORK` 任务统一置为 `PAUSED`。
+     *
+     * 为什么是暂停而不是打回队列：用户拍板"退出应用 = 下载暂停、导出删除"，
+     * 杀进程没跑到退出钩子时也要落到同一语义——任务显示"已暂停"，等用户点"继续"，
+     * 不会在下次启动时自己跑起来。
      *
      * **不动 `PAUSED`**（等用户点恢复）与 `CANCELLED`（不复活，§D.3）。
      * 进度字段先按磁盘现状由仓库层重算后再调用本方法。
@@ -798,11 +803,30 @@ interface DownloadTaskDao {
     @Query(
         """
         UPDATE t_download_task
-        SET status = 'QUEUED', updateTime = :now
+        SET status = 'PAUSED', message = NULL, updateTime = :now
         WHERE status IN ('RUNNING', 'WAITING_NETWORK')
         """,
     )
-    suspend fun requeueInterrupted(now: Long): Int
+    suspend fun pauseInterrupted(now: Long): Int
+
+    /**
+     * 退出应用时把指定类型的活跃任务**批量**置为 `PAUSED`（漫画图片下载用）。
+     *
+     * 只覆盖"会自己跑"的状态（排队 / 运行中 / 等待网络）：本来就是 `PAUSED` 的不动。
+     * `message` 一并清掉——它多半是"等待网络"的原因，任务已暂停，留着会误导。
+     *
+     * 配合 [requeueRunningChapters] 使用：任务行暂停的同时，正在跑的那一章
+     * 也要从 `RUNNING` 打回队列（与单任务 [requeueUnfinishedChapters]
+     * 同一个理由：界面上不留"假下载中"）。
+     */
+    @Query(
+        """
+        UPDATE t_download_task
+        SET status = 'PAUSED', message = NULL, updateTime = :now
+        WHERE type IN (:types) AND status IN ('QUEUED', 'RUNNING', 'WAITING_NETWORK')
+        """,
+    )
+    suspend fun pauseActive(types: List<DownloadType>, now: Long): Int
 
     @Query("DELETE FROM t_download_task WHERE status IN ('SUCCESS', 'FAIL', 'CANCELLED')")
     suspend fun clearFinished(): Int
@@ -883,6 +907,23 @@ interface DownloadTaskDao {
         """,
     )
     suspend fun requeueUnfinishedChapters(taskId: Long, now: Long): Int
+
+    /**
+     * 把指定类型任务里**卡在 `RUNNING`** 的章节打回队列（退出应用暂停下载时用）。
+     *
+     * 与 [requeueUnfinishedChapters] 的区别是**批量口径**：那边是"重试/恢复某一个任务"
+     * 时连 `FAIL`/`CANCELLED` 一起重置，这里只处理"任务被暂停时正在跑的那一章"——
+     * 失败/取消的章节状态不该被退出动作动到，等用户在任务页点重试/继续时再统一处理。
+     */
+    @Query(
+        """
+        UPDATE t_download_task_chapter
+        SET status = 'QUEUED', message = NULL, updateTime = :now
+        WHERE status = 'RUNNING'
+          AND taskId IN (SELECT id FROM t_download_task WHERE type IN (:types))
+        """,
+    )
+    suspend fun requeueRunningChapters(types: List<DownloadType>, now: Long): Int
 
     @Query("DELETE FROM t_download_task_chapter WHERE taskId = :taskId")
     suspend fun deleteChapters(taskId: Long)

@@ -45,16 +45,16 @@ class HaruhiBoxApp : Application() {
     }
 
     /**
-     * 启动时恢复被中断的下载任务，并**接着把它们跑完**。
+     * 启动时恢复被中断的下载任务：**只收尾，不自动续跑**（用户拍板的行为）。
      *
-     * 计划 §10 P1/P3 的验收边界：「杀掉进程再启动，任务列表和进度能从数据库恢复
-     * （**RUNNING 任务按磁盘现状重算进度后继续**）」、「下载到一半杀进程 →
-     * 重启后从断点继续，已完成图片不重下」。
+     * 退出应用（返回键 / 划掉最近任务）时正常路径是 `AppContainer.handleAppExit`
+     * 已经把任务暂停/删除好了；这里负责的是**进程被杀、退出钩子没跑到**的兜底：
+     * - 漫画图片下载 → 按磁盘现状重算进度后置为 `PAUSED`，显示"已暂停"，
+     *   等用户在任务页点"继续"续传；
+     * - zip/pdf 导出 → 直接删除（任务行 + 未完成的中转文件），用户重新点导出即可。
      *
-     * 恢复规则（§D.3 的故障验收矩阵，由 [DownloadTaskRepository.recoverInterrupted] 实现）：
-     * - `RUNNING` / `WAITING_NETWORK` → 按磁盘现状重算进度后打回 `QUEUED`，这里随即继续执行；
-     * - `PAUSED` 保持暂停，等用户点恢复；
-     * - `CANCELLED` **不复活**。
+     * 所以**不会**在这里调用任何 `start` / `resumeQueued`：重启后不自己接着下，
+     * 一切都等用户明确操作（任务页的"继续"、详情页的重新提交）。
      *
      * 章节清单从数据库取（`t_jm_chapter_image` 是权威来源），不需要联网。
      */
@@ -84,13 +84,7 @@ class HaruhiBoxApp : Application() {
                     }
                 }
                 if (recovered.isEmpty()) return@launch
-                Timber.i("恢复 %d 个被中断的下载任务", recovered.size)
-                // 只能恢复 JM 任务：B站下载在 P5 接，这里按类型过滤，避免把别的任务喂给 JM 执行器
-                val jmTaskIds = recovered
-                    .filter { it.type == com.haruhi.haruhibox.core.database.entity.DownloadType.JM_ALBUM }
-                    .map { it.id }
-                jmTaskIds.forEach { container.jmDownloads.requeueForResume(it) }
-                container.jmDownloads.resumeQueued(jmTaskIds)
+                Timber.i("启动恢复：%d 个被中断的任务已暂停（导出任务已删除）", recovered.size)
             }.onFailure { Timber.w(it, "恢复中断任务失败") }
         }
     }
