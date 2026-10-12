@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -304,7 +305,14 @@ private fun TaskCard(
                     TextButton(onClick = { onOpenOutput(name) }) { Text("打开至") }
                     TextButton(onClick = { onSendOutput(name) }) { Text("发送至") }
                     TextButton(onClick = { onDeleteOutput(task.id, name) },
-                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("删除文件") }
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "删除文件",
+                            modifier = Modifier.size(ButtonDefaults.IconSize)
+                        )
+                        Text("删除文件")
+                    }
                 }
             }
 

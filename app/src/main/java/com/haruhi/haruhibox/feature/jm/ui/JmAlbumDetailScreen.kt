@@ -26,6 +26,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -601,6 +602,7 @@ private fun ExportSection(
                         onDelete = { onDelete(exported.file.displayName) },
                     )
                 }
+                /*
                 active.forEach { row ->
                     if (exports.isNotEmpty()) HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     ActiveExportRow(row)
@@ -616,6 +618,7 @@ private fun ExportSection(
                     ) { Text("打开文件夹") }
                 }
                 Spacer(Modifier.height(4.dp))
+                 */
             }
         }
     }
@@ -711,10 +714,19 @@ private fun ExportedFileRow(
             )
         }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    Row(modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)) {
         TextButton(onClick = onOpen) { Text("打开至") }
         TextButton(onClick = onSend) { Text("发送至") }
-        TextButton(onClick = onDelete) { Text("删除") }
+        TextButton(onClick = onDelete,
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "删除文件",
+                modifier = Modifier.size(ButtonDefaults.IconSize)
+            )
+            Text("删除")
+        }
     }
 }
 
