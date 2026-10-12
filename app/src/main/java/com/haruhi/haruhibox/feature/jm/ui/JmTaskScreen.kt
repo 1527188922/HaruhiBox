@@ -1,7 +1,9 @@
 package com.haruhi.haruhibox.feature.jm.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -101,51 +103,58 @@ fun JmTaskScreen(
             )
         }
 
-        when {
-            state.loading -> LoadingBox()
-            state.isEmpty -> EmptyBox(
-                title = "还没有下载任务",
-                hint = "在漫画详情页选好章节后点「下载」",
-            )
-            else -> LazyColumn(
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                if (state.active.isNotEmpty()) {
-                    item { SectionHeader("进行中（${state.active.size}）") }
-                    items(state.active, key = { "active-${it.task.id}" }) { row ->
-                        TaskCard(
-                            row = row,
-                            onToggleExpanded = onToggleExpanded,
-                            onPause = onPause,
-                            onResume = onResume,
-                            onCancel = onCancel,
-                            onRetry = onRetry,
-                            onRemove = onRemove,
-                            onOpenAlbum = onOpenAlbum,
-                            onOpenOutput = onOpenOutput,
-                            onSendOutput = onSendOutput,
-                            onDeleteOutput = onDeleteOutput,
-                        )
+        // 正文区铺灰色底；头部「下载任务 / 清空完成记录」那一行留白。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            when {
+                state.loading -> LoadingBox()
+                state.isEmpty -> EmptyBox(
+                    title = "还没有下载任务",
+                    hint = "在漫画详情页选好章节后点「下载」",
+                )
+                else -> LazyColumn(
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    if (state.active.isNotEmpty()) {
+                        item { SectionHeader("进行中（${state.active.size}）") }
+                        items(state.active, key = { "active-${it.task.id}" }) { row ->
+                            TaskCard(
+                                row = row,
+                                onToggleExpanded = onToggleExpanded,
+                                onPause = onPause,
+                                onResume = onResume,
+                                onCancel = onCancel,
+                                onRetry = onRetry,
+                                onRemove = onRemove,
+                                onOpenAlbum = onOpenAlbum,
+                                onOpenOutput = onOpenOutput,
+                                onSendOutput = onSendOutput,
+                                onDeleteOutput = onDeleteOutput,
+                            )
+                        }
                     }
-                }
-                if (state.finished.isNotEmpty()) {
-                    item { SectionHeader("已完成（${state.finished.size}）") }
-                    items(state.finished, key = { "done-${it.task.id}" }) { row ->
-                        TaskCard(
-                            row = row,
-                            onToggleExpanded = onToggleExpanded,
-                            onPause = onPause,
-                            onResume = onResume,
-                            onCancel = onCancel,
-                            onRetry = onRetry,
-                            onRemove = onRemove,
-                            onOpenAlbum = onOpenAlbum,
-                            onOpenOutput = onOpenOutput,
-                            onSendOutput = onSendOutput,
-                            onDeleteOutput = { id, name -> pendingDelete = id to name },
-                        )
+                    if (state.finished.isNotEmpty()) {
+                        item { SectionHeader("已完成（${state.finished.size}）") }
+                        items(state.finished, key = { "done-${it.task.id}" }) { row ->
+                            TaskCard(
+                                row = row,
+                                onToggleExpanded = onToggleExpanded,
+                                onPause = onPause,
+                                onResume = onResume,
+                                onCancel = onCancel,
+                                onRetry = onRetry,
+                                onRemove = onRemove,
+                                onOpenAlbum = onOpenAlbum,
+                                onOpenOutput = onOpenOutput,
+                                onSendOutput = onSendOutput,
+                                onDeleteOutput = { id, name -> pendingDelete = id to name },
+                            )
+                        }
                     }
                 }
             }

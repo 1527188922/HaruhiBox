@@ -226,74 +226,83 @@ fun JmLibraryScreen(
             )
         }
 
-        when {
-            // 三个分支都按"占满操作条以上的剩余高度"来排（weight），
-            // 底部要给多选操作条留位置，不能用 fillMaxSize 把整列撑满。
-            state.loading -> LoadingBox(Modifier.weight(1f))
-            state.albums.isEmpty() -> EmptyBox(
-                title = if (state.filter.isActive) "没有符合条件的漫画" else "书库还是空的",
-                hint = if (state.filter.isActive) {
-                    "试着放宽筛选条件"
-                } else {
-                    "去「发现」搜索并加入书库"
-                },
-                modifier = Modifier.weight(1f),
-            )
-            else -> LazyVerticalGrid(
-                columns = GridCells.Fixed(columns),
-                state = rememberLazyGridState(),
-                contentPadding = PaddingValues(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.weight(1f),
-            ) {
-                items(state.albums, key = { it.album.id }) { card ->
-                    AlbumGridCard(
-                        card = card,
-                        selecting = selecting,
-                        selected = card.album.id in selection,
-                        onOpen = {
-                            // 多选模式下点击是"勾选/取消"，不再进详情
-                            if (selecting) {
-                                selection = selection.toggle(card.album.id)
-                            } else {
-                                onOpenAlbum(card.album.id)
-                            }
-                        },
-                        onLongPress = { selection = selection + card.album.id },
-                        onToggleCollected = { onToggleCollected(card.album.id, card.album.collected != true) },
-                    )
-                }
-                // 分页页脚：横跨整行（用户第十轮要求第 4 点）
-                if (state.loadingMore) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 12.dp),
-                        ) {
-                            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-                        }
-                    }
-                } else if (state.hasMore) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        TextButton(
-                            onClick = onLoadMore,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("加载更多") }
-                    }
-                } else if (state.reachedEnd && state.loadedCount >= LOADED_ENOUGH_TO_SAY_END) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Text(
-                            text = "没有更多了",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 12.dp),
+        // 正文区铺灰色底，头部（标题 / 继续阅读卡 / 搜索与筛选栏）留白透出根背景的白。
+        // 注意 "搜索按钮及以上" 是按用户口述的边界：标题、继续阅读卡、筛选栏都在白区里。
+        // 下面三个分支占满这层 Box，所以 `weight` 收在 Box 上、分支内部用 `fillMaxSize`。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            when {
+                // 三个分支都按"占满操作条以上的剩余高度"来排，底部要给多选操作条留位置，
+                // 不能用 fillMaxSize 把整列撑满 —— 撑满这件事现在由外层 Box 的 weight 负责。
+                state.loading -> LoadingBox()
+                state.albums.isEmpty() -> EmptyBox(
+                    title = if (state.filter.isActive) "没有符合条件的漫画" else "书库还是空的",
+                    hint = if (state.filter.isActive) {
+                        "试着放宽筛选条件"
+                    } else {
+                        "去「发现」搜索并加入书库"
+                    },
+                )
+                else -> LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns),
+                    state = rememberLazyGridState(),
+                    contentPadding = PaddingValues(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    items(state.albums, key = { it.album.id }) { card ->
+                        AlbumGridCard(
+                            card = card,
+                            selecting = selecting,
+                            selected = card.album.id in selection,
+                            onOpen = {
+                                // 多选模式下点击是"勾选/取消"，不再进详情
+                                if (selecting) {
+                                    selection = selection.toggle(card.album.id)
+                                } else {
+                                    onOpenAlbum(card.album.id)
+                                }
+                            },
+                            onLongPress = { selection = selection + card.album.id },
+                            onToggleCollected = { onToggleCollected(card.album.id, card.album.collected != true) },
                         )
+                    }
+                    // 分页页脚：横跨整行（用户第十轮要求第 4 点）
+                    if (state.loadingMore) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 12.dp),
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                            }
+                        }
+                    } else if (state.hasMore) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            TextButton(
+                                onClick = onLoadMore,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("加载更多") }
+                        }
+                    } else if (state.reachedEnd && state.loadedCount >= LOADED_ENOUGH_TO_SAY_END) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            Text(
+                                text = "没有更多了",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 12.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -669,32 +678,39 @@ fun JmRecentScreen(
             }
         }
 
-        when {
-            state.loading -> LoadingBox()
-            state.error != null -> EmptyBox("读取最近浏览失败", state.error)
-            state.albums.isEmpty() -> EmptyBox(
-                title = "还没有浏览记录",
-                hint = "点开任意漫画详情后会出现在这里",
-            )
-            else -> LazyVerticalGrid(
-                columns = GridCells.Fixed(columns),
-                contentPadding = PaddingValues(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                items(state.albums, key = { it.album.id }) { card ->
-                    AlbumGridCard(
-                        card = card,
-                        // 最近浏览页不做多选（它的用途是"回到刚看过的本子"）
-                        selecting = false,
-                        selected = false,
-                        onOpen = { onOpenAlbum(card.album.id) },
-                        // 长按只处理这一条，不进多选
-                        onLongPress = { pendingRemove = card.album.id },
-                        // 最近浏览里没有收藏语义，不显示星标
-                        onToggleCollected = null,
-                    )
+        // 正文区铺灰色底；头部「最近浏览」那一行留白。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            when {
+                state.loading -> LoadingBox()
+                state.error != null -> EmptyBox("读取最近浏览失败", state.error)
+                state.albums.isEmpty() -> EmptyBox(
+                    title = "还没有浏览记录",
+                    hint = "点开任意漫画详情后会出现在这里",
+                )
+                else -> LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns),
+                    contentPadding = PaddingValues(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    items(state.albums, key = { it.album.id }) { card ->
+                        AlbumGridCard(
+                            card = card,
+                            // 最近浏览页不做多选（它的用途是"回到刚看过的本子"）
+                            selecting = false,
+                            selected = false,
+                            onOpen = { onOpenAlbum(card.album.id) },
+                            // 长按只处理这一条，不进多选
+                            onLongPress = { pendingRemove = card.album.id },
+                            // 最近浏览里没有收藏语义，不显示星标
+                            onToggleCollected = null,
+                        )
+                    }
                 }
             }
         }
@@ -1110,125 +1126,132 @@ fun JmOnlineSearchScreen(
         // 而横幅上的文案有时是「加入书库」失败——按钮和它旁边的话根本不是同一件事。
         // 现在无论搜索、翻页还是加入书库失败，都只弹一条一次性提示，重试由用户自己决定。
         val result = state.result
-        when {
-            state.searching -> LoadingBox()
-            result == null -> SearchHistoryList(
-                history = state.history,
-                historyEnabled = state.historyEnabled,
-                onOpen = onOpenHistory,
-                onDelete = onDeleteHistory,
-                onClearAll = onClearHistory,
-            )
-            result.items.isEmpty() -> EmptyBox(
-                title = "没有搜到结果",
-                hint = "换个关键字试试",
-            )
-            else -> {
-                val listState = rememberLazyListState()
-                // key 必须带上 `result.items` 本身：加入书库后 item 的 `existsLocal` 会变，
-                // 而"已显示条数"和"总条数"都不变——只按这两个 key 缓存的话，
-                // 拿到的永远是加库之前那一份列表，表现为"点了加入书库，按钮不变，
-                // 切走再回来才对"（用户反馈第 5 点）。
-                val visibleItems = remember(state.visibleCount, result.items) {
-                    result.items.take(state.visibleCount)
-                }
-
-                // 用户要求第 5 点：**最后一条进入可视范围就继续追加**，
-                // 而不是等用户滑到底再点按钮。这样列表是"连续滚不完"的观感，
-                // 同时首屏只渲染 10 条、不会一次性发起几十个封面请求。
-                //
-                // 两个坑，都已踩过：
-                // 1. 不要用 `derivedStateOf { listState.layoutInfo... }`：读 layoutInfo 拿到的
-                //    是**过期快照**，只有别的重组顺带读到它时才重算，表现为"必须先滑回顶部
-                //    再滑到底才加载"；
-                // 2. `LaunchedEffect` 的 key **不能包含当前批次条数**：每次追加都会取消并
-                //    重启这个 effect，正在进行的滚动检测被打断，于是永远停在某一批。
-                //    所以 key 只放"列表身份"，判定条件通过 rememberUpdatedState 读实时值，
-                //    判定本身用 [OnlineSearchUiState.shouldRevealMore]（有单测）。
-                val currentState by rememberUpdatedState(state)
-                LaunchedEffect(result.query, result.page, result.fromHistory) {
-                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
-                        .distinctUntilChanged()
-                        .collect { lastVisibleIndex ->
-                            if (currentState.shouldRevealMore(lastVisibleIndex)) onRevealMore()
+        // 正文区铺灰色底；头部搜索框 + 排序按钮那一行留白。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            when {
+                    state.searching -> LoadingBox()
+                    result == null -> SearchHistoryList(
+                        history = state.history,
+                        historyEnabled = state.historyEnabled,
+                        onOpen = onOpenHistory,
+                        onDelete = onDeleteHistory,
+                        onClearAll = onClearHistory,
+                    )
+                    result.items.isEmpty() -> EmptyBox(
+                        title = "没有搜到结果",
+                        hint = "换个关键字试试",
+                    )
+                    else -> {
+                        val listState = rememberLazyListState()
+                        // key 必须带上 `result.items` 本身：加入书库后 item 的 `existsLocal` 会变，
+                        // 而"已显示条数"和"总条数"都不变——只按这两个 key 缓存的话，
+                        // 拿到的永远是加库之前那一份列表，表现为"点了加入书库，按钮不变，
+                        // 切走再回来才对"（用户反馈第 5 点）。
+                        val visibleItems = remember(state.visibleCount, result.items) {
+                            result.items.take(state.visibleCount)
                         }
-                }
-
-                LazyColumn(
-                    state = listState,
-                    contentPadding = PaddingValues(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    item {
-                        Text(
-                            text = buildString {
-                                if (result.fromHistory) {
-                                    append("搜索历史快照 · 共 ${result.total} 条")
-                                } else {
-                                    append("共 ${result.total} 条 · 第 ${result.page}/${result.totalPages} 页")
+    
+                        // 用户要求第 5 点：**最后一条进入可视范围就继续追加**，
+                        // 而不是等用户滑到底再点按钮。这样列表是"连续滚不完"的观感，
+                        // 同时首屏只渲染 10 条、不会一次性发起几十个封面请求。
+                        //
+                        // 两个坑，都已踩过：
+                        // 1. 不要用 `derivedStateOf { listState.layoutInfo... }`：读 layoutInfo 拿到的
+                        //    是**过期快照**，只有别的重组顺带读到它时才重算，表现为"必须先滑回顶部
+                        //    再滑到底才加载"；
+                        // 2. `LaunchedEffect` 的 key **不能包含当前批次条数**：每次追加都会取消并
+                        //    重启这个 effect，正在进行的滚动检测被打断，于是永远停在某一批。
+                        //    所以 key 只放"列表身份"，判定条件通过 rememberUpdatedState 读实时值，
+                        //    判定本身用 [OnlineSearchUiState.shouldRevealMore]（有单测）。
+                        val currentState by rememberUpdatedState(state)
+                        LaunchedEffect(result.query, result.page, result.fromHistory) {
+                            snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+                                .distinctUntilChanged()
+                                .collect { lastVisibleIndex ->
+                                    if (currentState.shouldRevealMore(lastVisibleIndex)) onRevealMore()
                                 }
-                                // 让用户知道下面还有多少没展开
-                                if (state.remainingCount > 0) {
-                                    append(" · 已显示 ${visibleItems.size}/${result.items.size}")
+                        }
+    
+                        LazyColumn(
+                            state = listState,
+                            contentPadding = PaddingValues(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            item {
+                                Text(
+                                    text = buildString {
+                                        if (result.fromHistory) {
+                                            append("搜索历史快照 · 共 ${result.total} 条")
+                                        } else {
+                                            append("共 ${result.total} 条 · 第 ${result.page}/${result.totalPages} 页")
+                                        }
+                                        // 让用户知道下面还有多少没展开
+                                        if (state.remainingCount > 0) {
+                                            append(" · 已显示 ${visibleItems.size}/${result.items.size}")
+                                        }
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            items(visibleItems, key = { it.id }) { item ->
+                                OnlineResultRow(
+                                    item = item,
+                                    // 只有"这次入库确实要联网拉详情"才会是 true（见 VM 的 addToLibrary）
+                                    adding = item.id in state.addingIds,
+                                    onOpen = { onOpenAlbum(item.id) },
+                                    onAddToLibrary = { onAddToLibrary(item) },
+                                )
+                            }
+                            when {
+                                state.loadingMore -> item {
+                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                                 }
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    items(visibleItems, key = { it.id }) { item ->
-                        OnlineResultRow(
-                            item = item,
-                            // 只有"这次入库确实要联网拉详情"才会是 true（见 VM 的 addToLibrary）
-                            adding = item.id in state.addingIds,
-                            onOpen = { onOpenAlbum(item.id) },
-                            onAddToLibrary = { onAddToLibrary(item) },
-                        )
-                    }
-                    when {
-                        state.loadingMore -> item {
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        }
-
-                        // 本页还有没展示完的：继续下滑会自动追加
-                        state.remainingCount > 0 -> item {
-                            Text(
-                                text = "继续下滑显示更多（还有 ${state.remainingCount} 条）",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
-                            )
-                        }
-
-                        // 本页全部展示完，才出现"加载下一页"（用户要求第 5 点）
-                        !result.fromHistory && result.page < result.totalPages -> item {
-                            TextButton(
-                                onClick = onLoadMore,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) { Text("加载下一页（第 ${result.page + 1} 页）") }
-                        }
-
-                        else -> item {
-                            Text(
-                                text = if (result.fromHistory) {
-                                    "历史快照已全部显示"
-                                } else {
-                                    "已显示全部结果"
-                                },
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
-                            )
+    
+                                // 本页还有没展示完的：继续下滑会自动追加
+                                state.remainingCount > 0 -> item {
+                                    Text(
+                                        text = "继续下滑显示更多（还有 ${state.remainingCount} 条）",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp),
+                                    )
+                                }
+    
+                                // 本页全部展示完，才出现"加载下一页"（用户要求第 5 点）
+                                !result.fromHistory && result.page < result.totalPages -> item {
+                                    TextButton(
+                                        onClick = onLoadMore,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) { Text("加载下一页（第 ${result.page + 1} 页）") }
+                                }
+    
+                                else -> item {
+                                    Text(
+                                        text = if (result.fromHistory) {
+                                            "历史快照已全部显示"
+                                        } else {
+                                            "已显示全部结果"
+                                        },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
     }
 }
 
@@ -1498,46 +1521,53 @@ fun JmFavoritesScreen(
             }
         }
 
-        when {
-            state.loading -> LoadingBox()
-            state.favorites.isEmpty() -> EmptyBox("还没有收藏夹", "点「新建」创建一个")
-            else -> LazyColumn(
-                contentPadding = PaddingValues(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                items(sorted, key = { it.id }) { row ->
-                    Card(
-                        onClick = { onOpenFavorite(row.id, row.name) },
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth(),
+        // 正文区铺灰色底；头部「收藏夹 / 排序 / 新建」那一行留白。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.background),
+        ) {
+            when {
+                    state.loading -> LoadingBox()
+                    state.favorites.isEmpty() -> EmptyBox("还没有收藏夹", "点「新建」创建一个")
+                    else -> LazyColumn(
+                        contentPadding = PaddingValues(horizontal = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxSize(),
                     ) {
-                        Row(
-                            modifier = Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            FavoriteCover(row)
-                            Spacer(Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(row.name, style = MaterialTheme.typography.bodyLarge)
-                                Text(
-                                    text = if (row.isDefault) {
-                                        "${row.albumCount} 本 · 默认收藏夹不可删除或重命名"
-                                    } else {
-                                        "${row.albumCount} 本"
-                                    },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            if (!row.isDefault) {
-                                TextButton(onClick = { renameTarget = row }) { Text("改名") }
-                                TextButton(onClick = { deleteTarget = row }) { Text("删除") }
+                        items(sorted, key = { it.id }) { row ->
+                            Card(
+                                onClick = { onOpenFavorite(row.id, row.name) },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    FavoriteCover(row)
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(row.name, style = MaterialTheme.typography.bodyLarge)
+                                        Text(
+                                            text = if (row.isDefault) {
+                                                "${row.albumCount} 本 · 默认收藏夹不可删除或重命名"
+                                            } else {
+                                                "${row.albumCount} 本"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    if (!row.isDefault) {
+                                        TextButton(onClick = { renameTarget = row }) { Text("改名") }
+                                        TextButton(onClick = { deleteTarget = row }) { Text("删除") }
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
         }
     }
 

@@ -26,9 +26,14 @@ class MainActivity : ComponentActivity() {
         val container = HaruhiBoxApp.from(this)
         setContent {
             HaruhiBoxTheme {
+                // 根背景用 `surface`（白）而不是内容区的 `background`（#F5F5F5）：
+                // 状态栏那条（edge-to-edge 下由根部 Scaffold 的 windowInsets 让出来）
+                // 露出的就是这个颜色，必须是白的，才能和底部导航栏
+                // （`NavigationBar` 读 `surfaceContainer`，同为白）以及各页的白色头部连成一片。
+                // 5 个 tab 页的**正文区**各自铺自己的 `background` 灰底，见各 Screen 的 body。
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background,
+                    color = MaterialTheme.colorScheme.surface,
                 ) {
                     JmModeRoot(container = container)
                 }
