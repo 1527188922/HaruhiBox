@@ -1243,6 +1243,12 @@ fun JmSearchResultsScreen(
         // 与外层 `JmModeRoot` 的 Scaffold 不同：本页在内层，**不能再加一遍系统栏内边距**，
         // 否则标题上方会空出两倍状态栏高度（详情页踩过，见 JmAlbumDetailScreen 的同款处理）。
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        // 用户要求：固定区（搜索框 + 排序芯片）底色**纯白**。
+        // 内层 Scaffold 不写 `containerColor` 时默认取 `colorScheme.background`（#FFF5F5F5 灰白），
+        // 于是头部被染灰；发现页没有内层 Scaffold，头部露的是根部 Scaffold 的 `surface`（纯白），
+        // 所以那边正常。这里显式对齐成 `surface`：头部纯白，正文区仍由下面那个
+        // `background(...)` 的 Box 铺灰，两页的"头白身灰"就完全一致了。
+        containerColor = MaterialTheme.colorScheme.surface,
         // 用户要求：结果页**不要 TopAppBar**，顶部直接放搜索输入框。
         // 原来的顶栏代码整段留着（只注释掉），想切回去只要放开 below 注释、
         // 并删掉下方 Column 里的 SearchKeywordField 即可。
