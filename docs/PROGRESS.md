@@ -495,6 +495,19 @@ app/src/main/java/com/haruhi/haruhibox/
 > 而不是 `AlreadyRunning`），机器一忙就会红。要不要顺手把这两个用例改成不依赖墙钟时间，
 > 等你发话。
 
+### 第二十六轮反馈修复（2026-10-13）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| X1 | **结果页输入框里的空格全变成了 `+`**：在记录页粘贴 `[Hoshikawa Ranga] 120cm ... 100% ... [Digital] ⏎ [星川ランガ] ... [DL版]`，点搜索进结果页后，输入框显示成 `[Hoshikawa+Ranga]+120cm+...100%...+[Digital][星川ランガ]...` | 两个独立缺陷叠在一起，**根因是"路由参数用表单编码塞、又用 `URLDecoder` 解第二次"**：<br>① `JmRoutes.searchResults` 原来用 `URLEncoder.encode`——它是 `application/x-www-form-urlencoded`，**空格编成 `+`**；而 Navigation 解析路由参数走 `Uri.decode` 那一套，**只做百分号解码、不会把 `+` 还原成空格**，所以 `+` 一路活到界面；<br>② 页面里那次 `URLDecoder.decode` 是**第二次解码**，关键字里的 `100%` 已被 Navigation 解成裸 `%`，第二次解码直接抛 `IllegalArgumentException`，被 `runCatching` 兜住后退回**未解码的原始串**——上面那些 `+` 就留在了输入框里。<br>改法：新增 `JmRouteArgs.kt` 的 `encodeRouteArg` / `decodeRouteArg`，用 **Base64（URL-safe、无填充）+ `b64.` 前缀**过路由。选 Base64 而不是"换个转义函数"是因为它的字母表只有 `A-Za-z0-9-_`，**不含 `%`、`+`、`&`、`=`、空格**，所以无论 URI 那层解码几次、怎么解都是空操作；前缀是为了**可判别**（不带前缀按明文处理，否则 `Base64.decode("abcd")` 会"成功"解出乱码，用户搜 `abcd` 就被改坏）。`favoriteAlbums` 的收藏夹名是同一类输入（可能带空格 + `%`），一起换掉；`URLDecoder` / `URLEncoder` 两个 import 已从 `JmModeRoot` 移除 | 新增 `JmRouteArgsTest`（8 个用例：**用户那段原文**往返一致 / 编码结果不含 `%` `+` `&` `=` `?` `#` `/` 空格 / 关键字里的 `+` 不被当空格吃掉 / 形如 `abcd`、`YQ`、`b64.` 的关键字不被 Base64 误解 / 无前缀的旧值按明文返回 / 坏 payload 退回原串不抛异常 / 空串与全空白 / 50 行多行长文本）；**本轮已在本机跑通**：`tests=8 failures=0`。设备上请核对：重新按用户那条路径粘贴 → 进结果页，输入框应与记录页所填**逐字一致**（只有换行按 W2 的规则被去掉） |
+
+> **记一笔排查过程**（下次不用再绕）：一开始怀疑是 Navigation 没解、或 Uri 把 `+` 当空格，
+> 用 Robolectric 写了个探针跑真实 `NavDeepLink` 才定位到"**Navigation 百分号解码但不碰 `+`**"
+> 这一点——用户现象里 `%25` 已经变成 `%`、中文已经是中文（说明 Navigation 解过一层），
+> 而 `+` 还在（说明它不还原 `+`），两条合起来就锁定了"我们那次多余的 `URLDecoder` 抛异常后
+> 退回了原始串"。另外 `android.net.Uri.getQueryParameter()` **是**会把 `+` 当空格的，
+> 所以**不能**拿它当"Navigation 怎么解"的依据。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |

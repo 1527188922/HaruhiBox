@@ -48,8 +48,6 @@ import com.haruhi.haruhibox.core.di.AppContainer
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import java.net.URLDecoder
-import java.net.URLEncoder
 
 /**
  * 任务 tab 的图标（含角标）。
@@ -86,12 +84,13 @@ object JmRoutes {
     const val SEARCH_RESULTS = "jm/discover/results?keyword={keyword}&sort={sort}&historyId={historyId}"
 
     fun favoriteAlbums(id: Long, name: String) =
-        "jm/favorites/$id?name=${URLEncoder.encode(name, Charsets.UTF_8.name())}"
+        "jm/favorites/$id?name=${encodeRouteArg(name)}"
 
     /**
      * 结果页的地址。
      *
-     * @param keyword 搜索关键字
+     * @param keyword 搜索关键字。**必须**走 [encodeRouteArg]：关键字是用户输入的任意文本，
+     *        直接拼进路由会被 URI 那一层改坏（空格、`%`、`+`……，见 [encodeRouteArg] 的注释）。
      * @param sort 排序（点作者进来用默认排序）
      * @param historyId > 0 表示从搜索历史点进来：结果页**只回显快照，不发搜索请求**（用户要求）
      */
@@ -99,7 +98,7 @@ object JmRoutes {
         keyword: String,
         sort: JmSearchSort = JmSearchSort.DEFAULT,
         historyId: Long = 0L,
-    ) = "jm/discover/results?keyword=${URLEncoder.encode(keyword, Charsets.UTF_8.name())}" +
+    ) = "jm/discover/results?keyword=${encodeRouteArg(keyword)}" +
         "&sort=${sort.code}&historyId=$historyId"
 
     fun detail(albumId: Long) = "jm/album/$albumId"
@@ -335,10 +334,11 @@ fun JmModeRoot(
                         navArgument("historyId") { type = NavType.LongType; defaultValue = 0L },
                     ),
                 ) { entry ->
-                    val rawKeyword = entry.arguments?.getString("keyword").orEmpty()
-                    val keyword = remember(rawKeyword) {
-                        runCatching { URLDecoder.decode(rawKeyword, Charsets.UTF_8.name()) }
-                            .getOrDefault(rawKeyword)
+                    // 路由参数只在这里解一次（[encodeRouteArg] 是自描述的：不带前缀就是明文）。
+                    // **不要再叠一层 `URLDecoder.decode`**：Navigation 已经做过一次百分号解码，
+                    // 关键字里的 `%` 会让第二次解码抛异常并退回未解码的串（用户报的 `+` bug）。
+                    val keyword = remember(entry.arguments?.getString("keyword")) {
+                        decodeRouteArg(entry.arguments?.getString("keyword").orEmpty())
                     }
                     val sort = JmSearchSort.fromCode(entry.arguments?.getString("sort"))
                     val historyId = entry.arguments?.getLong("historyId") ?: 0L
@@ -428,10 +428,10 @@ fun JmModeRoot(
                     ),
                 ) { entry ->
                     val favoriteId = entry.arguments?.getLong("favoriteId") ?: return@composable
-                    val rawName = entry.arguments?.getString("name").orEmpty()
-                    val favoriteName = remember(rawName) {
-                        runCatching { URLDecoder.decode(rawName, Charsets.UTF_8.name()) }
-                            .getOrDefault(rawName)
+                    // 与搜索关键字同一条路：收藏夹名也是用户输入的任意文本（可能带空格 / `%`），
+                    // 所以同样只解一次 [decodeRouteArg]，不再叠 `URLDecoder.decode`
+                    val favoriteName = remember(entry.arguments?.getString("name")) {
+                        decodeRouteArg(entry.arguments?.getString("name").orEmpty())
                     }
                     // 夹内复用书库布局（计划 §9 第 6 条）
                     val vm: JmLibraryViewModel = viewModel(viewModelStoreOwner = entry, factory = factory)
