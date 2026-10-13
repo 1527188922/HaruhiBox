@@ -473,6 +473,28 @@ app/src/main/java/com/haruhi/haruhibox/
 > `DownloadTaskDaoTest` 12→13（恢复=暂停、`pauseActive` 只动指定类型且章节回队列），
 > `DownloadTaskRepositoryTest` 11→13（恢复断言改 `PAUSED`、导出被删+中转文件清理、退出暂停批量语义）。
 
+### 第二十五轮反馈修复（2026-10-13）
+
+承接上一轮的 `aaed21e feat：搜索结果页改为独立页`（发现页只留"输入 + 历史"，结果页入栈后自己发搜索请求）。
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| W1 | 结果页也要有搜索输入框和搜索按钮（样式与「搜索记录页」顶部那个一致）；结果页**不要 `TopAppBar`**；在结果页点搜索**不必再跳页面** | ① 把输入框抽成**两页共用的** `SearchKeywordField`（发现页原来那段内联 `OutlinedTextField` 直接换成它，所以"样式一致"不靠两份代码同步，而是同一个实现）；② `JmSearchResultsScreen` 去掉顶栏，改成 `Column` 第一行放这个输入框——**`topBar` 那段代码整段留成注释**（含标题 `state.keyword.ifBlank { "搜索结果" }` 与返回按钮），想切回顶栏只要放开注释、删掉输入框那三行；③ 结果页新增 `onKeywordChange` / `onSearch` 两个参数，`JmModeRoot` 接的是同一个 `JmOnlineSearchViewModel` 的 `onKeywordChange` 与 `search()`，也就是**原地重搜**（清掉旧结果 → 居中加载圈 → 结果回来），不再 `navigate(SEARCH_RESULTS)` 压第二层；④ 顺带给输入框加 `ImeAction.Search` + `KeyboardActions`，软键盘上的「搜索」键与右侧按钮等价 | `:app:compileDebugKotlin` 通过；`:app:testDebugUnitTest` 跑通（W2 的 5 个新用例全绿）。设备上请确认：进结果页 → 顶部是输入框（**没有**标题栏）→ 改关键字点按钮/回车 → **不跳页、原地出现加载圈并刷新列表**；系统返回键仍按普通入栈退回发现页/详情页 |
+| W2 | 两页的搜索输入框都要自动去掉首尾空格、以及字符串**当中**的换行 | 新增纯函数 `sanitizeSearchKeyword(value)`：`filterNot { it == '\n' \|\| it == '\r' }.trim()`，只吃掉换行与首尾空白，**中间的空格保留**（"魔法 少女"是合法关键字）。净化点放在共用输入框的 `onValueChange` 里，所以两个页面、以及"键盘搜索键"这条路径全都过同一道 | 新增 `SearchKeywordSanitizeTest`（5 个用例：首尾空格 / 各种位置的 `\n`、`\r\n` / 中间空格保留 / 幂等 / 全空白输入）；**本轮已在本机跑通**：`gradlew :app:testDebugUnitTest --tests SearchKeywordSanitizeTest` → `tests=5 failures=0` |
+
+> **一个需要你确认的取舍**：顶栏整段注释掉之后，结果页**页面上没有返回按钮了**，
+> 返回只剩系统返回键/手势（Navigation 的入栈返回仍然正常，见 W1 的验证栏）。
+> 如果希望"顶部仍有一根返回箭头"，最省事的做法是在输入框前面加一个 48dp 的
+> `IconButton(Icons.AutoMirrored.Filled.ArrowBack)`（一行，不动其它结构），说一声即可。
+
+> **本轮跑全量单测时发现两个与本次改动无关的既有失败**（都在本机复现，且**在把我的改动
+> `git stash` 掉之后同样失败**，所以不是这次引入的）：
+> `JmDownloadManagerTest.submitting again appends chapters instead of creating a second task`
+> 与 `JmExportManagerTest.submitting twice reuses the running export`——两者都是等异步收尾的
+> 等待/竞态用例（前者 15s 超时"追加的章节没有被下载"，后者偶发第二次 `submit` 返回 `Created`
+> 而不是 `AlreadyRunning`），机器一忙就会红。要不要顺手把这两个用例改成不依赖墙钟时间，
+> 等你发话。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |

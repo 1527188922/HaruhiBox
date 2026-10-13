@@ -354,6 +354,10 @@ fun JmModeRoot(
                     val state by vm.state.collectAsStateWithLifecycle()
                     JmSearchResultsScreen(
                         state = state,
+                        // 结果页现在自带输入框（用户要求）：改完关键字点右侧按钮/回车是**原地重搜**，
+                        // 不再往导航栈上再压一层结果页（`JmSearchResultsScreen` 内部也不再跳转）。
+                        onKeywordChange = vm::onKeywordChange,
+                        onSearch = vm::search,
                         onBack = { navController.popBackStack() },
                         onRefresh = vm::refresh,
                         // 换排序立刻重搜：只改芯片不重搜的话，选中的芯片会和列表内容对不上

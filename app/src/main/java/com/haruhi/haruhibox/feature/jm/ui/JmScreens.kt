@@ -36,6 +36,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -95,6 +97,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -1085,21 +1088,10 @@ fun JmOnlineSearchScreen(
     MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
 
     Column(modifier = modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = state.keyword,
-            onValueChange = onKeywordChange,
-            singleLine = true,
-            // 明确区别于"搜索本地书库"（计划 §9 第 5 条）
-            placeholder = { Text("搜索在线漫画") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            trailingIcon = {
-                IconButton(onClick = onSearch) {
-                    Icon(Icons.Default.Search, contentDescription = "搜索")
-                }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
+        SearchKeywordField(
+            keyword = state.keyword,
+            onKeywordChange = onKeywordChange,
+            onSearch = onSearch,
         )
 
         SearchSortChips(selected = state.sort, onSelect = onSortChange)
@@ -1116,6 +1108,53 @@ fun JmOnlineSearchScreen(
         )
     }
 }
+
+/**
+ * 搜索关键字输入框：发现页与结果页**共用同一个**实现（用户要求两边样式一致）。
+ *
+ * 输入即净化，见 [sanitizeSearchKeyword]；回车/软键盘的"搜索"键等同于点右侧按钮。
+ */
+@Composable
+private fun SearchKeywordField(
+    keyword: String,
+    onKeywordChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedTextField(
+        value = keyword,
+        // 用户要求：输入框里的字符自动去掉首尾空格、以及字符串当中的换行
+        onValueChange = { onKeywordChange(sanitizeSearchKeyword(it)) },
+        singleLine = true,
+        // 明确区别于"搜索本地书库"（计划 §9 第 5 条）
+        placeholder = { Text("搜索在线漫画") },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+        trailingIcon = {
+            IconButton(onClick = onSearch) {
+                Icon(Icons.Default.Search, contentDescription = "搜索")
+            }
+        },
+        // 软键盘上的"搜索"键也提交，不用先收键盘再点按钮
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    )
+}
+
+/**
+ * 搜索输入框的净化规则（用户要求）：
+ * 去掉**首尾空格**，并删掉字符串**中间的所有换行**。
+ *
+ * 抽成纯函数是为了能单测（见 `SearchKeywordSanitizeTest`）：粘贴多行文本、
+ * 部分输入法把回车当提交键，都可能把 `\n` 混进关键字里，而带换行的关键字
+ * 送到接口只会变成一次必然失败的请求。
+ *
+ * 只删 `\n` / `\r`，中间的普通空格（例如"魔法 少女"）照样保留。
+ */
+fun sanitizeSearchKeyword(value: String): String =
+    value.filterNot { it == '\n' || it == '\r' }.trim()
 
 /**
  * 排序芯片：发现页用它"选好排序再搜"，结果页用它"换排序重搜"。
@@ -1142,12 +1181,16 @@ private fun SearchSortChips(selected: JmSearchSort, onSelect: (JmSearchSort) -> 
  * - 从发现页点「搜索」/点搜索历史、或从详情页点作者进入；
  * - **不挂底栏**：它不是底栏 tab（见 `JmModeRoot` 的 showBottomBar 判定）；
  * - 返回键按普通入栈回上一层（发现页 / 详情页），不需要页面内接管；
+ * - **本页自带搜索输入框**（用户要求）：已经是结果页了，改完关键字点搜索是**原地重搜**，
+ *   不再往栈上再压一层结果页；
  * - 支持下拉释放刷新，已经在请求中时不会重复发（见 `JmOnlineSearchViewModel.refresh`）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun JmSearchResultsScreen(
     state: OnlineSearchUiState,
+    onKeywordChange: (String) -> Unit,
+    onSearch: () -> Unit,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onSortChange: (JmSearchSort) -> Unit,
@@ -1167,29 +1210,41 @@ fun JmSearchResultsScreen(
         // 与外层 `JmModeRoot` 的 Scaffold 不同：本页在内层，**不能再加一遍系统栏内边距**，
         // 否则标题上方会空出两倍状态栏高度（详情页踩过，见 JmAlbumDetailScreen 的同款处理）。
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = {
-            TopAppBar(
-                windowInsets = WindowInsets(0, 0, 0, 0),
-                title = {
-                    Text(
-                        text = state.keyword.ifBlank { "搜索结果" },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-            )
-        },
+        // 用户要求：结果页**不要 TopAppBar**，顶部直接放搜索输入框。
+        // 原来的顶栏代码整段留着（只注释掉），想切回去只要放开 below 注释、
+        // 并删掉下方 Column 里的 SearchKeywordField 即可。
+        // 注意：`onBack` 参数只被这段注释里的返回按钮使用，放开注释它就活了。
+        // topBar = {
+        //     TopAppBar(
+        //         windowInsets = WindowInsets(0, 0, 0, 0),
+        //         title = {
+        //             Text(
+        //                 text = state.keyword.ifBlank { "搜索结果" },
+        //                 maxLines = 1,
+        //                 overflow = TextOverflow.Ellipsis,
+        //             )
+        //         },
+        //         navigationIcon = {
+        //             IconButton(onClick = onBack) {
+        //                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+        //             }
+        //         },
+        //     )
+        // },
     ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
         ) {
+            // 本页自己也有搜索框（用户要求，与发现页同一个 [SearchKeywordField]）：
+            // 已经在结果页了，点搜索就是**原地重搜**，不必再跳页面。
+            SearchKeywordField(
+                keyword = state.keyword,
+                onKeywordChange = onKeywordChange,
+                onSearch = onSearch,
+            )
+
             SearchSortChips(selected = state.sort, onSelect = onSortChange)
 
             // 下拉释放刷新（用户要求）：靠 nested-scroll 拿手势，列表回到顶部后继续下拉才接管，
