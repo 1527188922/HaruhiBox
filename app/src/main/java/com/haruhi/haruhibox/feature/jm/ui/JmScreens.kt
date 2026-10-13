@@ -10,11 +10,13 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,7 +36,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
@@ -60,9 +64,12 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -101,6 +108,7 @@ import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchItem
+import com.haruhi.haruhibox.feature.jm.data.OnlineSearchResult
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -1053,6 +1061,12 @@ fun downloadSummary(card: AlbumCard): String = when {
 // 发现（在线搜索）
 // ======================================================================
 
+/**
+ * 发现页（搜索页）：只有输入框、排序和搜索历史。
+ *
+ * 结果页已拆成独立页面（用户要求）：点「搜索」/点历史由上层导航到
+ * [JmSearchResultsScreen]，**本页不发搜索请求**。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun JmOnlineSearchScreen(
@@ -1060,10 +1074,6 @@ fun JmOnlineSearchScreen(
     onKeywordChange: (String) -> Unit,
     onSearch: () -> Unit,
     onSortChange: (JmSearchSort) -> Unit,
-    onLoadMore: () -> Unit,
-    onRevealMore: () -> Unit,
-    onOpenAlbum: (Long) -> Unit,
-    onAddToLibrary: (OnlineSearchItem) -> Unit,
     onOpenHistory: (JmSearchHistoryEntity) -> Unit,
     onDeleteHistory: (Long) -> Unit,
     onClearHistory: () -> Unit,
@@ -1092,141 +1102,263 @@ fun JmOnlineSearchScreen(
                 .padding(horizontal = 12.dp, vertical = 4.dp),
         )
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        SearchSortChips(selected = state.sort, onSelect = onSortChange)
+
+        // 这里原来还挂着"结果列表"（含加载圈、空态、翻页）和一条 ErrorBanner。
+        // 结果列表已经拆到独立的结果页 [JmSearchResultsScreen]（用户要求）：
+        // 本页只负责"输入 + 历史"，点搜索/点历史由上层导航过去。
+        SearchHistoryList(
+            history = state.history,
+            historyEnabled = state.historyEnabled,
+            onOpen = onOpenHistory,
+            onDelete = onDeleteHistory,
+            onClearAll = onClearHistory,
+        )
+    }
+}
+
+/**
+ * 排序芯片：发现页用它"选好排序再搜"，结果页用它"换排序重搜"。
+ */
+@Composable
+private fun SearchSortChips(selected: JmSearchSort, onSelect: (JmSearchSort) -> Unit) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        JmSearchSort.entries.forEach { sort ->
+            FilterChip(
+                selected = selected == sort,
+                onClick = { onSelect(sort) },
+                label = { Text(sort.label) },
+            )
+        }
+    }
+}
+
+/**
+ * 搜索结果页（独立页面，用户要求）。
+ *
+ * - 从发现页点「搜索」/点搜索历史、或从详情页点作者进入；
+ * - **不挂底栏**：它不是底栏 tab（见 `JmModeRoot` 的 showBottomBar 判定）；
+ * - 返回键按普通入栈回上一层（发现页 / 详情页），不需要页面内接管；
+ * - 支持下拉释放刷新，已经在请求中时不会重复发（见 `JmOnlineSearchViewModel.refresh`）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun JmSearchResultsScreen(
+    state: OnlineSearchUiState,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onSortChange: (JmSearchSort) -> Unit,
+    onLoadMore: () -> Unit,
+    onRevealMore: () -> Unit,
+    onOpenAlbum: (Long) -> Unit,
+    onAddToLibrary: (OnlineSearchItem) -> Unit,
+    modifier: Modifier = Modifier,
+    onMessage: (String) -> Unit = {},
+    onConsumeMessage: () -> Unit = {},
+) {
+    // 提示走根部 Scaffold 的 Snackbar（本页自己没有宿主）
+    MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
+
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        // 与外层 `JmModeRoot` 的 Scaffold 不同：本页在内层，**不能再加一遍系统栏内边距**，
+        // 否则标题上方会空出两倍状态栏高度（详情页踩过，见 JmAlbumDetailScreen 的同款处理）。
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        topBar = {
+            TopAppBar(
+                windowInsets = WindowInsets(0, 0, 0, 0),
+                title = {
+                    Text(
+                        text = state.keyword.ifBlank { "搜索结果" },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
         ) {
-            JmSearchSort.entries.forEach { sort ->
-                FilterChip(
-                    selected = state.sort == sort,
-                    onClick = { onSortChange(sort) },
-                    label = { Text(sort.label) },
-                )
+            SearchSortChips(selected = state.sort, onSelect = onSortChange)
+
+            // 下拉释放刷新（用户要求）：靠 nested-scroll 拿手势，列表回到顶部后继续下拉才接管，
+            // 列表没到顶时完全不动它。
+            //
+            // `isRefreshing` 只在"已经有结果、正在重新搜"时为 true：首屏加载由居中的
+            // LoadingBox 表达，两个圈同时转就成了两个 loading（详情页报过这个 bug）。
+            // 已经在请求中时不再重复发起（`refresh()` 里也做了同样的去重）。
+            PullToRefreshBox(
+                isRefreshing = state.searching && state.result != null,
+                onRefresh = { if (!state.searching && !state.loadingMore) onRefresh() },
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                val result = state.result
+                when {
+                    // 首屏（进页面那次搜索 / 读历史快照）还没有结果
+                    result == null && state.searching -> LoadingBox()
+                    // 搜索失败、或历史快照丢了：留个空态，**下拉即可重搜**
+                    result == null -> ScrollableFullScreenBox {
+                        EmptyBox(title = "没能加载结果", hint = "下拉重新搜索")
+                    }
+                    result.items.isEmpty() -> ScrollableFullScreenBox {
+                        EmptyBox(title = "没有搜到结果", hint = "换个关键字试试")
+                    }
+                    else -> SearchResultList(
+                        state = state,
+                        result = result,
+                        onLoadMore = onLoadMore,
+                        onRevealMore = onRevealMore,
+                        onOpenAlbum = onOpenAlbum,
+                        onAddToLibrary = onAddToLibrary,
+                    )
+                }
             }
         }
+    }
+}
 
-        // 这里原来挂过一条 ErrorBanner（带「重试」按钮）。已去掉（用户本轮要求）：
-        // 那个「重试」绑的是 `onSearch`，也就是重发整个在线搜索，
-        // 而横幅上的文案有时是「加入书库」失败——按钮和它旁边的话根本不是同一件事。
-        // 现在无论搜索、翻页还是加入书库失败，都只弹一条一次性提示，重试由用户自己决定。
-        val result = state.result
+/**
+ * 把"不可滚动的整屏内容"（加载 / 空态）包成可滚动的，让外层 `PullToRefreshBox` 能拿到下拉手势。
+ *
+ * `PullToRefreshBox` 完全靠 nested-scroll 拿手势，而 [LoadingBox] / [EmptyBox] 是普通 Box、
+ * 不参与 nested-scroll，直接放进去是拉不动的（详情页踩过这个坑，见 JmAlbumDetailScreen）。
+ *
+ * 高度必须显式给回"整屏"：`verticalScroll` 发给子项的是**无限高约束**，
+ * [EmptyBox] 内部用 fillMaxSize，直接把无限高传下去会崩；给成固定 dp，
+ * 空状态在平板上又不会居中。所以用 BoxWithConstraints 读真实视口高度再填回去。
+ */
+@Composable
+private fun ScrollableFullScreenBox(content: @Composable () -> Unit) {
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        Box(modifier = Modifier.heightIn(min = maxHeight)) { content() }
+    }
+}
+
+/** 结果列表本体（抽出来只为让 [JmSearchResultsScreen] 的分支读起来短一点）。 */
+@Composable
+private fun SearchResultList(
+    state: OnlineSearchUiState,
+    result: OnlineSearchResult,
+    onLoadMore: () -> Unit,
+    onRevealMore: () -> Unit,
+    onOpenAlbum: (Long) -> Unit,
+    onAddToLibrary: (OnlineSearchItem) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    // key 必须带上 `result.items` 本身：加入书库后 item 的 `existsLocal` 会变，
+    // 而"已显示条数"和"总条数"都不变——只按这两个 key 缓存的话，
+    // 拿到的永远是加库之前那一份列表，表现为"点了加入书库，按钮不变，
+    // 切走再回来才对"（用户反馈第 5 点）。
+    val visibleItems = remember(state.visibleCount, result.items) {
+        result.items.take(state.visibleCount)
+    }
+
+    // 用户要求第 5 点：**最后一条进入可视范围就继续追加**，
+    // 而不是等用户滑到底再点按钮。这样列表是"连续滚不完"的观感，
+    // 同时首屏只渲染 10 条、不会一次性发起几十个封面请求。
+    //
+    // 两个坑，都已踩过：
+    // 1. 不要用 `derivedStateOf { listState.layoutInfo... }`：读 layoutInfo 拿到的
+    //    是**过期快照**，只有别的重组顺带读到它时才重算，表现为"必须先滑回顶部
+    //    再滑到底才加载"；
+    // 2. `LaunchedEffect` 的 key **不能包含当前批次条数**：每次追加都会取消并
+    //    重启这个 effect，正在进行的滚动检测被打断，于是永远停在某一批。
+    //    所以 key 只放"列表身份"，判定条件通过 rememberUpdatedState 读实时值，
+    //    判定本身用 [OnlineSearchUiState.shouldRevealMore]（有单测）。
+    val currentState by rememberUpdatedState(state)
+    LaunchedEffect(result.query, result.page, result.fromHistory) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+            .distinctUntilChanged()
+            .collect { lastVisibleIndex ->
+                if (currentState.shouldRevealMore(lastVisibleIndex)) onRevealMore()
+            }
+    }
+
+    LazyColumn(
+        state = listState,
+        contentPadding = PaddingValues(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        item {
+            Text(
+                text = buildString {
+                    if (result.fromHistory) {
+                        append("搜索历史快照 · 共 ${result.total} 条")
+                    } else {
+                        append("共 ${result.total} 条 · 第 ${result.page}/${result.totalPages} 页")
+                    }
+                    // 让用户知道下面还有多少没展开
+                    if (state.remainingCount > 0) {
+                        append(" · 已显示 ${visibleItems.size}/${result.items.size}")
+                    }
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        items(visibleItems, key = { it.id }) { item ->
+            OnlineResultRow(
+                item = item,
+                // 只有"这次入库确实要联网拉详情"才会是 true（见 VM 的 addToLibrary）
+                adding = item.id in state.addingIds,
+                onOpen = { onOpenAlbum(item.id) },
+                onAddToLibrary = { onAddToLibrary(item) },
+            )
+        }
         when {
-            state.searching -> LoadingBox()
-            result == null -> SearchHistoryList(
-                history = state.history,
-                historyEnabled = state.historyEnabled,
-                onOpen = onOpenHistory,
-                onDelete = onDeleteHistory,
-                onClearAll = onClearHistory,
-            )
-            result.items.isEmpty() -> EmptyBox(
-                title = "没有搜到结果",
-                hint = "换个关键字试试",
-            )
-            else -> {
-                val listState = rememberLazyListState()
-                // key 必须带上 `result.items` 本身：加入书库后 item 的 `existsLocal` 会变，
-                // 而"已显示条数"和"总条数"都不变——只按这两个 key 缓存的话，
-                // 拿到的永远是加库之前那一份列表，表现为"点了加入书库，按钮不变，
-                // 切走再回来才对"（用户反馈第 5 点）。
-                val visibleItems = remember(state.visibleCount, result.items) {
-                    result.items.take(state.visibleCount)
-                }
+            state.loadingMore -> item {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
 
-                // 用户要求第 5 点：**最后一条进入可视范围就继续追加**，
-                // 而不是等用户滑到底再点按钮。这样列表是"连续滚不完"的观感，
-                // 同时首屏只渲染 10 条、不会一次性发起几十个封面请求。
-                //
-                // 两个坑，都已踩过：
-                // 1. 不要用 `derivedStateOf { listState.layoutInfo... }`：读 layoutInfo 拿到的
-                //    是**过期快照**，只有别的重组顺带读到它时才重算，表现为"必须先滑回顶部
-                //    再滑到底才加载"；
-                // 2. `LaunchedEffect` 的 key **不能包含当前批次条数**：每次追加都会取消并
-                //    重启这个 effect，正在进行的滚动检测被打断，于是永远停在某一批。
-                //    所以 key 只放"列表身份"，判定条件通过 rememberUpdatedState 读实时值，
-                //    判定本身用 [OnlineSearchUiState.shouldRevealMore]（有单测）。
-                val currentState by rememberUpdatedState(state)
-                LaunchedEffect(result.query, result.page, result.fromHistory) {
-                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
-                        .distinctUntilChanged()
-                        .collect { lastVisibleIndex ->
-                            if (currentState.shouldRevealMore(lastVisibleIndex)) onRevealMore()
-                        }
-                }
+            // 本页还有没展示完的：继续下滑会自动追加
+            state.remainingCount > 0 -> item {
+                Text(
+                    text = "继续下滑显示更多（还有 ${state.remainingCount} 条）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                )
+            }
 
-                LazyColumn(
-                    state = listState,
-                    contentPadding = PaddingValues(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    item {
-                        Text(
-                            text = buildString {
-                                if (result.fromHistory) {
-                                    append("搜索历史快照 · 共 ${result.total} 条")
-                                } else {
-                                    append("共 ${result.total} 条 · 第 ${result.page}/${result.totalPages} 页")
-                                }
-                                // 让用户知道下面还有多少没展开
-                                if (state.remainingCount > 0) {
-                                    append(" · 已显示 ${visibleItems.size}/${result.items.size}")
-                                }
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    items(visibleItems, key = { it.id }) { item ->
-                        OnlineResultRow(
-                            item = item,
-                            // 只有"这次入库确实要联网拉详情"才会是 true（见 VM 的 addToLibrary）
-                            adding = item.id in state.addingIds,
-                            onOpen = { onOpenAlbum(item.id) },
-                            onAddToLibrary = { onAddToLibrary(item) },
-                        )
-                    }
-                    when {
-                        state.loadingMore -> item {
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        }
+            // 本页全部展示完，才出现"加载下一页"（用户要求第 5 点）
+            !result.fromHistory && result.page < result.totalPages -> item {
+                TextButton(
+                    onClick = onLoadMore,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("加载下一页（第 ${result.page + 1} 页）") }
+            }
 
-                        // 本页还有没展示完的：继续下滑会自动追加
-                        state.remainingCount > 0 -> item {
-                            Text(
-                                text = "继续下滑显示更多（还有 ${state.remainingCount} 条）",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
-                            )
-                        }
-
-                        // 本页全部展示完，才出现"加载下一页"（用户要求第 5 点）
-                        !result.fromHistory && result.page < result.totalPages -> item {
-                            TextButton(
-                                onClick = onLoadMore,
-                                modifier = Modifier.fillMaxWidth(),
-                            ) { Text("加载下一页（第 ${result.page + 1} 页）") }
-                        }
-
-                        else -> item {
-                            Text(
-                                text = if (result.fromHistory) {
-                                    "历史快照已全部显示"
-                                } else {
-                                    "已显示全部结果"
-                                },
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp),
-                            )
-                        }
-                    }
-                }
+            else -> item {
+                Text(
+                    text = if (result.fromHistory) {
+                        "历史快照已全部显示"
+                    } else {
+                        "已显示全部结果"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                )
             }
         }
     }

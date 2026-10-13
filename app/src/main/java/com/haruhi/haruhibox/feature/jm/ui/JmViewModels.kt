@@ -645,45 +645,64 @@ data class OnlineSearchUiState(
     }
 }
 
-class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
+/**
+ * 搜索结果页的入参（结果页是独立页面，参数随路由带过来）。
+ *
+ * @param historyId > 0 表示从搜索历史点进来：**只回显快照，不发搜索请求**（用户要求）。
+ */
+data class OnlineSearchEntry(
+    val keyword: String,
+    val sort: JmSearchSort,
+    val historyId: Long = 0L,
+)
 
-    private val _state = MutableStateFlow(OnlineSearchUiState())
+/**
+ * 在线搜索。
+ *
+ * 一个实例只服务一种页面（用户要求把"搜索记录"和"搜索结果"拆成独立两页）：
+ * - 发现页（`entry == null`）：输入框、排序、搜索历史，**本页不发搜索请求**；
+ * - 结果页（`entry != null`）：拿路由参数进来，进页面就搜（或回显历史快照）。
+ */
+class JmOnlineSearchViewModel(
+    private val repo: JmRepository,
+    private val entry: OnlineSearchEntry? = null,
+) : ViewModel() {
+
+    private val _state = MutableStateFlow(
+        OnlineSearchUiState(
+            keyword = entry?.keyword.orEmpty(),
+            sort = entry?.sort ?: JmSearchSort.DEFAULT,
+        ),
+    )
     val state: StateFlow<OnlineSearchUiState> = _state.asStateFlow()
 
     private var searchJob: Job? = null
 
     init {
-        viewModelScope.launch {
-            repo.observeSearchHistory().collect { history ->
-                _state.update { it.copy(history = history) }
+        val page = entry
+        when {
+            // 发现页：只盯着搜索历史（结果页不展示历史，不需要订阅）
+            page == null -> viewModelScope.launch {
+                repo.observeSearchHistory().collect { history ->
+                    _state.update { it.copy(history = history) }
+                }
             }
+            // 点历史记录进来：回显快照，不发搜索请求（用户要求）
+            page.historyId > 0L -> loadHistorySnapshot(page.historyId)
+            // 点「搜索」按钮 / 点作者进来：进页面就触发搜索（用户要求）
+            else -> search()
         }
     }
 
     fun onKeywordChange(value: String) = _state.update { it.copy(keyword = value) }
 
     /**
-     * 把关键字**填进搜索框**，但不发起搜索（详情页点作者走这条）。
+     * 发现页换排序：只记住，等用户点「搜索」再一起带进结果页。
      *
-     * 用户要求：点了作者只把作者名填好，搜不搜由他自己按搜索按钮决定。
-     * 同时把上一次的结果清掉——不然输入框里是"新作者"、下面却挂着"上一个关键字的结果"，
-     * 看起来像是这次搜出来的。
+     * 结果页换排序走 [changeSort]（要立刻重搜），两者语义不同。
      */
-    fun prefillKeyword(value: String) {
-        searchJob?.cancel()
-        _state.update {
-            it.copy(
-                keyword = value,
-                searching = false,
-                result = null,
-                visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
-            )
-        }
-    }
-
     fun onSortChange(sort: JmSearchSort) {
         _state.update { it.copy(sort = sort) }
-        if (_state.value.keyword.isNotBlank()) search()
     }
 
     /**
@@ -692,7 +711,34 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
      * 失败只弹一条提示（[OnlineSearchUiState.message]），不挂横幅：
      * 搜索这种事用户自己会再点一次「搜索」，不需要页面替他留一个重试按钮。
      */
-    fun search() {
+    fun search() = runSearch(clearResult = true)
+
+    /**
+     * 下拉释放刷新：重新搜第一页。
+     *
+     * **已经在请求中时直接返回，不重复发请求**（用户要求）；屏幕上的下拉圈由
+     * `searching` 驱动，请求结束自然会收回去。
+     */
+    fun refresh() {
+        if (_state.value.searching || _state.value.loadingMore) return
+        runSearch(clearResult = false)
+    }
+
+    /**
+     * 结果页换排序：立刻按新排序重搜。
+     *
+     * 只改芯片不重搜的话，选中的芯片会和列表内容对不上。
+     */
+    fun changeSort(sort: JmSearchSort) {
+        _state.update { it.copy(sort = sort) }
+        runSearch(clearResult = false)
+    }
+
+    /**
+     * @param clearResult 首次搜索清掉旧结果（页面显示居中的加载圈）；
+     *        刷新/换排序保留旧结果（列表不闪，只有顶部下拉圈在转）。
+     */
+    private fun runSearch(clearResult: Boolean) {
         val keyword = _state.value.keyword.trim()
         if (keyword.isEmpty()) {
             _state.update { it.copy(message = "请输入搜索关键字") }
@@ -703,7 +749,7 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
             _state.update {
                 it.copy(
                     searching = true,
-                    result = null,
+                    result = if (clearResult) null else it.result,
                     message = null,
                     visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
                 )
@@ -765,23 +811,21 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
     }
 
     /** 点历史记录：直接回显快照，不再请求 JM。 */
-    fun openHistory(history: JmSearchHistoryEntity) {
+    private fun loadHistorySnapshot(historyId: Long) {
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
             _state.update {
                 it.copy(
                     searching = true,
-                    keyword = history.keyword,
                     // 换了一批结果，展示条数从头开始
                     visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
                 )
             }
-            val result = repo.searchHistorySnapshot(history.id)
+            val result = repo.searchHistorySnapshot(historyId)
             _state.update {
                 it.copy(
                     searching = false,
                     result = result,
-                    sort = JmSearchSort.fromCode(history.sort),
                     // 快照丢了同样只提示一句；`else it.message` 是不覆盖尚未弹出的那条提示
                     message = if (result == null) {
                         "这条搜索记录的结果已丢失，请重新搜索"

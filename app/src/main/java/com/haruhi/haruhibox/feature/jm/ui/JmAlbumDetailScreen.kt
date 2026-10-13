@@ -192,7 +192,7 @@ fun JmAlbumDetailScreen(
     /** 「打开文件夹」：让系统文件管理器定位到成品目录（用户反馈第 2 点）。 */
     onOpenFolder: () -> Unit,
     /**
-     * 点作者：跳到发现页，把作者名填进在线搜索框（**不自动搜**，由用户自己点搜索按钮）。
+     * 点作者：**直接打开搜索结果页**，进页面就按作者名搜（用户要求）。
      */
     onSearchAuthor: (String) -> Unit = {},
     /**
@@ -856,7 +856,7 @@ private fun AlbumHeader(
     onToggleDescription: () -> Unit,
     onRead: () -> Unit,
     onDownload: () -> Unit,
-    /** 点作者：跳发现页并把作者名填进搜索框（不自动搜，由用户自己点搜索按钮）。 */
+    /** 点作者：**直接打开搜索结果页**，进页面就按作者名搜（用户要求）。 */
     onSearchAuthor: (String) -> Unit = {},
 ) {
     val album = state.album ?: return
