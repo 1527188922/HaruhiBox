@@ -519,6 +519,13 @@ app/src/main/java/com/haruhi/haruhibox/
 > 顺带说明：`existsLocal` 这个名字在搜索结果里表达的其实是"**在不在书库**"（`existingIds` 查的是书库成员表），
 > 所以移出之后必须刷成 false，否则按钮会一直停在「已入库」。
 
+**Y2 的视觉补丁（同一轮追加要求）**：
+
+| # | 反馈 | 落实方式 |
+|---|---|---|
+| Y4 | 两颗按钮都**再小一号**、都**去掉边框**；「已入库」用**主色调** | 按钮仍是 `OutlinedButton`（透明容器 + 现成的按下/禁用态），但 `border = null` 去掉描边，`contentPadding` 收到 `10dp / 0dp`、高度收到 `32dp`（Material 默认是 16dp 内边距 + 40dp 高）——两个值抽成 `ONLINE_ACTION_BUTTON_HEIGHT` / `ONLINE_ACTION_BUTTON_PADDING`，**两颗按钮共用**，状态切换时尺寸不会跳。<br>配色：已入库 `contentColor = colorScheme.primary`（主色，对勾图标跟着继承），未入库 `onSurfaceVariant`（次要色）——"在库里"是当前状态，用主色标出来；"可以入库"只是可用动作，不与状态抢色 |
+| Y5 | 按钮要**始终贴卡片的右下角**：标题只占一行时，按钮底边离卡片下内边距还有一段空隙 | 原来按钮在"文字列"里面，而文字列的高度是它自己的内容高度——封面固定 100dp，标题一行时那一列只有 ~72dp，按钮就跟着停在了半空。<br>改成：`Box(padding(8dp))` 里放 `Row(封面 + 文字列)`，按钮**浮在这个 Box 上** `Modifier.align(Alignment.BottomEnd)`，位置只由卡片高度决定，与标题占几行无关；文字列底部加 `padding(bottom = ONLINE_ACTION_BUTTON_ZONE)`（32dp 按钮 + 4dp 间距）留出净空，作者行不会被压住。<br>没有用 `height(IntrinsicSize.Min)` + `fillMaxHeight` 那一套：封面走的是 Coil 的 `AsyncImage`，intrinsic 测量要多绕一层、还得把文字列的排布改成 `SpaceBetween`（`Spacer(weight)` 在 intrinsic 下有歧义），而 Box 浮层是确定性布局，卡片高度与改动前**逐 dp 一致** |
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |

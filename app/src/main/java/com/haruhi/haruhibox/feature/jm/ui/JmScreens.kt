@@ -1520,14 +1520,42 @@ private fun SearchHistoryList(
 }
 
 /**
+ * 搜索结果卡片上那颗动作按钮的"小一号"尺寸（用户本轮要求）。
+ *
+ * 抽成常量是因为两颗按钮（「加入书库」/「已入库」）必须一模一样高、一样宽的内边距——
+ * 两种状态切换时按钮不能跳一下。比 Material 默认值（高 40dp、内边距 16dp）收一圈：
+ * 卡片本身只有 100dp 高的封面，按钮不该比封面更抢眼。
+ */
+private val ONLINE_ACTION_BUTTON_HEIGHT = Modifier.height(32.dp)
+private val ONLINE_ACTION_BUTTON_PADDING = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+
+/**
+ * 文字列底部要给那颗浮起来的按钮留出的净空：按钮自身 32dp + 4dp 间距。
+ *
+ * 按钮是 `align(Alignment.BottomEnd)` 浮在卡片上的，**不参与文字列的高度计算**，
+ * 所以只能在这里手动把位置留出来，否则作者行会被按钮压住。
+ */
+private val ONLINE_ACTION_BUTTON_ZONE = 36.dp
+
+/**
  * 在线搜索结果的一行。
  *
  * 卡片右下角是**唯一**的动作按钮，两种状态各自一颗（用户本轮要求）：
  *
- * - 未入库：「加入书库」（[OutlinedButton]，要联网拉详情时转圈 + 不可点，
+ * - 未入库：「加入书库」，次要色（要联网拉详情时转圈 + 不可点，
  *   见 `OnlineSearchUiState.addingIds`）；
- * - 已入库：「✓ 已入库」，点它走**移出书库**——破坏性操作，由上层先弹一次确认框
- *   （[JmSearchResultsScreen] 的 `ConfirmDialog`），本行只负责把点击转上去。
+ * - 已入库：「✓ 已入库」，**主色**；点它走**移出书库**——破坏性操作，
+ *   由上层先弹一次确认框（[JmSearchResultsScreen] 的 `ConfirmDialog`），
+ *   本行只负责把点击转上去。
+ *
+ * 位置是**卡片的右下角**，不是"文字列的底部"（用户要求）：按钮 `align(BottomEnd)` 浮在
+ * 整个卡片内容盒上，所以标题只有一行时它照样贴着卡片下沿，不会悬在半空。
+ * 文字列底部用 [ONLINE_ACTION_BUTTON_ZONE] 留出净空，标题/作者不会被它压住。
+ *
+ * 视觉上是"小一号的无边框按钮"（用户本轮要求）：[OutlinedButton] 保留下来只是因为它的
+ * 容器是透明的、按下态与禁用态都是现成的，但 `border = null` 把描边去掉，
+ * 再把高度收到 [ONLINE_ACTION_BUTTON_HEIGHT]、内边距收到 [ONLINE_ACTION_BUTTON_PADDING]——
+ * 默认的 40dp 高 + 16dp 内边距放在卡片右下角太占地方，会抢封面的视觉重量。
  *
  * 原来那行「已入库」小字被删掉了：状态已经写在按钮上，同一件事不摆两遍。
  */
@@ -1545,50 +1573,62 @@ private fun OnlineResultRow(
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(modifier = Modifier.padding(8.dp)) {
-            // 必须跟书库/收藏/详情/任务一样走 JmCover：直接用 AsyncImage(item.coverUrl)
-            // 会落到 Coil 的**进程单例**加载器上（AsyncImage 不传 imageLoader 时的默认值），
-            // 它的内存/磁盘缓存与应用级加载器完全不共享，所以这里刚加载过的封面，
-            // 点进详情页会再联网请求一次。
-            JmCover(
-                albumId = item.id,
-                contentDescription = item.name,
-                modifier = Modifier
-                    .size(width = 72.dp, height = 100.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-            )
-            Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = item.name.orEmpty().ifBlank { "JM${item.id}" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+        // 封面 + 文字在里层 Row 里，动作按钮**浮在同一个 Box 上、贴 BottomEnd**。
+        //
+        // 为什么不是"把按钮放在文字那一列的底部"（原来就是这么写的，用户报了问题）：
+        // 文字列的高度是它自己的内容高度，标题只有一行时那一列比封面（100dp）矮，
+        // 于是按钮悬在半空、离卡片底边还差一截。Box + `align(BottomEnd)` 让按钮的位置
+        // **只由卡片高度决定**，与标题占一行还是两行无关：卡片多高，它就贴在哪。
+        Box(modifier = Modifier.padding(8.dp)) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                // 必须跟书库/收藏/详情/任务一样走 JmCover：直接用 AsyncImage(item.coverUrl)
+                // 会落到 Coil 的**进程单例**加载器上（AsyncImage 不传 imageLoader 时的默认值），
+                // 它的内存/磁盘缓存与应用级加载器完全不共享，所以这里刚加载过的封面，
+                // 点进详情页会再联网请求一次。
+                JmCover(
+                    albumId = item.id,
+                    contentDescription = item.name,
+                    modifier = Modifier
+                        .size(width = 72.dp, height = 100.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
                 )
-                Text(
-                    text = "JM${item.id}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                item.author?.takeIf { it.isNotBlank() }?.let { author ->
+                Spacer(Modifier.width(10.dp))
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        // 给右下角那颗按钮留净空：它是浮上来的，下面不留白的话
+                        // 标题 / 作者会被它压住
+                        .padding(bottom = ONLINE_ACTION_BUTTON_ZONE),
+                ) {
                     Text(
-                        text = author,
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
+                        text = item.name.orEmpty().ifBlank { "JM${item.id}" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    Text(
+                        text = "JM${item.id}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    item.author?.takeIf { it.isNotBlank() }?.let { author ->
+                        Text(
+                            text = author,
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-                Spacer(Modifier.height(4.dp))
-                // 动作按钮**靠右**（用户本轮要求）：左边是封面与文字这类"读"的内容，
-                // 右边固定是"能做什么"，扫一眼就知道这本入没入库。
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // 用户输入纯数字时由 /album 详情包装出来的那一条，标出来与普通搜索区分
+            }
+            // 动作按钮**固定贴卡片右下角**（用户要求），两个状态都在这一个位置上。
+            Row(
+                modifier = Modifier.align(Alignment.BottomEnd),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 用户输入纯数字时由 /album 详情包装出来的那一条，标出来与普通搜索区分
 //                    if (item.isExactIdMatch) {
 //                        Text(
 //                            text = "精确匹配",
@@ -1597,40 +1637,60 @@ private fun OnlineResultRow(
 //                        )
 //                        Spacer(Modifier.width(8.dp))
 //                    }
-                    if (item.existsLocal) {
-                        // 已入库：字样变「已入库」并在前面加一个对勾图标。
-                        // **再点一下 = 移出书库**（用户本轮要求），销毁性操作由上层二次确认。
-                        OutlinedButton(onClick = onRequestRemove, enabled = !removing) {
-                            if (removing) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
+                if (item.existsLocal) {
+                    // 已入库：字样变「已入库」并在前面加一个对勾图标，**用主色**标出"这本在库里"。
+                    // 再点一下 = 移出书库（用户本轮要求），销毁性操作由上层二次确认。
+                    OutlinedButton(
+                        onClick = onRequestRemove,
+                        enabled = !removing,
+                        border = null,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.primary,
+                        ),
+                        contentPadding = ONLINE_ACTION_BUTTON_PADDING,
+                        modifier = ONLINE_ACTION_BUTTON_HEIGHT,
+                    ) {
+                        if (removing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        Text("已入库")
+                    }
+                } else {
+                    // 本地没有完整详情时，这一次入库要等一个 `/album` 往返，
+                    // 所以按钮上转圈并挡掉重复点按（用户本轮要求）。
+                    // 本地命中的那条路径不会进这个状态——VM 只在真要联网时才置 adding，
+                    // 否则"点一下就变已入库"会先闪一下 loading。
+                    //
+                    // 未入库不是"当前状态"，只是"可以做这件事"，所以用次要色，
+                    // 与已入库那颗主色按钮区分开（用户本轮要求：只有已入库用主色）。
+                    OutlinedButton(
+                        onClick = onAddToLibrary,
+                        enabled = !adding,
+                        border = null,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
+                        contentPadding = ONLINE_ACTION_BUTTON_PADDING,
+                        modifier = ONLINE_ACTION_BUTTON_HEIGHT,
+                    ) {
+                        if (adding) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
                             Spacer(Modifier.width(6.dp))
-                            Text("已入库")
                         }
-                    } else {
-                        // 本地没有完整详情时，这一次入库要等一个 `/album` 往返，
-                        // 所以按钮上转圈并挡掉重复点按（用户本轮要求）。
-                        // 本地命中的那条路径不会进这个状态——VM 只在真要联网时才置 adding，
-                        // 否则"点一下就变已入库"会先闪一下 loading。
-                        OutlinedButton(onClick = onAddToLibrary, enabled = !adding) {
-                            if (adding) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                )
-                                Spacer(Modifier.width(6.dp))
-                            }
-                            Text("加入书库")
-                        }
+                        Text("未入库")
                     }
                 }
             }
