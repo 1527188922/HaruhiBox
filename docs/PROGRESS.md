@@ -473,6 +473,59 @@ app/src/main/java/com/haruhi/haruhibox/
 > `DownloadTaskDaoTest` 12→13（恢复=暂停、`pauseActive` 只动指定类型且章节回队列），
 > `DownloadTaskRepositoryTest` 11→13（恢复断言改 `PAUSED`、导出被删+中转文件清理、退出暂停批量语义）。
 
+### 第二十五轮反馈修复（2026-10-13）
+
+承接上一轮的 `aaed21e feat：搜索结果页改为独立页`（发现页只留"输入 + 历史"，结果页入栈后自己发搜索请求）。
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| W1 | 结果页也要有搜索输入框和搜索按钮（样式与「搜索记录页」顶部那个一致）；结果页**不要 `TopAppBar`**；在结果页点搜索**不必再跳页面** | ① 把输入框抽成**两页共用的** `SearchKeywordField`（发现页原来那段内联 `OutlinedTextField` 直接换成它，所以"样式一致"不靠两份代码同步，而是同一个实现）；② `JmSearchResultsScreen` 去掉顶栏，改成 `Column` 第一行放这个输入框——**`topBar` 那段代码整段留成注释**（含标题 `state.keyword.ifBlank { "搜索结果" }` 与返回按钮），想切回顶栏只要放开注释、删掉输入框那三行；③ 结果页新增 `onKeywordChange` / `onSearch` 两个参数，`JmModeRoot` 接的是同一个 `JmOnlineSearchViewModel` 的 `onKeywordChange` 与 `search()`，也就是**原地重搜**（清掉旧结果 → 居中加载圈 → 结果回来），不再 `navigate(SEARCH_RESULTS)` 压第二层；④ 顺带给输入框加 `ImeAction.Search` + `KeyboardActions`，软键盘上的「搜索」键与右侧按钮等价 | `:app:compileDebugKotlin` 通过；`:app:testDebugUnitTest` 跑通（W2 的 5 个新用例全绿）。设备上请确认：进结果页 → 顶部是输入框（**没有**标题栏）→ 改关键字点按钮/回车 → **不跳页、原地出现加载圈并刷新列表**；系统返回键仍按普通入栈退回发现页/详情页 |
+| W2 | 两页的搜索输入框都要自动去掉首尾空格、以及字符串**当中**的换行 | 新增纯函数 `sanitizeSearchKeyword(value)`：`filterNot { it == '\n' \|\| it == '\r' }.trim()`，只吃掉换行与首尾空白，**中间的空格保留**（"魔法 少女"是合法关键字）。净化点放在共用输入框的 `onValueChange` 里，所以两个页面、以及"键盘搜索键"这条路径全都过同一道 | 新增 `SearchKeywordSanitizeTest`（5 个用例：首尾空格 / 各种位置的 `\n`、`\r\n` / 中间空格保留 / 幂等 / 全空白输入）；**本轮已在本机跑通**：`gradlew :app:testDebugUnitTest --tests SearchKeywordSanitizeTest` → `tests=5 failures=0` |
+
+> **一个需要你确认的取舍**：顶栏整段注释掉之后，结果页**页面上没有返回按钮了**，
+> 返回只剩系统返回键/手势（Navigation 的入栈返回仍然正常，见 W1 的验证栏）。
+> 如果希望"顶部仍有一根返回箭头"，最省事的做法是在输入框前面加一个 48dp 的
+> `IconButton(Icons.AutoMirrored.Filled.ArrowBack)`（一行，不动其它结构），说一声即可。
+
+> **本轮跑全量单测时发现两个与本次改动无关的既有失败**（都在本机复现，且**在把我的改动
+> `git stash` 掉之后同样失败**，所以不是这次引入的）：
+> `JmDownloadManagerTest.submitting again appends chapters instead of creating a second task`
+> 与 `JmExportManagerTest.submitting twice reuses the running export`——两者都是等异步收尾的
+> 等待/竞态用例（前者 15s 超时"追加的章节没有被下载"，后者偶发第二次 `submit` 返回 `Created`
+> 而不是 `AlreadyRunning`），机器一忙就会红。要不要顺手把这两个用例改成不依赖墙钟时间，
+> 等你发话。
+
+### 第二十六轮反馈修复（2026-10-13）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| X1 | **结果页输入框里的空格全变成了 `+`**：在记录页粘贴 `[Hoshikawa Ranga] 120cm ... 100% ... [Digital] ⏎ [星川ランガ] ... [DL版]`，点搜索进结果页后，输入框显示成 `[Hoshikawa+Ranga]+120cm+...100%...+[Digital][星川ランガ]...` | 两个独立缺陷叠在一起，**根因是"路由参数用表单编码塞、又用 `URLDecoder` 解第二次"**：<br>① `JmRoutes.searchResults` 原来用 `URLEncoder.encode`——它是 `application/x-www-form-urlencoded`，**空格编成 `+`**；而 Navigation 解析路由参数走 `Uri.decode` 那一套，**只做百分号解码、不会把 `+` 还原成空格**，所以 `+` 一路活到界面；<br>② 页面里那次 `URLDecoder.decode` 是**第二次解码**，关键字里的 `100%` 已被 Navigation 解成裸 `%`，第二次解码直接抛 `IllegalArgumentException`，被 `runCatching` 兜住后退回**未解码的原始串**——上面那些 `+` 就留在了输入框里。<br>改法：新增 `JmRouteArgs.kt` 的 `encodeRouteArg` / `decodeRouteArg`，用 **Base64（URL-safe、无填充）+ `b64.` 前缀**过路由。选 Base64 而不是"换个转义函数"是因为它的字母表只有 `A-Za-z0-9-_`，**不含 `%`、`+`、`&`、`=`、空格**，所以无论 URI 那层解码几次、怎么解都是空操作；前缀是为了**可判别**（不带前缀按明文处理，否则 `Base64.decode("abcd")` 会"成功"解出乱码，用户搜 `abcd` 就被改坏）。`favoriteAlbums` 的收藏夹名是同一类输入（可能带空格 + `%`），一起换掉；`URLDecoder` / `URLEncoder` 两个 import 已从 `JmModeRoot` 移除 | 新增 `JmRouteArgsTest`（8 个用例：**用户那段原文**往返一致 / 编码结果不含 `%` `+` `&` `=` `?` `#` `/` 空格 / 关键字里的 `+` 不被当空格吃掉 / 形如 `abcd`、`YQ`、`b64.` 的关键字不被 Base64 误解 / 无前缀的旧值按明文返回 / 坏 payload 退回原串不抛异常 / 空串与全空白 / 50 行多行长文本）；**本轮已在本机跑通**：`tests=8 failures=0`。设备上请核对：重新按用户那条路径粘贴 → 进结果页，输入框应与记录页所填**逐字一致**（只有换行按 W2 的规则被去掉） |
+
+> **记一笔排查过程**（下次不用再绕）：一开始怀疑是 Navigation 没解、或 Uri 把 `+` 当空格，
+> 用 Robolectric 写了个探针跑真实 `NavDeepLink` 才定位到"**Navigation 百分号解码但不碰 `+`**"
+> 这一点——用户现象里 `%25` 已经变成 `%`、中文已经是中文（说明 Navigation 解过一层），
+> 而 `+` 还在（说明它不还原 `+`），两条合起来就锁定了"我们那次多余的 `URLDecoder` 抛异常后
+> 退回了原始串"。另外 `android.net.Uri.getQueryParameter()` **是**会把 `+` 当空格的，
+> 所以**不能**拿它当"Navigation 怎么解"的依据。
+
+### 第二十七轮反馈修复（2026-10-13）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| Y1 | 搜索结果卡片的「已入库」小字**去掉** | `OnlineResultRow` 里那段 `Text("已入库", labelSmall, primary)` 删除。状态已经写在按钮上，同一件事不摆两遍 | 代码 |
+| Y2 | 「加入书库」按钮**居右**、改用 `OutlinedButton`；已入库时字样为「已入库」+ 一个对勾图标，**点它走移出书库**（要二次弹框） | `OnlineResultRow` 原来那行是「左：已入库小字 / 右：TextButton」，现在整行 `Arrangement.End` 只放**一颗**按钮，两种状态各一颗、`if (item.existsLocal)` 选：<br>① 未入库 `OutlinedButton(enabled = !adding)` = 「加入书库」（要联网时仍然是转圈 + 不可点，N2 的行为不变）；<br>② 已入库 `OutlinedButton(enabled = !removing)` = `✓ 已入库`（`Icons.Default.Check` 16dp + 文字）。<br>点「已入库」不做任何破坏性动作，只把这一条交给页面：`JmSearchResultsScreen` 新增 `onRemoveFromLibrary` 参数 + 一个 `removeTarget` 状态，弹**与书库页批量移除同一个** `ConfirmDialog`（标题「从书库移除这本？」，正文列出会删什么、并写明"最近浏览记录会保留…此操作不可撤销"，确认按钮 `移除并删除` + error 色），确认后才回调 VM。<br>确认框挂在**页面**上而不是每一行里：列表项滚出屏幕会被销毁，状态放行里会丢 | 代码（按要求没有跑测试，等你打 debug 包确认）。设备上这样核对：搜一个词 → 每张卡右下角一颗描边按钮 → 点「加入书库」→ 变「✓ 已入库」→ 再点它 → 弹确认框 → 取消则按钮不变、确认则本地文件与记录一起没、按钮回到「加入书库」，底部弹一句「已从书库移除…」 |
+| Y3 | （Y2 的配套）搜索结果里移出书库要能**真正生效** | `JmOnlineSearchViewModel` 注入 `JmAlbumCleaner`（工厂里补 `container.jmAlbumCleaner`），新增 `removeFromLibrary(item)`：走**与详情页/书库页同一条**编排 `cleaner.removeFromLibrary(listOf(album))`（记录 + 章节 + 收藏关联 + 阅读位置 + 图片 + 导出成品全清，最近浏览与封面保留）。执行期间置新状态 `OnlineSearchUiState.removingIds`（按钮转圈 + 挡重复点按，见 `removingIds` 的注释）；成功后把这条的 `existsLocal` 刷回 false（原来的 `markLocal(id)` 泛化成 `markExistsLocal(id, exists)`，入库/移出共用），失败只弹一句提示 | 同上 |
+
+> 顺带说明：`existsLocal` 这个名字在搜索结果里表达的其实是"**在不在书库**"（`existingIds` 查的是书库成员表），
+> 所以移出之后必须刷成 false，否则按钮会一直停在「已入库」。
+
+**Y2 的视觉补丁（同一轮追加要求）**：
+
+| # | 反馈 | 落实方式 |
+|---|---|---|
+| Y4 | 两颗按钮都**再小一号**、都**去掉边框**；「已入库」用**主色调** | 按钮仍是 `OutlinedButton`（透明容器 + 现成的按下/禁用态），但 `border = null` 去掉描边，`contentPadding` 收到 `10dp / 0dp`、高度收到 `32dp`（Material 默认是 16dp 内边距 + 40dp 高）——两个值抽成 `ONLINE_ACTION_BUTTON_HEIGHT` / `ONLINE_ACTION_BUTTON_PADDING`，**两颗按钮共用**，状态切换时尺寸不会跳。<br>配色：已入库 `contentColor = colorScheme.primary`（主色，对勾图标跟着继承），未入库 `onSurfaceVariant`（次要色）——"在库里"是当前状态，用主色标出来；"可以入库"只是可用动作，不与状态抢色 |
+| Y5 | 按钮要**始终贴卡片的右下角**：标题只占一行时，按钮底边离卡片下内边距还有一段空隙 | 原来按钮在"文字列"里面，而文字列的高度是它自己的内容高度——封面固定 100dp，标题一行时那一列只有 ~72dp，按钮就跟着停在了半空。<br>改成：`Box(padding(8dp))` 里放 `Row(封面 + 文字列)`，按钮**浮在这个 Box 上** `Modifier.align(Alignment.BottomEnd)`，位置只由卡片高度决定，与标题占几行无关；文字列底部加 `padding(bottom = ONLINE_ACTION_BUTTON_ZONE)`（32dp 按钮 + 4dp 间距）留出净空，作者行不会被压住。<br>没有用 `height(IntrinsicSize.Min)` + `fillMaxHeight` 那一套：封面走的是 Coil 的 `AsyncImage`，intrinsic 测量要多绕一层、还得把文字列的排布改成 `SpaceBetween`（`Spacer(weight)` 在 intrinsic 下有歧义），而 Box 浮层是确定性布局，卡片高度与改动前**逐 dp 一致** |
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |

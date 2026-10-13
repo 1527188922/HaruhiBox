@@ -596,6 +596,13 @@ data class OnlineSearchUiState(
      */
     val addingIds: Set<Long> = emptySet(),
     /**
+     * 正在"移出书库"的本子号（卡片上的「已入库」按钮转圈 + 不可点）。
+     *
+     * 与 [addingIds] 对称，但**含义不同**：入库只有走网络那一条才慢（本地命中一帧就完），
+     * 而移出要删本地图片与导出成品，任何一本都可能花上一会儿，所以这里一律置标记。
+     */
+    val removingIds: Set<Long> = emptySet(),
+    /**
      * 一次性提示，由根部弹 Snackbar。**成功与失败都走这里**。
      *
      * 失败不再挂列表上方的横幅：那条横幅的「重试」按钮绑的是 `search()`，
@@ -645,45 +652,65 @@ data class OnlineSearchUiState(
     }
 }
 
-class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
+/**
+ * 搜索结果页的入参（结果页是独立页面，参数随路由带过来）。
+ *
+ * @param historyId > 0 表示从搜索历史点进来：**只回显快照，不发搜索请求**（用户要求）。
+ */
+data class OnlineSearchEntry(
+    val keyword: String,
+    val sort: JmSearchSort,
+    val historyId: Long = 0L,
+)
 
-    private val _state = MutableStateFlow(OnlineSearchUiState())
+/**
+ * 在线搜索。
+ *
+ * 一个实例只服务一种页面（用户要求把"搜索记录"和"搜索结果"拆成独立两页）：
+ * - 发现页（`entry == null`）：输入框、排序、搜索历史，**本页不发搜索请求**；
+ * - 结果页（`entry != null`）：拿路由参数进来，进页面就搜（或回显历史快照）。
+ */
+class JmOnlineSearchViewModel(
+    private val repo: JmRepository,
+    private val cleaner: JmAlbumCleaner,
+    private val entry: OnlineSearchEntry? = null,
+) : ViewModel() {
+
+    private val _state = MutableStateFlow(
+        OnlineSearchUiState(
+            keyword = entry?.keyword.orEmpty(),
+            sort = entry?.sort ?: JmSearchSort.DEFAULT,
+        ),
+    )
     val state: StateFlow<OnlineSearchUiState> = _state.asStateFlow()
 
     private var searchJob: Job? = null
 
     init {
-        viewModelScope.launch {
-            repo.observeSearchHistory().collect { history ->
-                _state.update { it.copy(history = history) }
+        val page = entry
+        when {
+            // 发现页：只盯着搜索历史（结果页不展示历史，不需要订阅）
+            page == null -> viewModelScope.launch {
+                repo.observeSearchHistory().collect { history ->
+                    _state.update { it.copy(history = history) }
+                }
             }
+            // 点历史记录进来：回显快照，不发搜索请求（用户要求）
+            page.historyId > 0L -> loadHistorySnapshot(page.historyId)
+            // 点「搜索」按钮 / 点作者进来：进页面就触发搜索（用户要求）
+            else -> search()
         }
     }
 
     fun onKeywordChange(value: String) = _state.update { it.copy(keyword = value) }
 
     /**
-     * 把关键字**填进搜索框**，但不发起搜索（详情页点作者走这条）。
+     * 发现页换排序：只记住，等用户点「搜索」再一起带进结果页。
      *
-     * 用户要求：点了作者只把作者名填好，搜不搜由他自己按搜索按钮决定。
-     * 同时把上一次的结果清掉——不然输入框里是"新作者"、下面却挂着"上一个关键字的结果"，
-     * 看起来像是这次搜出来的。
+     * 结果页换排序走 [changeSort]（要立刻重搜），两者语义不同。
      */
-    fun prefillKeyword(value: String) {
-        searchJob?.cancel()
-        _state.update {
-            it.copy(
-                keyword = value,
-                searching = false,
-                result = null,
-                visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
-            )
-        }
-    }
-
     fun onSortChange(sort: JmSearchSort) {
         _state.update { it.copy(sort = sort) }
-        if (_state.value.keyword.isNotBlank()) search()
     }
 
     /**
@@ -692,7 +719,34 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
      * 失败只弹一条提示（[OnlineSearchUiState.message]），不挂横幅：
      * 搜索这种事用户自己会再点一次「搜索」，不需要页面替他留一个重试按钮。
      */
-    fun search() {
+    fun search() = runSearch(clearResult = true)
+
+    /**
+     * 下拉释放刷新：重新搜第一页。
+     *
+     * **已经在请求中时直接返回，不重复发请求**（用户要求）；屏幕上的下拉圈由
+     * `searching` 驱动，请求结束自然会收回去。
+     */
+    fun refresh() {
+        if (_state.value.searching || _state.value.loadingMore) return
+        runSearch(clearResult = false)
+    }
+
+    /**
+     * 结果页换排序：立刻按新排序重搜。
+     *
+     * 只改芯片不重搜的话，选中的芯片会和列表内容对不上。
+     */
+    fun changeSort(sort: JmSearchSort) {
+        _state.update { it.copy(sort = sort) }
+        runSearch(clearResult = false)
+    }
+
+    /**
+     * @param clearResult 首次搜索清掉旧结果（页面显示居中的加载圈）；
+     *        刷新/换排序保留旧结果（列表不闪，只有顶部下拉圈在转）。
+     */
+    private fun runSearch(clearResult: Boolean) {
         val keyword = _state.value.keyword.trim()
         if (keyword.isEmpty()) {
             _state.update { it.copy(message = "请输入搜索关键字") }
@@ -703,7 +757,7 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
             _state.update {
                 it.copy(
                     searching = true,
-                    result = null,
+                    result = if (clearResult) null else it.result,
                     message = null,
                     visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
                 )
@@ -765,23 +819,21 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
     }
 
     /** 点历史记录：直接回显快照，不再请求 JM。 */
-    fun openHistory(history: JmSearchHistoryEntity) {
+    private fun loadHistorySnapshot(historyId: Long) {
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
             _state.update {
                 it.copy(
                     searching = true,
-                    keyword = history.keyword,
                     // 换了一批结果，展示条数从头开始
                     visibleCount = OnlineSearchUiState.INITIAL_VISIBLE_COUNT,
                 )
             }
-            val result = repo.searchHistorySnapshot(history.id)
+            val result = repo.searchHistorySnapshot(historyId)
             _state.update {
                 it.copy(
                     searching = false,
                     result = result,
-                    sort = JmSearchSort.fromCode(history.sort),
                     // 快照丢了同样只提示一句；`else it.message` 是不覆盖尚未弹出的那条提示
                     message = if (result == null) {
                         "这条搜索记录的结果已丢失，请重新搜索"
@@ -824,7 +876,7 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
             }
             try {
                 repo.addToLibraryLocalFirst(item.id)
-                markLocal(item.id)
+                markExistsLocal(item.id, exists = true)
                 _state.update { it.copy(message = "已加入书库") }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -837,15 +889,66 @@ class JmOnlineSearchViewModel(private val repo: JmRepository) : ViewModel() {
         }
     }
 
+    /**
+     * 搜索结果里点「已入库」= **移出书库**（用户本轮要求）。
+     *
+     * 与详情页/书库页的「从书库移除」走同一条编排 [JmAlbumCleaner.removeFromLibrary]：
+     * 记录 + 章节清单 + 收藏关联 + 阅读位置 + 本地图片 + 导出成品全清；
+     * **最近浏览记录与封面保留**（用户第八轮要求第 5 点），所以移出之后这张卡
+     * 还能点进详情页看、也能再点一次「加入书库」回来。
+     *
+     * 破坏性操作由 UI 先弹一次确认框（`JmSearchResultsScreen` 的 `ConfirmDialog`），
+     * 这里只管执行。执行期间置 [OnlineSearchUiState.removingIds]：按钮转圈并挡掉重复点按。
+     *
+     * 库里查不到这一本时**不当失败**：界面上的 `existsLocal` 可能已经过期
+     * （例如刚从书库页把它移除了），此时只纠正卡片状态并提示一句。
+     */
+    fun removeFromLibrary(item: OnlineSearchItem) {
+        if (item.id in _state.value.removingIds) return
+        viewModelScope.launch {
+            _state.update { it.copy(removingIds = it.removingIds + item.id) }
+            try {
+                val album = repo.findAlbum(item.id)
+                if (album == null) {
+                    markExistsLocal(item.id, exists = false)
+                    _state.update { it.copy(message = "这本已经不在书库里了") }
+                } else {
+                    val result = cleaner.removeFromLibrary(listOf(album))
+                    markExistsLocal(item.id, exists = false)
+                    val suffix = if (result.removedExports > 0) {
+                        "（含 ${result.removedExports} 个导出成品）"
+                    } else {
+                        ""
+                    }
+                    _state.update {
+                        it.copy(message = "已从书库移除，本地文件已删除（最近浏览记录保留）$suffix")
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(message = e.toUserMessage()) }
+            } finally {
+                _state.update { it.copy(removingIds = it.removingIds - item.id) }
+            }
+        }
+    }
+
     fun consumeMessage() = _state.update { it.copy(message = null) }
 
-    private fun markLocal(albumId: Long) {
+    /**
+     * 把某条结果的"在不在书库"标记刷成 [exists]。
+     *
+     * 卡片上的按钮就是按这条标记切换的（false = 「加入书库」/ true = 「✓ 已入库」），
+     * 所以入库成功后要刷成 true、移出成功后要刷回 false，不能只改数据库。
+     */
+    private fun markExistsLocal(albumId: Long, exists: Boolean) {
         _state.update { s ->
             val result = s.result ?: return@update s
             s.copy(
                 result = result.copy(
                     items = result.items.map {
-                        if (it.id == albumId) it.copy(existsLocal = true) else it
+                        if (it.id == albumId) it.copy(existsLocal = exists) else it
                     },
                 ),
             )

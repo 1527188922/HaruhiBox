@@ -29,10 +29,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -48,10 +46,9 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.haruhi.haruhibox.core.di.AppContainer
+import com.haruhi.haruhibox.core.jm.JmSearchSort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import java.net.URLDecoder
-import java.net.URLEncoder
 
 /**
  * 任务 tab 的图标（含角标）。
@@ -79,8 +76,31 @@ object JmRoutes {
     const val DETAIL = "jm/album/{albumId}"
     const val READER = "jm/read/{albumId}?chapterId={chapterId}"
 
+    /**
+     * 搜索结果页（独立页面，用户要求）。
+     *
+     * **不是底栏 tab**，所以进它时底栏自动隐藏（见 [JmModeRoot] 的 showBottomBar 判定）；
+     * 返回键按普通入栈回上一层（发现页 / 详情页），不需要页面内接管。
+     */
+    const val SEARCH_RESULTS = "jm/discover/results?keyword={keyword}&sort={sort}&historyId={historyId}"
+
     fun favoriteAlbums(id: Long, name: String) =
-        "jm/favorites/$id?name=${URLEncoder.encode(name, Charsets.UTF_8.name())}"
+        "jm/favorites/$id?name=${encodeRouteArg(name)}"
+
+    /**
+     * 结果页的地址。
+     *
+     * @param keyword 搜索关键字。**必须**走 [encodeRouteArg]：关键字是用户输入的任意文本，
+     *        直接拼进路由会被 URI 那一层改坏（空格、`%`、`+`……，见 [encodeRouteArg] 的注释）。
+     * @param sort 排序（点作者进来用默认排序）
+     * @param historyId > 0 表示从搜索历史点进来：结果页**只回显快照，不发搜索请求**（用户要求）
+     */
+    fun searchResults(
+        keyword: String,
+        sort: JmSearchSort = JmSearchSort.DEFAULT,
+        historyId: Long = 0L,
+    ) = "jm/discover/results?keyword=${encodeRouteArg(keyword)}" +
+        "&sort=${sort.code}&historyId=$historyId"
 
     fun detail(albumId: Long) = "jm/album/$albumId"
 
@@ -151,15 +171,6 @@ fun JmModeRoot(
     // 任务页复用同一个实例，两处看到的状态一定一致。
     val taskViewModel: JmTaskViewModel = viewModel(factory = factory)
     val taskState by taskViewModel.state.collectAsStateWithLifecycle()
-
-    /**
-     * 「点作者去搜索」的交接棒：详情页塞进来一个作者名，发现页接住填进搜索框。
-     *
-     * 为什么要绕这一道：详情页与发现页各有各的 `JmOnlineSearchViewModel`
-     * （作用域是各自的 NavBackStackEntry），详情页拿不到发现页那一个实例。
-     * 挂在 `/` 上的这个 NavHost 自己就是两者共同的父作用域，所以把值放这儿最省事。
-     */
-    var pendingSearchKeyword by remember { mutableStateOf<String?>(null) }
 
     // 封面统一走应用级 ImageLoader：正确的 UA/代理 + files/covers 磁盘缓存
     // （用户要求第 8 点：加载过的封面优先读本地）
@@ -285,25 +296,84 @@ fun JmModeRoot(
                 composable(JmRoutes.DISCOVER) { entry ->
                     val vm: JmOnlineSearchViewModel = viewModel(viewModelStoreOwner = entry, factory = factory)
                     val state by vm.state.collectAsStateWithLifecycle()
-                    // 详情页点作者带过来的关键字：接住、填进搜索框，然后清掉交接棒。
-                    // 只 prefill，**不调 search()**——用户要求"不触发搜索、自己点搜索按钮"。
-                    LaunchedEffect(pendingSearchKeyword) {
-                        val keyword = pendingSearchKeyword ?: return@LaunchedEffect
-                        vm.prefillKeyword(keyword)
-                        pendingSearchKeyword = null
-                    }
                     JmOnlineSearchScreen(
                         state = state,
                         onKeywordChange = vm::onKeywordChange,
-                        onSearch = vm::search,
                         onSortChange = vm::onSortChange,
+                        // 点「搜索」：**先跳结果页，由结果页自己发请求**（用户要求）。
+                        // 关键字为空就不跳、原地提示——结果页没有输入框，空关键字跳过去没法改。
+                        onSearch = {
+                            val keyword = state.keyword.trim()
+                            if (keyword.isEmpty()) {
+                                showMessage("请输入搜索关键字")
+                            } else {
+                                navController.navigate(JmRoutes.searchResults(keyword, state.sort)) {
+                                    launchSingleTop = true
+                                }
+                            }
+                        },
+                        // 点历史记录：带 historyId 进结果页，那边**只回显快照、不重搜**（用户要求）
+                        onOpenHistory = { history ->
+                            navController.navigate(
+                                JmRoutes.searchResults(
+                                    keyword = history.keyword,
+                                    sort = JmSearchSort.fromCode(history.sort),
+                                    historyId = history.id,
+                                ),
+                            ) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onDeleteHistory = vm::deleteHistory,
+                        onClearHistory = vm::clearHistory,
+                        // 本页自己没有 Snackbar 宿主，提示统一交给根部弹
+                        onMessage = showMessage,
+                        onConsumeMessage = vm::consumeMessage,
+                    )
+                }
+
+                composable(
+                    route = JmRoutes.SEARCH_RESULTS,
+                    arguments = listOf(
+                        navArgument("keyword") { type = NavType.StringType; defaultValue = "" },
+                        navArgument("sort") { type = NavType.StringType; defaultValue = JmSearchSort.DEFAULT.code },
+                        navArgument("historyId") { type = NavType.LongType; defaultValue = 0L },
+                    ),
+                ) { entry ->
+                    // 路由参数只在这里解一次（[encodeRouteArg] 是自描述的：不带前缀就是明文）。
+                    // **不要再叠一层 `URLDecoder.decode`**：Navigation 已经做过一次百分号解码，
+                    // 关键字里的 `%` 会让第二次解码抛异常并退回未解码的串（用户报的 `+` bug）。
+                    val keyword = remember(entry.arguments?.getString("keyword")) {
+                        decodeRouteArg(entry.arguments?.getString("keyword").orEmpty())
+                    }
+                    val sort = JmSearchSort.fromCode(entry.arguments?.getString("sort"))
+                    val historyId = entry.arguments?.getLong("historyId") ?: 0L
+                    // 搜索请求由结果页自己的 ViewModel 发起（进页面就搜）：
+                    // 挂在这个 entry 上保证转屏/重组不会重复发，路由参数只作为入参传一次。
+                    val vm: JmOnlineSearchViewModel = viewModel(
+                        viewModelStoreOwner = entry,
+                        factory = JmViewModelFactory(
+                            container,
+                            searchEntry = OnlineSearchEntry(keyword, sort, historyId),
+                        ),
+                    )
+                    val state by vm.state.collectAsStateWithLifecycle()
+                    JmSearchResultsScreen(
+                        state = state,
+                        // 结果页现在自带输入框（用户要求）：改完关键字点右侧按钮/回车是**原地重搜**，
+                        // 不再往导航栈上再压一层结果页（`JmSearchResultsScreen` 内部也不再跳转）。
+                        onKeywordChange = vm::onKeywordChange,
+                        onSearch = vm::search,
+                        onBack = { navController.popBackStack() },
+                        onRefresh = vm::refresh,
+                        // 换排序立刻重搜：只改芯片不重搜的话，选中的芯片会和列表内容对不上
+                        onSortChange = vm::changeSort,
                         onLoadMore = vm::loadMore,
                         onRevealMore = vm::showMoreItems,
                         onOpenAlbum = { navController.navigate(JmRoutes.detail(it)) },
                         onAddToLibrary = vm::addToLibrary,
-                        onOpenHistory = vm::openHistory,
-                        onDeleteHistory = vm::deleteHistory,
-                        onClearHistory = vm::clearHistory,
+                        // 点卡片上的「已入库」= 移出书库（页面内已二次确认）
+                        onRemoveFromLibrary = vm::removeFromLibrary,
                         // 本页自己没有 Snackbar 宿主，提示统一交给根部弹
                         onMessage = showMessage,
                         onConsumeMessage = vm::consumeMessage,
@@ -366,10 +436,10 @@ fun JmModeRoot(
                     ),
                 ) { entry ->
                     val favoriteId = entry.arguments?.getLong("favoriteId") ?: return@composable
-                    val rawName = entry.arguments?.getString("name").orEmpty()
-                    val favoriteName = remember(rawName) {
-                        runCatching { URLDecoder.decode(rawName, Charsets.UTF_8.name()) }
-                            .getOrDefault(rawName)
+                    // 与搜索关键字同一条路：收藏夹名也是用户输入的任意文本（可能带空格 / `%`），
+                    // 所以同样只解一次 [decodeRouteArg]，不再叠 `URLDecoder.decode`
+                    val favoriteName = remember(entry.arguments?.getString("name")) {
+                        decodeRouteArg(entry.arguments?.getString("name").orEmpty())
                     }
                     // 夹内复用书库布局（计划 §9 第 6 条）
                     val vm: JmLibraryViewModel = viewModel(viewModelStoreOwner = entry, factory = factory)
@@ -477,19 +547,12 @@ fun JmModeRoot(
                         onOpenFolder = {
                             openExportFolder(context, vm.outputFolderUri(), snackbar, scope)
                         },
-                        // 点作者：切到发现页并填好搜索框（不自动搜，用户自己点搜索）。
+                        // 点作者：**直接开结果页按作者名搜**（用户要求），不再绕去发现页填搜索框。
                         //
-                        // 只把"发现"以上的东西弹掉，**详情页留在栈里**——这样手机返回键
-                        // 会退回详情页（用户要求）。两个不能碰的坑：
-                        // - 不要用底栏切 tab 那一套 `saveState = true`：那会把详情页一起存进
-                        //   "书库 tab 的状态"，之后点底栏「书库」会把它整条恢复出来 = 又回到
-                        //   详情页（用户实测到过的 bug）；
-                        // - 也不要 `popBackStack(LIBRARY)` 把详情页提前弹掉：那样从发现页
-                        //   返回就直接退出到书库了，返回链路断掉。
+                        // 普通入栈、不做 popUpTo：详情页留在栈里，从结果页返回就回到详情页；
+                        // `launchSingleTop` 只是防止连点两下叠出两层一样的结果页。
                         onSearchAuthor = { author ->
-                            pendingSearchKeyword = author
-                            navController.navigate(JmRoutes.DISCOVER) {
-                                popUpTo(JmRoutes.DISCOVER) { inclusive = true }
+                            navController.navigate(JmRoutes.searchResults(author)) {
                                 launchSingleTop = true
                             }
                         },
@@ -647,12 +710,14 @@ private fun openExportFolder(
 /**
  * 手写 ViewModel 工厂（P0 决策 D-3：不用 Hilt）。
  *
- * `albumId` / `chapterId` 只有详情页与阅读器需要，所以做成可选参数。
+ * `albumId` / `chapterId` / `searchEntry` 只有对应页面需要，所以做成可选参数：
+ * 传 [OnlineSearchEntry] 的是搜索结果页（进页面就搜/回显快照），不传的是发现页（只发历史）。
  */
 class JmViewModelFactory(
     private val container: AppContainer,
     private val albumId: Long? = null,
     private val chapterId: Long? = null,
+    private val searchEntry: OnlineSearchEntry? = null,
 ) : ViewModelProvider.Factory {
 
     @Suppress("UNCHECKED_CAST")
@@ -669,7 +734,11 @@ class JmViewModelFactory(
             JmRecentViewModel(container.jmRepository, container.jmAlbumCleaner) as T
 
         modelClass.isAssignableFrom(JmOnlineSearchViewModel::class.java) ->
-            JmOnlineSearchViewModel(container.jmRepository) as T
+            JmOnlineSearchViewModel(
+                repo = container.jmRepository,
+                cleaner = container.jmAlbumCleaner,
+                entry = searchEntry,
+            ) as T
 
         modelClass.isAssignableFrom(JmFavoritesViewModel::class.java) ->
             JmFavoritesViewModel(container.jmRepository) as T

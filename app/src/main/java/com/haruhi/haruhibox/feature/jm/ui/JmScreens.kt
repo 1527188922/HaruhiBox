@@ -10,11 +10,13 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -34,7 +36,11 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
@@ -59,10 +65,14 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -88,6 +98,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -101,6 +112,7 @@ import com.haruhi.haruhibox.core.database.entity.JmSearchHistoryEntity
 import com.haruhi.haruhibox.core.jm.JmDefaults
 import com.haruhi.haruhibox.core.jm.JmSearchSort
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchItem
+import com.haruhi.haruhibox.feature.jm.data.OnlineSearchResult
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -1069,6 +1081,12 @@ fun downloadSummary(card: AlbumCard): String = when {
 // 发现（在线搜索）
 // ======================================================================
 
+/**
+ * 发现页（搜索页）：只有输入框、排序和搜索历史。
+ *
+ * 结果页已拆成独立页面（用户要求）：点「搜索」/点历史由上层导航到
+ * [JmSearchResultsScreen]，**本页不发搜索请求**。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun JmOnlineSearchScreen(
@@ -1076,10 +1094,6 @@ fun JmOnlineSearchScreen(
     onKeywordChange: (String) -> Unit,
     onSearch: () -> Unit,
     onSortChange: (JmSearchSort) -> Unit,
-    onLoadMore: () -> Unit,
-    onRevealMore: () -> Unit,
-    onOpenAlbum: (Long) -> Unit,
-    onAddToLibrary: (OnlineSearchItem) -> Unit,
     onOpenHistory: (JmSearchHistoryEntity) -> Unit,
     onDeleteHistory: (Long) -> Unit,
     onClearHistory: () -> Unit,
@@ -1091,167 +1105,383 @@ fun JmOnlineSearchScreen(
     MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
 
     Column(modifier = modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = state.keyword,
-            onValueChange = onKeywordChange,
-            singleLine = true,
-            // 明确区别于"搜索本地书库"（计划 §9 第 5 条）
-            placeholder = { Text("搜索在线漫画") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            trailingIcon = {
-                IconButton(onClick = onSearch) {
-                    Icon(Icons.Default.Search, contentDescription = "搜索")
-                }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
+        SearchKeywordField(
+            keyword = state.keyword,
+            onKeywordChange = onKeywordChange,
+            onSearch = onSearch,
         )
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-        ) {
-            JmSearchSort.entries.forEach { sort ->
-                FilterChip(
-                    selected = state.sort == sort,
-                    onClick = { onSortChange(sort) },
-                    label = { Text(sort.label) },
-                )
-            }
-        }
+        SearchSortChips(selected = state.sort, onSelect = onSortChange)
 
-        // 这里原来挂过一条 ErrorBanner（带「重试」按钮）。已去掉（用户本轮要求）：
-        // 那个「重试」绑的是 `onSearch`，也就是重发整个在线搜索，
-        // 而横幅上的文案有时是「加入书库」失败——按钮和它旁边的话根本不是同一件事。
-        // 现在无论搜索、翻页还是加入书库失败，都只弹一条一次性提示，重试由用户自己决定。
-        val result = state.result
-        // 正文区铺灰色底；头部搜索框 + 排序按钮那一行留白。
+        // 这里原来还挂着"结果列表"（含加载圈、空态、翻页）和一条 ErrorBanner。
+        // 结果列表已经拆到独立的结果页 [JmSearchResultsScreen]（用户要求）：
+        // 本页只负责"输入 + 历史"，点搜索/点历史由上层导航过去。
+        //
+        // 正文区铺灰色底；头部搜索框 + 排序按钮那一行留白（主题色优化那条分支的规则）。
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.background),
         ) {
-            when {
-                    state.searching -> LoadingBox()
-                    result == null -> SearchHistoryList(
-                        history = state.history,
-                        historyEnabled = state.historyEnabled,
-                        onOpen = onOpenHistory,
-                        onDelete = onDeleteHistory,
-                        onClearAll = onClearHistory,
-                    )
-                    result.items.isEmpty() -> EmptyBox(
-                        title = "没有搜到结果",
-                        hint = "换个关键字试试",
-                    )
-                    else -> {
-                        val listState = rememberLazyListState()
-                        // key 必须带上 `result.items` 本身：加入书库后 item 的 `existsLocal` 会变，
-                        // 而"已显示条数"和"总条数"都不变——只按这两个 key 缓存的话，
-                        // 拿到的永远是加库之前那一份列表，表现为"点了加入书库，按钮不变，
-                        // 切走再回来才对"（用户反馈第 5 点）。
-                        val visibleItems = remember(state.visibleCount, result.items) {
-                            result.items.take(state.visibleCount)
+            SearchHistoryList(
+                history = state.history,
+                historyEnabled = state.historyEnabled,
+                onOpen = onOpenHistory,
+                onDelete = onDeleteHistory,
+                onClearAll = onClearHistory,
+            )
+        }
+    }
+}
+
+/**
+ * 搜索关键字输入框：发现页与结果页**共用同一个**实现（用户要求两边样式一致）。
+ *
+ * 输入即净化，见 [sanitizeSearchKeyword]；回车/软键盘的"搜索"键等同于点右侧按钮。
+ */
+@Composable
+private fun SearchKeywordField(
+    keyword: String,
+    onKeywordChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedTextField(
+        value = keyword,
+        // 用户要求：输入框里的字符自动去掉首尾空格、以及字符串当中的换行
+        onValueChange = { onKeywordChange(sanitizeSearchKeyword(it)) },
+        singleLine = true,
+        // 明确区别于"搜索本地书库"（计划 §9 第 5 条）
+        placeholder = { Text("搜索在线漫画") },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+        trailingIcon = {
+            IconButton(onClick = onSearch) {
+                Icon(Icons.Default.Search, contentDescription = "搜索")
+            }
+        },
+        // 软键盘上的"搜索"键也提交，不用先收键盘再点按钮
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    )
+}
+
+/**
+ * 搜索输入框的净化规则（用户要求）：
+ * 去掉**首尾空格**，并删掉字符串**中间的所有换行**。
+ *
+ * 抽成纯函数是为了能单测（见 `SearchKeywordSanitizeTest`）：粘贴多行文本、
+ * 部分输入法把回车当提交键，都可能把 `\n` 混进关键字里，而带换行的关键字
+ * 送到接口只会变成一次必然失败的请求。
+ *
+ * 只删 `\n` / `\r`，中间的普通空格（例如"魔法 少女"）照样保留。
+ */
+fun sanitizeSearchKeyword(value: String): String =
+    value.filterNot { it == '\n' || it == '\r' }.trim()
+
+/**
+ * 排序芯片：发现页用它"选好排序再搜"，结果页用它"换排序重搜"。
+ */
+@Composable
+private fun SearchSortChips(selected: JmSearchSort, onSelect: (JmSearchSort) -> Unit) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        JmSearchSort.entries.forEach { sort ->
+            FilterChip(
+                selected = selected == sort,
+                onClick = { onSelect(sort) },
+                label = { Text(sort.label) },
+            )
+        }
+    }
+}
+
+/**
+ * 搜索结果页（独立页面，用户要求）。
+ *
+ * - 从发现页点「搜索」/点搜索历史、或从详情页点作者进入；
+ * - **不挂底栏**：它不是底栏 tab（见 `JmModeRoot` 的 showBottomBar 判定）；
+ * - 返回键按普通入栈回上一层（发现页 / 详情页），不需要页面内接管；
+ * - **本页自带搜索输入框**（用户要求）：已经是结果页了，改完关键字点搜索是**原地重搜**，
+ *   不再往栈上再压一层结果页；
+ * - 支持下拉释放刷新，已经在请求中时不会重复发（见 `JmOnlineSearchViewModel.refresh`）；
+ * - 每张卡右下角一颗动作按钮：未入库是「加入书库」，已入库是「✓ 已入库」，
+ *   点「已入库」等于**移出书库**，先弹一次确认框（用户本轮要求）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun JmSearchResultsScreen(
+    state: OnlineSearchUiState,
+    onKeywordChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onSortChange: (JmSearchSort) -> Unit,
+    onLoadMore: () -> Unit,
+    onRevealMore: () -> Unit,
+    onOpenAlbum: (Long) -> Unit,
+    onAddToLibrary: (OnlineSearchItem) -> Unit,
+    onRemoveFromLibrary: (OnlineSearchItem) -> Unit,
+    modifier: Modifier = Modifier,
+    onMessage: (String) -> Unit = {},
+    onConsumeMessage: () -> Unit = {},
+) {
+    // 提示走根部 Scaffold 的 Snackbar（本页自己没有宿主）
+    MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
+
+    // 「已入库」那颗按钮是**移出书库**的入口：记录 + 本地文件一起没，不可撤销，
+    // 所以先弹一次确认框（与书库页批量移除同一个 `ConfirmDialog`）。
+    // 待确认的那一本挂在这里而不是每一行里：弹框是整页一份，且列表项滚出屏幕会被销毁。
+    var removeTarget by remember { mutableStateOf<OnlineSearchItem?>(null) }
+
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        // 与外层 `JmModeRoot` 的 Scaffold 不同：本页在内层，**不能再加一遍系统栏内边距**，
+        // 否则标题上方会空出两倍状态栏高度（详情页踩过，见 JmAlbumDetailScreen 的同款处理）。
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        // 用户要求：结果页**不要 TopAppBar**，顶部直接放搜索输入框。
+        // 原来的顶栏代码整段留着（只注释掉），想切回去只要放开 below 注释、
+        // 并删掉下方 Column 里的 SearchKeywordField 即可。
+        // 注意：`onBack` 参数只被这段注释里的返回按钮使用，放开注释它就活了。
+        // topBar = {
+        //     TopAppBar(
+        //         windowInsets = WindowInsets(0, 0, 0, 0),
+        //         title = {
+        //             Text(
+        //                 text = state.keyword.ifBlank { "搜索结果" },
+        //                 maxLines = 1,
+        //                 overflow = TextOverflow.Ellipsis,
+        //             )
+        //         },
+        //         navigationIcon = {
+        //             IconButton(onClick = onBack) {
+        //                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+        //             }
+        //         },
+        //     )
+        // },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            // 本页自己也有搜索框（用户要求，与发现页同一个 [SearchKeywordField]）：
+            // 已经在结果页了，点搜索就是**原地重搜**，不必再跳页面。
+            SearchKeywordField(
+                keyword = state.keyword,
+                onKeywordChange = onKeywordChange,
+                onSearch = onSearch,
+            )
+
+            SearchSortChips(selected = state.sort, onSelect = onSortChange)
+
+            // 下拉释放刷新（用户要求）：靠 nested-scroll 拿手势，列表回到顶部后继续下拉才接管，
+            // 列表没到顶时完全不动它。
+            //
+            // `isRefreshing` 只在"已经有结果、正在重新搜"时为 true：首屏加载由居中的
+            // LoadingBox 表达，两个圈同时转就成了两个 loading（详情页报过这个 bug）。
+            // 已经在请求中时不再重复发起（`refresh()` 里也做了同样的去重）。
+            //
+            // 正文区铺灰色底；头部搜索框 + 排序按钮那一行留白（主题色优化那条分支的规则）：
+            // 结果页是新的独立页，同样按「头部白、内容区灰」来铺，两条分支的风格才不打架。
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.background),
+            ) {
+                PullToRefreshBox(
+                    isRefreshing = state.searching && state.result != null,
+                    onRefresh = { if (!state.searching && !state.loadingMore) onRefresh() },
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    val result = state.result
+                    when {
+                        // 首屏（进页面那次搜索 / 读历史快照）还没有结果
+                        result == null && state.searching -> LoadingBox()
+                        // 搜索失败、或历史快照丢了：留个空态，**下拉即可重搜**
+                        result == null -> ScrollableFullScreenBox {
+                            EmptyBox(title = "没能加载结果", hint = "下拉重新搜索")
                         }
-    
-                        // 用户要求第 5 点：**最后一条进入可视范围就继续追加**，
-                        // 而不是等用户滑到底再点按钮。这样列表是"连续滚不完"的观感，
-                        // 同时首屏只渲染 10 条、不会一次性发起几十个封面请求。
-                        //
-                        // 两个坑，都已踩过：
-                        // 1. 不要用 `derivedStateOf { listState.layoutInfo... }`：读 layoutInfo 拿到的
-                        //    是**过期快照**，只有别的重组顺带读到它时才重算，表现为"必须先滑回顶部
-                        //    再滑到底才加载"；
-                        // 2. `LaunchedEffect` 的 key **不能包含当前批次条数**：每次追加都会取消并
-                        //    重启这个 effect，正在进行的滚动检测被打断，于是永远停在某一批。
-                        //    所以 key 只放"列表身份"，判定条件通过 rememberUpdatedState 读实时值，
-                        //    判定本身用 [OnlineSearchUiState.shouldRevealMore]（有单测）。
-                        val currentState by rememberUpdatedState(state)
-                        LaunchedEffect(result.query, result.page, result.fromHistory) {
-                            snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
-                                .distinctUntilChanged()
-                                .collect { lastVisibleIndex ->
-                                    if (currentState.shouldRevealMore(lastVisibleIndex)) onRevealMore()
-                                }
+                        result.items.isEmpty() -> ScrollableFullScreenBox {
+                            EmptyBox(title = "没有搜到结果", hint = "换个关键字试试")
                         }
-    
-                        LazyColumn(
-                            state = listState,
-                            contentPadding = PaddingValues(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.fillMaxSize(),
-                        ) {
-                            item {
-                                Text(
-                                    text = buildString {
-                                        if (result.fromHistory) {
-                                            append("搜索历史快照 · 共 ${result.total} 条")
-                                        } else {
-                                            append("共 ${result.total} 条 · 第 ${result.page}/${result.totalPages} 页")
-                                        }
-                                        // 让用户知道下面还有多少没展开
-                                        if (state.remainingCount > 0) {
-                                            append(" · 已显示 ${visibleItems.size}/${result.items.size}")
-                                        }
-                                    },
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            items(visibleItems, key = { it.id }) { item ->
-                                OnlineResultRow(
-                                    item = item,
-                                    // 只有"这次入库确实要联网拉详情"才会是 true（见 VM 的 addToLibrary）
-                                    adding = item.id in state.addingIds,
-                                    onOpen = { onOpenAlbum(item.id) },
-                                    onAddToLibrary = { onAddToLibrary(item) },
-                                )
-                            }
-                            when {
-                                state.loadingMore -> item {
-                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                                }
-    
-                                // 本页还有没展示完的：继续下滑会自动追加
-                                state.remainingCount > 0 -> item {
-                                    Text(
-                                        text = "继续下滑显示更多（还有 ${state.remainingCount} 条）",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 8.dp),
-                                    )
-                                }
-    
-                                // 本页全部展示完，才出现"加载下一页"（用户要求第 5 点）
-                                !result.fromHistory && result.page < result.totalPages -> item {
-                                    TextButton(
-                                        onClick = onLoadMore,
-                                        modifier = Modifier.fillMaxWidth(),
-                                    ) { Text("加载下一页（第 ${result.page + 1} 页）") }
-                                }
-    
-                                else -> item {
-                                    Text(
-                                        text = if (result.fromHistory) {
-                                            "历史快照已全部显示"
-                                        } else {
-                                            "已显示全部结果"
-                                        },
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 8.dp),
-                                    )
-                                }
-                            }
-                        }
+                        else -> SearchResultList(
+                            state = state,
+                            result = result,
+                            onLoadMore = onLoadMore,
+                            onRevealMore = onRevealMore,
+                            onOpenAlbum = onOpenAlbum,
+                            onAddToLibrary = onAddToLibrary,
+                            onRequestRemove = { removeTarget = it },
+                        )
                     }
                 }
             }
+        }
+    }
+
+    removeTarget?.let { target ->
+        ConfirmDialog(
+            title = "从书库移除这本？",
+            text = "《${target.name.orEmpty().ifBlank { "JM${target.id}" }}》会删除书库记录、章节清单、" +
+                "收藏关联、阅读位置，以及本地图片与导出的 zip/pdf。" +
+                "最近浏览记录会保留（封面也还在）。此操作不可撤销。",
+            confirmText = "移除并删除",
+            onConfirm = {
+                removeTarget = null
+                onRemoveFromLibrary(target)
+            },
+            confirmButtonColors = ButtonDefaults.textButtonColors(
+                contentColor = MaterialTheme.colorScheme.error,
+            ),
+            onDismiss = { removeTarget = null },
+        )
+    }
+}
+
+/**
+ * 把"不可滚动的整屏内容"（加载 / 空态）包成可滚动的，让外层 `PullToRefreshBox` 能拿到下拉手势。
+ *
+ * `PullToRefreshBox` 完全靠 nested-scroll 拿手势，而 [LoadingBox] / [EmptyBox] 是普通 Box、
+ * 不参与 nested-scroll，直接放进去是拉不动的（详情页踩过这个坑，见 JmAlbumDetailScreen）。
+ *
+ * 高度必须显式给回"整屏"：`verticalScroll` 发给子项的是**无限高约束**，
+ * [EmptyBox] 内部用 fillMaxSize，直接把无限高传下去会崩；给成固定 dp，
+ * 空状态在平板上又不会居中。所以用 BoxWithConstraints 读真实视口高度再填回去。
+ */
+@Composable
+private fun ScrollableFullScreenBox(content: @Composable () -> Unit) {
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        Box(modifier = Modifier.heightIn(min = maxHeight)) { content() }
+    }
+}
+
+/** 结果列表本体（抽出来只为让 [JmSearchResultsScreen] 的分支读起来短一点）。 */
+@Composable
+private fun SearchResultList(
+    state: OnlineSearchUiState,
+    result: OnlineSearchResult,
+    onLoadMore: () -> Unit,
+    onRevealMore: () -> Unit,
+    onOpenAlbum: (Long) -> Unit,
+    onAddToLibrary: (OnlineSearchItem) -> Unit,
+    /** 点某一行「已入库」：把这一本交给上层弹"移出书库"确认框（本层不自己弹）。 */
+    onRequestRemove: (OnlineSearchItem) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    // key 必须带上 `result.items` 本身：加入书库后 item 的 `existsLocal` 会变，
+    // 而"已显示条数"和"总条数"都不变——只按这两个 key 缓存的话，
+    // 拿到的永远是加库之前那一份列表，表现为"点了加入书库，按钮不变，
+    // 切走再回来才对"（用户反馈第 5 点）。
+    val visibleItems = remember(state.visibleCount, result.items) {
+        result.items.take(state.visibleCount)
+    }
+
+    // 用户要求第 5 点：**最后一条进入可视范围就继续追加**，
+    // 而不是等用户滑到底再点按钮。这样列表是"连续滚不完"的观感，
+    // 同时首屏只渲染 10 条、不会一次性发起几十个封面请求。
+    //
+    // 两个坑，都已踩过：
+    // 1. 不要用 `derivedStateOf { listState.layoutInfo... }`：读 layoutInfo 拿到的
+    //    是**过期快照**，只有别的重组顺带读到它时才重算，表现为"必须先滑回顶部
+    //    再滑到底才加载"；
+    // 2. `LaunchedEffect` 的 key **不能包含当前批次条数**：每次追加都会取消并
+    //    重启这个 effect，正在进行的滚动检测被打断，于是永远停在某一批。
+    //    所以 key 只放"列表身份"，判定条件通过 rememberUpdatedState 读实时值，
+    //    判定本身用 [OnlineSearchUiState.shouldRevealMore]（有单测）。
+    val currentState by rememberUpdatedState(state)
+    LaunchedEffect(result.query, result.page, result.fromHistory) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+            .distinctUntilChanged()
+            .collect { lastVisibleIndex ->
+                if (currentState.shouldRevealMore(lastVisibleIndex)) onRevealMore()
+            }
+    }
+
+    LazyColumn(
+        state = listState,
+        contentPadding = PaddingValues(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        item {
+            Text(
+                text = buildString {
+                    if (result.fromHistory) {
+                        append("搜索历史快照 · 共 ${result.total} 条")
+                    } else {
+                        append("共 ${result.total} 条 · 第 ${result.page}/${result.totalPages} 页")
+                    }
+                    // 让用户知道下面还有多少没展开
+                    if (state.remainingCount > 0) {
+                        append(" · 已显示 ${visibleItems.size}/${result.items.size}")
+                    }
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        items(visibleItems, key = { it.id }) { item ->
+            OnlineResultRow(
+                item = item,
+                // 只有"这次入库确实要联网拉详情"才会是 true（见 VM 的 addToLibrary）
+                adding = item.id in state.addingIds,
+                // 移出书库正在删本地文件（见 VM 的 removeFromLibrary）
+                removing = item.id in state.removingIds,
+                onOpen = { onOpenAlbum(item.id) },
+                onAddToLibrary = { onAddToLibrary(item) },
+                onRequestRemove = { onRequestRemove(item) },
+            )
+        }
+        when {
+            state.loadingMore -> item {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+
+            // 本页还有没展示完的：继续下滑会自动追加
+            state.remainingCount > 0 -> item {
+                Text(
+                    text = "继续下滑显示更多（还有 ${state.remainingCount} 条）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                )
+            }
+
+            // 本页全部展示完，才出现"加载下一页"（用户要求第 5 点）
+            !result.fromHistory && result.page < result.totalPages -> item {
+                TextButton(
+                    onClick = onLoadMore,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("加载下一页（第 ${result.page + 1} 页）") }
+            }
+
+            else -> item {
+                Text(
+                    text = if (result.fromHistory) {
+                        "历史快照已全部显示"
+                    } else {
+                        "已显示全部结果"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                )
+            }
+        }
     }
 }
 
@@ -1322,86 +1552,178 @@ private fun SearchHistoryList(
     }
 }
 
+/**
+ * 搜索结果卡片上那颗动作按钮的"小一号"尺寸（用户本轮要求）。
+ *
+ * 抽成常量是因为两颗按钮（「加入书库」/「已入库」）必须一模一样高、一样宽的内边距——
+ * 两种状态切换时按钮不能跳一下。比 Material 默认值（高 40dp、内边距 16dp）收一圈：
+ * 卡片本身只有 100dp 高的封面，按钮不该比封面更抢眼。
+ */
+private val ONLINE_ACTION_BUTTON_HEIGHT = Modifier.height(32.dp)
+private val ONLINE_ACTION_BUTTON_PADDING = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
+
+/**
+ * 文字列底部要给那颗浮起来的按钮留出的净空：按钮自身 32dp + 4dp 间距。
+ *
+ * 按钮是 `align(Alignment.BottomEnd)` 浮在卡片上的，**不参与文字列的高度计算**，
+ * 所以只能在这里手动把位置留出来，否则作者行会被按钮压住。
+ */
+private val ONLINE_ACTION_BUTTON_ZONE = 36.dp
+
+/**
+ * 在线搜索结果的一行。
+ *
+ * 卡片右下角是**唯一**的动作按钮，两种状态各自一颗（用户本轮要求）：
+ *
+ * - 未入库：「加入书库」，次要色（要联网拉详情时转圈 + 不可点，
+ *   见 `OnlineSearchUiState.addingIds`）；
+ * - 已入库：「✓ 已入库」，**主色**；点它走**移出书库**——破坏性操作，
+ *   由上层先弹一次确认框（[JmSearchResultsScreen] 的 `ConfirmDialog`），
+ *   本行只负责把点击转上去。
+ *
+ * 位置是**卡片的右下角**，不是"文字列的底部"（用户要求）：按钮 `align(BottomEnd)` 浮在
+ * 整个卡片内容盒上，所以标题只有一行时它照样贴着卡片下沿，不会悬在半空。
+ * 文字列底部用 [ONLINE_ACTION_BUTTON_ZONE] 留出净空，标题/作者不会被它压住。
+ *
+ * 视觉上是"小一号的无边框按钮"（用户本轮要求）：[OutlinedButton] 保留下来只是因为它的
+ * 容器是透明的、按下态与禁用态都是现成的，但 `border = null` 把描边去掉，
+ * 再把高度收到 [ONLINE_ACTION_BUTTON_HEIGHT]、内边距收到 [ONLINE_ACTION_BUTTON_PADDING]——
+ * 默认的 40dp 高 + 16dp 内边距放在卡片右下角太占地方，会抢封面的视觉重量。
+ *
+ * 原来那行「已入库」小字被删掉了：状态已经写在按钮上，同一件事不摆两遍。
+ */
 @Composable
 private fun OnlineResultRow(
     item: OnlineSearchItem,
     adding: Boolean,
+    removing: Boolean,
     onOpen: () -> Unit,
     onAddToLibrary: () -> Unit,
+    onRequestRemove: () -> Unit,
 ) {
     Card(
         onClick = onOpen,
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(modifier = Modifier.padding(8.dp)) {
-            // 必须跟书库/收藏/详情/任务一样走 JmCover：直接用 AsyncImage(item.coverUrl)
-            // 会落到 Coil 的**进程单例**加载器上（AsyncImage 不传 imageLoader 时的默认值），
-            // 它的内存/磁盘缓存与应用级加载器完全不共享，所以这里刚加载过的封面，
-            // 点进详情页会再联网请求一次。
-            JmCover(
-                albumId = item.id,
-                contentDescription = item.name,
-                modifier = Modifier
-                    .size(width = 72.dp, height = 100.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-            )
-            Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = item.name.orEmpty().ifBlank { "JM${item.id}" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+        // 封面 + 文字在里层 Row 里，动作按钮**浮在同一个 Box 上、贴 BottomEnd**。
+        //
+        // 为什么不是"把按钮放在文字那一列的底部"（原来就是这么写的，用户报了问题）：
+        // 文字列的高度是它自己的内容高度，标题只有一行时那一列比封面（100dp）矮，
+        // 于是按钮悬在半空、离卡片底边还差一截。Box + `align(BottomEnd)` 让按钮的位置
+        // **只由卡片高度决定**，与标题占一行还是两行无关：卡片多高，它就贴在哪。
+        Box(modifier = Modifier.padding(8.dp)) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                // 必须跟书库/收藏/详情/任务一样走 JmCover：直接用 AsyncImage(item.coverUrl)
+                // 会落到 Coil 的**进程单例**加载器上（AsyncImage 不传 imageLoader 时的默认值），
+                // 它的内存/磁盘缓存与应用级加载器完全不共享，所以这里刚加载过的封面，
+                // 点进详情页会再联网请求一次。
+                JmCover(
+                    albumId = item.id,
+                    contentDescription = item.name,
+                    modifier = Modifier
+                        .size(width = 72.dp, height = 100.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
                 )
-                Text(
-                    text = "JM${item.id}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                item.author?.takeIf { it.isNotBlank() }?.let { author ->
+                Spacer(Modifier.width(10.dp))
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        // 给右下角那颗按钮留净空：它是浮上来的，下面不留白的话
+                        // 标题 / 作者会被它压住
+                        .padding(bottom = ONLINE_ACTION_BUTTON_ZONE),
+                ) {
                     Text(
-                        text = author,
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
+                        text = item.name.orEmpty().ifBlank { "JM${item.id}" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                }
-                Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 用户输入纯数字时由 /album 详情包装出来的那一条，标出来与普通搜索区分
-                    if (item.isExactIdMatch) {
+                    Text(
+                        text = "JM${item.id}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    item.author?.takeIf { it.isNotBlank() }?.let { author ->
                         Text(
-                            text = "精确匹配",
+                            text = author,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.tertiary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
-                        Spacer(Modifier.width(8.dp))
                     }
-                    if (item.existsLocal) {
-                        Text(
-                            text = "已入库",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                    } else {
-                        // 本地没有完整详情时，这一次入库要等一个 `/album` 往返，
-                        // 所以按钮上转圈并挡掉重复点按（用户本轮要求）。
-                        // 本地命中的那条路径不会进这个状态——VM 只在真要联网时才置 adding，
-                        // 否则"点一下就变已入库"会先闪一下 loading。
-                        TextButton(onClick = onAddToLibrary, enabled = !adding) {
-                            if (adding) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                )
-                                Spacer(Modifier.width(6.dp))
-                            }
-                            Text("加入书库")
+                }
+            }
+            // 动作按钮**固定贴卡片右下角**（用户要求），两个状态都在这一个位置上。
+            Row(
+                modifier = Modifier.align(Alignment.BottomEnd),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 用户输入纯数字时由 /album 详情包装出来的那一条，标出来与普通搜索区分
+//                    if (item.isExactIdMatch) {
+//                        Text(
+//                            text = "精确匹配",
+//                            style = MaterialTheme.typography.labelSmall,
+//                            color = MaterialTheme.colorScheme.tertiary,
+//                        )
+//                        Spacer(Modifier.width(8.dp))
+//                    }
+                if (item.existsLocal) {
+                    // 已入库：字样变「已入库」并在前面加一个对勾图标，**用主色**标出"这本在库里"。
+                    // 再点一下 = 移出书库（用户本轮要求），销毁性操作由上层二次确认。
+                    OutlinedButton(
+                        onClick = onRequestRemove,
+                        enabled = !removing,
+                        border = null,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.primary,
+                        ),
+                        contentPadding = ONLINE_ACTION_BUTTON_PADDING,
+                        modifier = ONLINE_ACTION_BUTTON_HEIGHT,
+                    ) {
+                        if (removing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
                         }
+                        Spacer(Modifier.width(6.dp))
+                        Text("已入库")
+                    }
+                } else {
+                    // 本地没有完整详情时，这一次入库要等一个 `/album` 往返，
+                    // 所以按钮上转圈并挡掉重复点按（用户本轮要求）。
+                    // 本地命中的那条路径不会进这个状态——VM 只在真要联网时才置 adding，
+                    // 否则"点一下就变已入库"会先闪一下 loading。
+                    //
+                    // 未入库不是"当前状态"，只是"可以做这件事"，所以用次要色，
+                    // 与已入库那颗主色按钮区分开（用户本轮要求：只有已入库用主色）。
+                    OutlinedButton(
+                        onClick = onAddToLibrary,
+                        enabled = !adding,
+                        border = null,
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
+                        contentPadding = ONLINE_ACTION_BUTTON_PADDING,
+                        modifier = ONLINE_ACTION_BUTTON_HEIGHT,
+                    ) {
+                        if (adding) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text("未入库")
                     }
                 }
             }
@@ -1482,7 +1804,7 @@ fun JmFavoritesScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1528,46 +1850,47 @@ fun JmFavoritesScreen(
                 .background(MaterialTheme.colorScheme.background),
         ) {
             when {
-                    state.loading -> LoadingBox()
-                    state.favorites.isEmpty() -> EmptyBox("还没有收藏夹", "点「新建」创建一个")
-                    else -> LazyColumn(
-                        contentPadding = PaddingValues(horizontal = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                        items(sorted, key = { it.id }) { row ->
-                            Card(
-                                onClick = { onOpenFavorite(row.id, row.name) },
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier.fillMaxWidth(),
+                state.loading -> LoadingBox()
+                state.favorites.isEmpty() -> EmptyBox("还没有收藏夹", "点「新建」创建一个")
+                else -> LazyColumn(
+                    // 顶部 8dp 由 master 侧加进来（原来紧贴标题行），保留 master 的间距
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    items(sorted, key = { it.id }) { row ->
+                        Card(
+                            onClick = { onOpenFavorite(row.id, row.name) },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    FavoriteCover(row)
-                                    Spacer(Modifier.width(12.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(row.name, style = MaterialTheme.typography.bodyLarge)
-                                        Text(
-                                            text = if (row.isDefault) {
-                                                "${row.albumCount} 本 · 默认收藏夹不可删除或重命名"
-                                            } else {
-                                                "${row.albumCount} 本"
-                                            },
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    if (!row.isDefault) {
-                                        TextButton(onClick = { renameTarget = row }) { Text("改名") }
-                                        TextButton(onClick = { deleteTarget = row }) { Text("删除") }
-                                    }
+                                FavoriteCover(row)
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(row.name, style = MaterialTheme.typography.bodyLarge)
+                                    Text(
+                                        text = if (row.isDefault) {
+                                            "${row.albumCount} 本 · 默认收藏夹不可删除或重命名"
+                                        } else {
+                                            "${row.albumCount} 本"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (!row.isDefault) {
+                                    TextButton(onClick = { renameTarget = row }) { Text("改名") }
+                                    TextButton(onClick = { deleteTarget = row }) { Text("删除") }
                                 }
                             }
                         }
                     }
                 }
+            }
         }
     }
 

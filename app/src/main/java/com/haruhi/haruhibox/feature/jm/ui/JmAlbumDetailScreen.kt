@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -192,7 +194,7 @@ fun JmAlbumDetailScreen(
     /** 「打开文件夹」：让系统文件管理器定位到成品目录（用户反馈第 2 点）。 */
     onOpenFolder: () -> Unit,
     /**
-     * 点作者：跳到发现页，把作者名填进在线搜索框（**不自动搜**，由用户自己点搜索按钮）。
+     * 点作者：**直接打开搜索结果页**，进页面就按作者名搜（用户要求）。
      */
     onSearchAuthor: (String) -> Unit = {},
     /**
@@ -675,12 +677,14 @@ private fun ExportedFileRow(
     onSend: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.height(IntrinsicSize.Min),) {
         // 格式徽标：一眼分清哪个是 zip 哪个是 pdf，不用去读扩展名
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .width(42.dp)
+                .fillMaxHeight()
                 .clip(RoundedCornerShape(6.dp))
                 .background(MaterialTheme.colorScheme.primary)
                 .padding(vertical = 4.dp),
@@ -859,7 +863,7 @@ private fun AlbumHeader(
     onToggleDescription: () -> Unit,
     onRead: () -> Unit,
     onDownload: () -> Unit,
-    /** 点作者：跳发现页并把作者名填进搜索框（不自动搜，由用户自己点搜索按钮）。 */
+    /** 点作者：**直接打开搜索结果页**，进页面就按作者名搜（用户要求）。 */
     onSearchAuthor: (String) -> Unit = {},
 ) {
     val album = state.album ?: return
@@ -1151,9 +1155,10 @@ private fun ChapterSectionHeader(
             text = chapterSectionTitle(total, downloaded, localSizeBytes),
             style = MaterialTheme.typography.titleSmall,
         )
-        // 下载入口只留头部那一个（用户要求第 3 点），这里只负责正序/倒序切换
-        TextButton(onClick = onToggleReversed) {
-            Text(if (reversed) "倒序" else "正序")
+        if (total > 1) {
+            TextButton(onClick = onToggleReversed) {
+                Text(if (reversed) "倒序" else "正序")
+            }
         }
     }
 }
