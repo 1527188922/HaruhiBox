@@ -508,6 +508,17 @@ app/src/main/java/com/haruhi/haruhibox/
 > 退回了原始串"。另外 `android.net.Uri.getQueryParameter()` **是**会把 `+` 当空格的，
 > 所以**不能**拿它当"Navigation 怎么解"的依据。
 
+### 第二十七轮反馈修复（2026-10-13）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| Y1 | 搜索结果卡片的「已入库」小字**去掉** | `OnlineResultRow` 里那段 `Text("已入库", labelSmall, primary)` 删除。状态已经写在按钮上，同一件事不摆两遍 | 代码 |
+| Y2 | 「加入书库」按钮**居右**、改用 `OutlinedButton`；已入库时字样为「已入库」+ 一个对勾图标，**点它走移出书库**（要二次弹框） | `OnlineResultRow` 原来那行是「左：已入库小字 / 右：TextButton」，现在整行 `Arrangement.End` 只放**一颗**按钮，两种状态各一颗、`if (item.existsLocal)` 选：<br>① 未入库 `OutlinedButton(enabled = !adding)` = 「加入书库」（要联网时仍然是转圈 + 不可点，N2 的行为不变）；<br>② 已入库 `OutlinedButton(enabled = !removing)` = `✓ 已入库`（`Icons.Default.Check` 16dp + 文字）。<br>点「已入库」不做任何破坏性动作，只把这一条交给页面：`JmSearchResultsScreen` 新增 `onRemoveFromLibrary` 参数 + 一个 `removeTarget` 状态，弹**与书库页批量移除同一个** `ConfirmDialog`（标题「从书库移除这本？」，正文列出会删什么、并写明"最近浏览记录会保留…此操作不可撤销"，确认按钮 `移除并删除` + error 色），确认后才回调 VM。<br>确认框挂在**页面**上而不是每一行里：列表项滚出屏幕会被销毁，状态放行里会丢 | 代码（按要求没有跑测试，等你打 debug 包确认）。设备上这样核对：搜一个词 → 每张卡右下角一颗描边按钮 → 点「加入书库」→ 变「✓ 已入库」→ 再点它 → 弹确认框 → 取消则按钮不变、确认则本地文件与记录一起没、按钮回到「加入书库」，底部弹一句「已从书库移除…」 |
+| Y3 | （Y2 的配套）搜索结果里移出书库要能**真正生效** | `JmOnlineSearchViewModel` 注入 `JmAlbumCleaner`（工厂里补 `container.jmAlbumCleaner`），新增 `removeFromLibrary(item)`：走**与详情页/书库页同一条**编排 `cleaner.removeFromLibrary(listOf(album))`（记录 + 章节 + 收藏关联 + 阅读位置 + 图片 + 导出成品全清，最近浏览与封面保留）。执行期间置新状态 `OnlineSearchUiState.removingIds`（按钮转圈 + 挡重复点按，见 `removingIds` 的注释）；成功后把这条的 `existsLocal` 刷回 false（原来的 `markLocal(id)` 泛化成 `markExistsLocal(id, exists)`，入库/移出共用），失败只弹一句提示 | 同上 |
+
+> 顺带说明：`existsLocal` 这个名字在搜索结果里表达的其实是"**在不在书库**"（`existingIds` 查的是书库成员表），
+> 所以移出之后必须刷成 false，否则按钮会一直停在「已入库」。
+
 ## P4 明细（JM 导出 zip / pdf）
 
 | 项 | 状态 | 产出 |

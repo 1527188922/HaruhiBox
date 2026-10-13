@@ -596,6 +596,13 @@ data class OnlineSearchUiState(
      */
     val addingIds: Set<Long> = emptySet(),
     /**
+     * 正在"移出书库"的本子号（卡片上的「已入库」按钮转圈 + 不可点）。
+     *
+     * 与 [addingIds] 对称，但**含义不同**：入库只有走网络那一条才慢（本地命中一帧就完），
+     * 而移出要删本地图片与导出成品，任何一本都可能花上一会儿，所以这里一律置标记。
+     */
+    val removingIds: Set<Long> = emptySet(),
+    /**
      * 一次性提示，由根部弹 Snackbar。**成功与失败都走这里**。
      *
      * 失败不再挂列表上方的横幅：那条横幅的「重试」按钮绑的是 `search()`，
@@ -665,6 +672,7 @@ data class OnlineSearchEntry(
  */
 class JmOnlineSearchViewModel(
     private val repo: JmRepository,
+    private val cleaner: JmAlbumCleaner,
     private val entry: OnlineSearchEntry? = null,
 ) : ViewModel() {
 
@@ -868,7 +876,7 @@ class JmOnlineSearchViewModel(
             }
             try {
                 repo.addToLibraryLocalFirst(item.id)
-                markLocal(item.id)
+                markExistsLocal(item.id, exists = true)
                 _state.update { it.copy(message = "已加入书库") }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -881,15 +889,66 @@ class JmOnlineSearchViewModel(
         }
     }
 
+    /**
+     * 搜索结果里点「已入库」= **移出书库**（用户本轮要求）。
+     *
+     * 与详情页/书库页的「从书库移除」走同一条编排 [JmAlbumCleaner.removeFromLibrary]：
+     * 记录 + 章节清单 + 收藏关联 + 阅读位置 + 本地图片 + 导出成品全清；
+     * **最近浏览记录与封面保留**（用户第八轮要求第 5 点），所以移出之后这张卡
+     * 还能点进详情页看、也能再点一次「加入书库」回来。
+     *
+     * 破坏性操作由 UI 先弹一次确认框（`JmSearchResultsScreen` 的 `ConfirmDialog`），
+     * 这里只管执行。执行期间置 [OnlineSearchUiState.removingIds]：按钮转圈并挡掉重复点按。
+     *
+     * 库里查不到这一本时**不当失败**：界面上的 `existsLocal` 可能已经过期
+     * （例如刚从书库页把它移除了），此时只纠正卡片状态并提示一句。
+     */
+    fun removeFromLibrary(item: OnlineSearchItem) {
+        if (item.id in _state.value.removingIds) return
+        viewModelScope.launch {
+            _state.update { it.copy(removingIds = it.removingIds + item.id) }
+            try {
+                val album = repo.findAlbum(item.id)
+                if (album == null) {
+                    markExistsLocal(item.id, exists = false)
+                    _state.update { it.copy(message = "这本已经不在书库里了") }
+                } else {
+                    val result = cleaner.removeFromLibrary(listOf(album))
+                    markExistsLocal(item.id, exists = false)
+                    val suffix = if (result.removedExports > 0) {
+                        "（含 ${result.removedExports} 个导出成品）"
+                    } else {
+                        ""
+                    }
+                    _state.update {
+                        it.copy(message = "已从书库移除，本地文件已删除（最近浏览记录保留）$suffix")
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                _state.update { it.copy(message = e.toUserMessage()) }
+            } finally {
+                _state.update { it.copy(removingIds = it.removingIds - item.id) }
+            }
+        }
+    }
+
     fun consumeMessage() = _state.update { it.copy(message = null) }
 
-    private fun markLocal(albumId: Long) {
+    /**
+     * 把某条结果的"在不在书库"标记刷成 [exists]。
+     *
+     * 卡片上的按钮就是按这条标记切换的（false = 「加入书库」/ true = 「✓ 已入库」），
+     * 所以入库成功后要刷成 true、移出成功后要刷回 false，不能只改数据库。
+     */
+    private fun markExistsLocal(albumId: Long, exists: Boolean) {
         _state.update { s ->
             val result = s.result ?: return@update s
             s.copy(
                 result = result.copy(
                     items = result.items.map {
-                        if (it.id == albumId) it.copy(existsLocal = true) else it
+                        if (it.id == albumId) it.copy(existsLocal = exists) else it
                     },
                 ),
             )

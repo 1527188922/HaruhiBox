@@ -65,6 +65,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -1183,7 +1184,9 @@ private fun SearchSortChips(selected: JmSearchSort, onSelect: (JmSearchSort) -> 
  * - 返回键按普通入栈回上一层（发现页 / 详情页），不需要页面内接管；
  * - **本页自带搜索输入框**（用户要求）：已经是结果页了，改完关键字点搜索是**原地重搜**，
  *   不再往栈上再压一层结果页；
- * - 支持下拉释放刷新，已经在请求中时不会重复发（见 `JmOnlineSearchViewModel.refresh`）。
+ * - 支持下拉释放刷新，已经在请求中时不会重复发（见 `JmOnlineSearchViewModel.refresh`）；
+ * - 每张卡右下角一颗动作按钮：未入库是「加入书库」，已入库是「✓ 已入库」，
+ *   点「已入库」等于**移出书库**，先弹一次确认框（用户本轮要求）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1198,12 +1201,18 @@ fun JmSearchResultsScreen(
     onRevealMore: () -> Unit,
     onOpenAlbum: (Long) -> Unit,
     onAddToLibrary: (OnlineSearchItem) -> Unit,
+    onRemoveFromLibrary: (OnlineSearchItem) -> Unit,
     modifier: Modifier = Modifier,
     onMessage: (String) -> Unit = {},
     onConsumeMessage: () -> Unit = {},
 ) {
     // 提示走根部 Scaffold 的 Snackbar（本页自己没有宿主）
     MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
+
+    // 「已入库」那颗按钮是**移出书库**的入口：记录 + 本地文件一起没，不可撤销，
+    // 所以先弹一次确认框（与书库页批量移除同一个 `ConfirmDialog`）。
+    // 待确认的那一本挂在这里而不是每一行里：弹框是整页一份，且列表项滚出屏幕会被销毁。
+    var removeTarget by remember { mutableStateOf<OnlineSearchItem?>(null) }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -1276,10 +1285,29 @@ fun JmSearchResultsScreen(
                         onRevealMore = onRevealMore,
                         onOpenAlbum = onOpenAlbum,
                         onAddToLibrary = onAddToLibrary,
+                        onRequestRemove = { removeTarget = it },
                     )
                 }
             }
         }
+    }
+
+    removeTarget?.let { target ->
+        ConfirmDialog(
+            title = "从书库移除这本？",
+            text = "《${target.name.orEmpty().ifBlank { "JM${target.id}" }}》会删除书库记录、章节清单、" +
+                "收藏关联、阅读位置，以及本地图片与导出的 zip/pdf。" +
+                "最近浏览记录会保留（封面也还在）。此操作不可撤销。",
+            confirmText = "移除并删除",
+            onConfirm = {
+                removeTarget = null
+                onRemoveFromLibrary(target)
+            },
+            confirmButtonColors = ButtonDefaults.textButtonColors(
+                contentColor = MaterialTheme.colorScheme.error,
+            ),
+            onDismiss = { removeTarget = null },
+        )
     }
 }
 
@@ -1313,6 +1341,8 @@ private fun SearchResultList(
     onRevealMore: () -> Unit,
     onOpenAlbum: (Long) -> Unit,
     onAddToLibrary: (OnlineSearchItem) -> Unit,
+    /** 点某一行「已入库」：把这一本交给上层弹"移出书库"确认框（本层不自己弹）。 */
+    onRequestRemove: (OnlineSearchItem) -> Unit,
 ) {
     val listState = rememberLazyListState()
     // key 必须带上 `result.items` 本身：加入书库后 item 的 `existsLocal` 会变，
@@ -1372,8 +1402,11 @@ private fun SearchResultList(
                 item = item,
                 // 只有"这次入库确实要联网拉详情"才会是 true（见 VM 的 addToLibrary）
                 adding = item.id in state.addingIds,
+                // 移出书库正在删本地文件（见 VM 的 removeFromLibrary）
+                removing = item.id in state.removingIds,
                 onOpen = { onOpenAlbum(item.id) },
                 onAddToLibrary = { onAddToLibrary(item) },
+                onRequestRemove = { onRequestRemove(item) },
             )
         }
         when {
@@ -1486,12 +1519,26 @@ private fun SearchHistoryList(
     }
 }
 
+/**
+ * 在线搜索结果的一行。
+ *
+ * 卡片右下角是**唯一**的动作按钮，两种状态各自一颗（用户本轮要求）：
+ *
+ * - 未入库：「加入书库」（[OutlinedButton]，要联网拉详情时转圈 + 不可点，
+ *   见 `OnlineSearchUiState.addingIds`）；
+ * - 已入库：「✓ 已入库」，点它走**移出书库**——破坏性操作，由上层先弹一次确认框
+ *   （[JmSearchResultsScreen] 的 `ConfirmDialog`），本行只负责把点击转上去。
+ *
+ * 原来那行「已入库」小字被删掉了：状态已经写在按钮上，同一件事不摆两遍。
+ */
 @Composable
 private fun OnlineResultRow(
     item: OnlineSearchItem,
     adding: Boolean,
+    removing: Boolean,
     onOpen: () -> Unit,
     onAddToLibrary: () -> Unit,
+    onRequestRemove: () -> Unit,
 ) {
     Card(
         onClick = onOpen,
@@ -1534,29 +1581,47 @@ private fun OnlineResultRow(
                     )
                 }
                 Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // 动作按钮**靠右**（用户本轮要求）：左边是封面与文字这类"读"的内容，
+                // 右边固定是"能做什么"，扫一眼就知道这本入没入库。
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     // 用户输入纯数字时由 /album 详情包装出来的那一条，标出来与普通搜索区分
-                    if (item.isExactIdMatch) {
-                        Text(
-                            text = "精确匹配",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.tertiary,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                    }
+//                    if (item.isExactIdMatch) {
+//                        Text(
+//                            text = "精确匹配",
+//                            style = MaterialTheme.typography.labelSmall,
+//                            color = MaterialTheme.colorScheme.tertiary,
+//                        )
+//                        Spacer(Modifier.width(8.dp))
+//                    }
                     if (item.existsLocal) {
-                        Text(
-                            text = "已入库",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.width(8.dp))
+                        // 已入库：字样变「已入库」并在前面加一个对勾图标。
+                        // **再点一下 = 移出书库**（用户本轮要求），销毁性操作由上层二次确认。
+                        OutlinedButton(onClick = onRequestRemove, enabled = !removing) {
+                            if (removing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text("已入库")
+                        }
                     } else {
                         // 本地没有完整详情时，这一次入库要等一个 `/album` 往返，
                         // 所以按钮上转圈并挡掉重复点按（用户本轮要求）。
                         // 本地命中的那条路径不会进这个状态——VM 只在真要联网时才置 adding，
                         // 否则"点一下就变已入库"会先闪一下 loading。
-                        TextButton(onClick = onAddToLibrary, enabled = !adding) {
+                        OutlinedButton(onClick = onAddToLibrary, enabled = !adding) {
                             if (adding) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(16.dp),

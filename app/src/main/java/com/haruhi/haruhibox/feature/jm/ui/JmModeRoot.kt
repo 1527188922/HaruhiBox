@@ -366,6 +366,8 @@ fun JmModeRoot(
                         onRevealMore = vm::showMoreItems,
                         onOpenAlbum = { navController.navigate(JmRoutes.detail(it)) },
                         onAddToLibrary = vm::addToLibrary,
+                        // 点卡片上的「已入库」= 移出书库（页面内已二次确认）
+                        onRemoveFromLibrary = vm::removeFromLibrary,
                         // 本页自己没有 Snackbar 宿主，提示统一交给根部弹
                         onMessage = showMessage,
                         onConsumeMessage = vm::consumeMessage,
@@ -726,7 +728,11 @@ class JmViewModelFactory(
             JmRecentViewModel(container.jmRepository, container.jmAlbumCleaner) as T
 
         modelClass.isAssignableFrom(JmOnlineSearchViewModel::class.java) ->
-            JmOnlineSearchViewModel(container.jmRepository, searchEntry) as T
+            JmOnlineSearchViewModel(
+                repo = container.jmRepository,
+                cleaner = container.jmAlbumCleaner,
+                entry = searchEntry,
+            ) as T
 
         modelClass.isAssignableFrom(JmFavoritesViewModel::class.java) ->
             JmFavoritesViewModel(container.jmRepository) as T
