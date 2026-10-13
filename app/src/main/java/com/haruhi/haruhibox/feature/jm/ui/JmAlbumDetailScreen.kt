@@ -1152,9 +1152,10 @@ private fun ChapterSectionHeader(
             text = chapterSectionTitle(total, downloaded, localSizeBytes),
             style = MaterialTheme.typography.titleSmall,
         )
-        // 下载入口只留头部那一个（用户要求第 3 点），这里只负责正序/倒序切换
-        TextButton(onClick = onToggleReversed) {
-            Text(if (reversed) "倒序" else "正序")
+        if (total > 1) {
+            TextButton(onClick = onToggleReversed) {
+                Text(if (reversed) "倒序" else "正序")
+            }
         }
     }
 }
