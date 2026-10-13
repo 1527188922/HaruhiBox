@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -672,12 +674,14 @@ private fun ExportedFileRow(
     onSend: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.height(IntrinsicSize.Min),) {
         // 格式徽标：一眼分清哪个是 zip 哪个是 pdf，不用去读扩展名
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier
                 .width(42.dp)
+                .fillMaxHeight()
                 .clip(RoundedCornerShape(6.dp))
                 .background(MaterialTheme.colorScheme.primary)
                 .padding(vertical = 4.dp),
