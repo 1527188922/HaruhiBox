@@ -1591,7 +1591,7 @@ fun JmFavoritesScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
+                .padding(start = 12.dp, end = 4.dp, top = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1634,7 +1634,7 @@ fun JmFavoritesScreen(
             state.loading -> LoadingBox()
             state.favorites.isEmpty() -> EmptyBox("还没有收藏夹", "点「新建」创建一个")
             else -> LazyColumn(
-                contentPadding = PaddingValues(horizontal = 12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
