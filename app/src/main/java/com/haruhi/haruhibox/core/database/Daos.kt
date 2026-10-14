@@ -939,6 +939,19 @@ interface PlaybackPositionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(position: PlaybackPositionEntity)
 
+    /**
+     * 「继续阅读」指针的覆盖写：**先清同 kind 的旧行，再写新行**（事务内原子）。
+     *
+     * 指针只应存在一行。换一本读时 `bizKey`（本子 id）会变，直接 upsert 会留下
+     * 两条旧行，所以先清零再写。清 + 写包在同一个事务里，观察者只会看到
+     * "改前 / 改后"，不会闪过"短暂为空"的中间态。
+     */
+    @Transaction
+    suspend fun replaceSingle(position: PlaybackPositionEntity) {
+        clearKind(position.kind)
+        upsert(position)
+    }
+
     @Query("SELECT * FROM t_playback_position WHERE kind = :kind AND bizKey = :bizKey")
     suspend fun find(kind: String, bizKey: String): PlaybackPositionEntity?
 
@@ -957,6 +970,15 @@ interface PlaybackPositionDao {
 
     @Query("DELETE FROM t_playback_position WHERE kind = :kind AND bizKey = :bizKey")
     suspend fun delete(kind: String, bizKey: String)
+
+    /**
+     * 清掉"指向这些本子"的某类位置记录（单条 SQL 原子）。
+     *
+     * 「继续阅读」指针用它：移出书库时若指针正指向被移出的本，一并清掉指针，
+     * 宁可卡片消失也不回退到更早读过的旧书（用户方案 B）。
+     */
+    @Query("DELETE FROM t_playback_position WHERE kind = :kind AND bizKey IN (:bizKeys)")
+    suspend fun deleteForKeys(kind: String, bizKeys: List<String>): Int
 }
 
 // ======================================================================

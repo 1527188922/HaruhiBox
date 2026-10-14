@@ -166,6 +166,12 @@ class JmAlbumCleanerTest {
         assertThat(runBlocking { repo.favoriteIdsOf(albumId) }).isEmpty()
         assertThat(runBlocking { reading.positionOf(albumId) }).isNull()
         assertThat(runBlocking { db.playbackPositionDao().find(READING_KIND, albumId.toString()) }).isNull()
+        // 「继续阅读」指针正指向这本 -> 一并清掉（用户方案 B：卡片消失，不回退到旧书）
+        assertThat(
+            runBlocking {
+                db.playbackPositionDao().find(JmReadingRepository.CONTINUE_KIND, albumId.toString())
+            },
+        ).isNull()
         // 但最近浏览**必须保留**（用户第八轮要求第 5 点）：移出书库不影响"刚看过什么"
         assertThat(runBlocking { repo.findRecent(albumId) }).isNotNull()
         // 基础数据缓存也**必须保留**（本次要求：缓存表不因任何操作删除），离线仍能看详情

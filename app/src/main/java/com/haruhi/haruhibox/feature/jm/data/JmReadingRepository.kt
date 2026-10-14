@@ -50,18 +50,23 @@ class JmReadingRepository(
         imageIndex: Int,
         offsetRatio: Float,
     ) {
-        positionDao.upsert(
-            PlaybackPositionEntity(
-                kind = KIND,
-                bizKey = albumId.toString(),
-                chapterId = chapterId,
-                imageFile = imageFile,
-                // JM 用 position 存图片序号（0 起），恢复时不必再按文件名反查
-                position = imageIndex.toLong(),
-                offsetRatio = offsetRatio.coerceIn(0f, 1f),
-                updateTime = System.currentTimeMillis(),
-            ),
+        val ratio = offsetRatio.coerceIn(0f, 1f)
+        val now = System.currentTimeMillis()
+        fun entity(kind: String) = PlaybackPositionEntity(
+            kind = kind,
+            bizKey = albumId.toString(),
+            chapterId = chapterId,
+            imageFile = imageFile,
+            // JM 用 position 存图片序号（0 起），恢复时不必再按文件名反查
+            position = imageIndex.toLong(),
+            offsetRatio = ratio,
+            updateTime = now,
         )
+        // 逐本记录（每本一条，阅读器恢复用）
+        positionDao.upsert(entity(KIND))
+        // 顺带覆盖「继续阅读」指针（全表此类只有一行）——它是书库卡片的**唯一数据源**。
+        // 两个 kind 各写各的，所以"移出书库删逐本记录"不会波及指针。
+        positionDao.replaceSingle(entity(CONTINUE_KIND))
     }
 
     suspend fun clearPosition(albumId: Long) = positionDao.delete(KIND, albumId.toString())
@@ -90,13 +95,24 @@ class JmReadingRepository(
         chapterDao.observeImages(albumId, chapterId)
 
     /**
-     * 书库页"继续阅读"卡片的数据源：**最近一次读过位置的本子**。
+     * 书库页「继续阅读」卡片的数据源：**独立存在的唯一一条指针**。
      *
-     * 返回 `null` 表示还没有任何阅读记录（书库页就不显示卡片，§9 第 4 条
-     * "有阅读记录时显示紧凑的继续阅读卡片"）。
+     * 与逐本阅读记录（[observePosition]/[positionOf] 用的 [KIND]）分开存，
+     * 所以"移出书库删掉这本的逐本记录"不会让卡片静默掉回一本更早读过的旧书
+     * （本次修复的核心）。
+     *
+     * 返回 `null` 表示没有可继续的——从没读过，或指针被 ✕ / 指向的书被移出书库时
+     * 清掉，书库页就不显示卡片（§9 第 4 条）。
      */
-    fun observeLastRead(): Flow<ReadingPosition?> =
-        positionDao.observeLastForKind(KIND).map { it?.toReadingPosition() }
+    fun observeContinueReading(): Flow<ReadingPosition?> =
+        positionDao.observeLastForKind(CONTINUE_KIND).map { it?.toReadingPosition() }
+
+    /**
+     * 卡片右上角 ✕：只清这条指针，**不动**逐本阅读记录。
+     *
+     * 逐本记录留着，之后读同一本时还能从原位置续上；只是书库页不再显示卡片。
+     */
+    suspend fun clearContinueReading() = positionDao.clearKind(CONTINUE_KIND)
 
     private fun PlaybackPositionEntity.toReadingPosition() = ReadingPosition(
         albumId = bizKey.toLongOrNull() ?: 0L,
@@ -110,6 +126,15 @@ class JmReadingRepository(
     companion object {
         /** `t_playback_position.kind`：JM 漫画。 */
         const val KIND = "JM"
+
+        /**
+         * `t_playback_position.kind`：**「继续阅读」指针**（此类只存一行）。
+         *
+         * 单独开一个 kind，是把"最近在读哪本"做成一条**显式、独立**的记录，
+         * 而不是从逐本记录里 `ORDER BY updateTime LIMIT 1` 临时算出来——
+         * 后者一旦最新那条被删（正是移出书库时），卡片就会静默回退到旧记录。
+         */
+        const val CONTINUE_KIND = "JM_CONTINUE"
     }
 }
 

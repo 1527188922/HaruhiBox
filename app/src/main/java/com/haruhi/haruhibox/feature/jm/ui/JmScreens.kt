@@ -167,6 +167,8 @@ fun JmLibraryScreen(
     showCollectedChip: Boolean = true,
     /** 「继续阅读」卡片被点击（计划 §9 第 4 条）。 */
     onContinueReading: ((Long) -> Unit)? = null,
+    /** 「继续阅读」卡片右上角 ✕ 被点击：清掉独立指针（卡片消失，不动逐本记录）。 */
+    onDismissContinueReading: (() -> Unit)? = null,
     /** 批量删除本地文件（图片 + zip/pdf，不动封面与记录）。 */
     onDeleteFiles: ((List<Long>) -> Unit)? = null,
     /** 批量从书库移除（记录 + 文件 + 成品 + 封面）。 */
@@ -226,6 +228,7 @@ fun JmLibraryScreen(
                     ContinueReadingCardRow(
                         card = card,
                         onOpen = { onContinueReading?.invoke(card.albumId) ?: onOpenAlbum(card.albumId) },
+                        onDismiss = { onDismissContinueReading?.invoke() },
                     )
                 }
             }
@@ -608,11 +611,12 @@ private fun FavoritePickerForSelection(
     }
 }
 
-/** 书库顶部的"继续阅读"卡片：一行封面 + 标题 + 上次读到哪一话。 */
+/** 书库顶部的"继续阅读"卡片：一行封面 + 标题 + 上次读到哪一话，右上角 ✕ 清除。 */
 @Composable
 private fun ContinueReadingCardRow(
     card: ContinueReadingCard,
     onOpen: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     Card(
         onClick = onOpen,
@@ -622,36 +626,54 @@ private fun ContinueReadingCardRow(
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(10.dp),
-        ) {
-            JmCover(
-                albumId = card.albumId,
-                contentDescription = card.albumTitle,
-                modifier = Modifier
-                    .size(width = 44.dp, height = 60.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surface),
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = card.albumTitle,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+        Box {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(10.dp),
+            ) {
+                JmCover(
+                    albumId = card.albumId,
+                    contentDescription = card.albumTitle,
+                    modifier = Modifier
+                        .size(width = 44.dp, height = 60.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surface),
                 )
-                Text(
-                    text = card.subtitle,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                Spacer(Modifier.width(12.dp))
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        // 右边留出位置，标题/副标题不会被右上角的 ✕ 压住
+                        .padding(end = 36.dp),
+                ) {
+                    Text(
+                        text = card.albumTitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = card.subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            // 右上角 ✕：只清这条「继续阅读」指针（卡片消失），点它不会进阅读器。
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.TopEnd),
+            ) {
+                Icon(
+                    imageVector = Icons.filled.Close,
+                    contentDescription = "关闭继续阅读",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Text("›", style = MaterialTheme.typography.titleMedium)
         }
     }
 }

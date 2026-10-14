@@ -869,14 +869,20 @@ class JmRepository(
      *
      * **本地文件不在这里删**：图片在本子目录、成品在系统下载目录、封面在 Coil 缓存，
      * 三处都要清，由调用方（详情页 / 书库多选）统一编排。
+     *
+     * **「继续阅读」指针**（kind = `JM_CONTINUE`，独立一行）只在它正指向被移出的本子时
+     * 一并清掉（用户方案 B）：卡片宁可消失，也不回退到一本更早读过的旧书。
      */
     suspend fun deleteAlbums(ids: List<Long>) {
         if (ids.isEmpty()) return
+        val keys = ids.map { it.toString() }
         ids.forEach { id ->
             favoriteDao.deleteLinksOfAlbum(id)
             chapterDao.deleteByAlbum(id)
             positionDao?.delete(READING_KIND, id.toString())
         }
+        // 指针若指向被移出的本子就清掉整条指针（单条 SQL 原子）；指向别本则不受影响。
+        positionDao?.deleteForKeys(JmReadingRepository.CONTINUE_KIND, keys)
         albumDao.deleteLibraryRows(ids)
     }
 

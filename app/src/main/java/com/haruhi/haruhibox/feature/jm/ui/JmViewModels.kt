@@ -291,10 +291,11 @@ class JmLibraryViewModel(
 
     init {
         refreshStats()
-        // 「继续阅读」跟着阅读位置走：读完一本回到书库，卡片要立刻变成那一本
+        // 「继续阅读」卡片跟着**独立指针**走（不是逐本记录里"最新那条"）：
+        // 读完一本回到书库，卡片立刻变成那一本；移出书库删逐本记录也不会让卡片乱跳。
         viewModelScope.launch {
-            reading.observeLastRead()
-                .catch { e -> Timber.tag("jm").w(e, "观察阅读位置失败") }
+            reading.observeContinueReading()
+                .catch { e -> Timber.tag("jm").w(e, "观察继续阅读指针失败") }
                 .collect { position ->
                     extra.update { it.copy(continueReading = resolveContinueReading(position)) }
                 }
@@ -308,10 +309,11 @@ class JmLibraryViewModel(
     }
 
     /**
-     * 把阅读位置翻译成卡片内容。
+     * 把「继续阅读」指针翻译成卡片内容。
      *
-     * 位置可能指向一本**已经不在书库**的本子（用户移除了记录但没删文件），
-     * 这时退回基础数据缓存取标题（它永不删除）；两处都没有就干脆不显示卡片。
+     * 正常情况下指针只指向**仍在书库**的本子（移出书库会连带清掉指针，用户方案 B）；
+     * 这里仍保留一层兜底：万一指针指向的本子不在书库，就退回基础数据缓存取标题
+     * （它永不删除）；两处都没有就干脆不显示卡片。
      */
     private suspend fun resolveContinueReading(position: ReadingPosition?): ContinueReadingCard? {
         val chapterId = position?.chapterId ?: return null
@@ -338,6 +340,18 @@ class JmLibraryViewModel(
     }
 
     fun clearFilter() = updateFilter { LibraryFilter() }
+
+    /**
+     * 卡片右上角 ✕：清掉「继续阅读」指针，卡片随即消失。
+     *
+     * 只清这条独立指针，**不动**逐本阅读记录——之后读同一本仍能从原位置续上。
+     */
+    fun dismissContinueReading() {
+        viewModelScope.launch {
+            runCatching { reading.clearContinueReading() }
+                .onFailure { Timber.tag("jm").w(it, "清除继续阅读指针失败") }
+        }
+    }
 
     /**
      * 往下翻一页（用户第十轮要求第 4 点）。

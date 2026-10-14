@@ -271,6 +271,8 @@ fun JmModeRoot(
                         onToggleCollected = vm::setCollected,
                         // 「继续阅读」卡片（§9 第 4 条）：直接回到保存的位置
                         onContinueReading = { albumId -> navController.navigate(JmRoutes.reader(albumId)) },
+                        // 卡片右上角 ✕：清掉「继续阅读」指针，卡片消失
+                        onDismissContinueReading = vm::dismissContinueReading,
                         // 长按多选（用户要求第 1 点）
                         onDeleteFiles = vm::deleteFiles,
                         onRemoveFromLibrary = vm::removeFromLibrary,
