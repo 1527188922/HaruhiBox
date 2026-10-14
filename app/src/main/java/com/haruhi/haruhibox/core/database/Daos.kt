@@ -834,6 +834,30 @@ interface DownloadTaskDao {
     @Query("DELETE FROM t_download_task WHERE id = :id")
     suspend fun deleteById(id: Long)
 
+    /** 某个业务对象的**全部任务行**（不分类型 / 状态），移出书库时清理用。 */
+    @Query("SELECT * FROM t_download_task WHERE bizKey = :bizKey")
+    suspend fun tasksByBizKey(bizKey: String): List<DownloadTaskEntity>
+
+    /** 同 `(type, bizKey)` 的**全部任务行**（不分状态）。 */
+    @Query("SELECT * FROM t_download_task WHERE type = :type AND bizKey = :bizKey")
+    suspend fun tasksByTypeAndKey(type: DownloadType, bizKey: String): List<DownloadTaskEntity>
+
+    @Query("DELETE FROM t_download_task WHERE type = :type AND bizKey = :bizKey")
+    suspend fun deleteByTypeAndKey(type: DownloadType, bizKey: String): Int
+
+    /**
+     * **原子替换**：删掉同 `(type, bizKey)` 的所有旧任务行（连同章节明细），再插入新行。
+     *
+     * 只在提交新任务时调用——调用方已确认当前没有活跃任务，所以这里的旧行都是已结束的
+     * （成功 / 失败 / 取消）。同业务对象同类型只保留最新一条，避免旧行一直堆在任务页历史上。
+     */
+    @Transaction
+    suspend fun replaceByTypeAndKey(type: DownloadType, bizKey: String, task: DownloadTaskEntity): Long {
+        tasksByTypeAndKey(type, bizKey).forEach { deleteChapters(it.id) }
+        deleteByTypeAndKey(type, bizKey)
+        return insert(task)
+    }
+
     /** 完成历史保留最近 N 条（B站是 20 条，§3.3）。 */
     @Query(
         """

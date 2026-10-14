@@ -907,7 +907,8 @@ class JmOnlineSearchViewModel(
      * 搜索结果里点「已入库」= **移出书库**（用户本轮要求）。
      *
      * 与详情页/书库页的「从书库移除」走同一条编排 [JmAlbumCleaner.removeFromLibrary]：
-     * 记录 + 章节清单 + 收藏关联 + 阅读位置 + 本地图片 + 导出成品全清；
+     * 记录 + 章节清单 + 收藏关联 + 阅读位置 + 本地图片 + 任务行 + 导出半成品全清，
+     * **导出成品保留**（用户本轮拍板）；
      * **最近浏览记录与封面保留**（用户第八轮要求第 5 点），所以移出之后这张卡
      * 还能点进详情页看、也能再点一次「加入书库」回来。
      *
@@ -927,15 +928,10 @@ class JmOnlineSearchViewModel(
                     markExistsLocal(item.id, exists = false)
                     _state.update { it.copy(message = "这本已经不在书库里了") }
                 } else {
-                    val result = cleaner.removeFromLibrary(listOf(album))
+                    cleaner.removeFromLibrary(listOf(album))
                     markExistsLocal(item.id, exists = false)
-                    val suffix = if (result.removedExports > 0) {
-                        "（含 ${result.removedExports} 个导出成品）"
-                    } else {
-                        ""
-                    }
                     _state.update {
-                        it.copy(message = "已从书库移除，本地文件已删除（最近浏览记录保留）$suffix")
+                        it.copy(message = "已从书库移除，本地文件已删除（最近浏览记录保留）")
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -2008,7 +2004,7 @@ class JmAlbumDetailViewModel(
     }
 
     /**
-     * 「从书库移除」：记录 + 文件 + 成品 + 封面全清（用户要求第 7 点）。
+     * 「从书库移除」：记录 + 本地图片 + 任务行 + 半成品全清，**导出成品保留**（用户本轮拍板）。
      *
      * 与「删除本地文件」的差别只在于**要不要连记录一起删**。
      * **最近浏览记录保留**（用户要求第 5 点：移出书库不影响"刚看过什么"），
@@ -2017,18 +2013,13 @@ class JmAlbumDetailViewModel(
     fun removeFromLibrary() {
         viewModelScope.launch {
             val album = _state.value.album ?: return@launch
-            val result = runCatching { cleaner.removeFromLibrary(listOf(album)) }.getOrNull()
+            runCatching { cleaner.removeFromLibrary(listOf(album)) }
             refreshLocalStats()
-            val suffix = if (result != null && result.removedExports > 0) {
-                "（含 ${result.removedExports} 个导出成品）"
-            } else {
-                ""
-            }
             _state.update {
                 it.copy(
                     inLibrary = false,
                     removedFromLibrary = true,
-                    message = "已从书库移除，本地文件已删除（最近浏览记录保留）$suffix",
+                    message = "已从书库移除，本地文件已删除（最近浏览记录保留）",
                 )
             }
         }

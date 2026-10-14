@@ -166,8 +166,20 @@ class DownloadTaskRepository(
             Timber.tag("task").d("已有活跃任务，复用：%s %s", type, bizKey)
             return SubmitResult.AlreadyRunning(existing.id, existing.status)
         }
-        val id = dao.insert(
-            DownloadTaskEntity(
+        // 能走到这里说明当前没有活跃任务，同 (type, bizKey) 的旧行都已是结束态（成功/失败/取消）。
+        // 建新任务前把它们（连同章节明细）清掉，同一对象同类型只留最新一条；
+        // 导出任务的半成品中转文件一并删，下载任务**不删图片文件**——用户可能只是想重新下，
+        // 已下好的图要保留（"是否已下载"始终以磁盘为准）。
+        dao.tasksByTypeAndKey(type, bizKey)
+            .filter { it.type.isExport }
+            .forEach { stale ->
+                runCatching { stale.displayName?.let { File(dirs.export, it).delete() } }
+                    .onFailure { Timber.tag("task").w(it, "清理旧导出中转文件失败：%s", stale.displayName) }
+            }
+        val id = dao.replaceByTypeAndKey(
+            type = type,
+            bizKey = bizKey,
+            task = DownloadTaskEntity(
                 type = type,
                 bizKey = bizKey,
                 status = DownloadStatus.QUEUED,
@@ -178,6 +190,9 @@ class DownloadTaskRepository(
         )
         return SubmitResult.Created(id)
     }
+
+    /** 某个业务对象的**全部任务行**（不分类型 / 状态），移出书库时清理用。 */
+    suspend fun tasksByBizKey(bizKey: String): List<DownloadTaskEntity> = dao.tasksByBizKey(bizKey)
 
     // ------------------------------------------------------------------
     // 状态迁移

@@ -328,6 +328,22 @@ class JmExportManager(
         }
     }
 
+    /**
+     * 删除该本子在**私有目录**里的半成品中转文件（`files/library/export/<目录名>.zip|pdf`）。
+     *
+     * 与 [deleteOutputs] 的区别：那边删的是交给系统目录的**成品**（只有用户显式
+     * "删除本地文件"才动），这边删的是没发布成功、或导出被中断后残留在应用私有目录的
+     * **中间产物**。「从书库移除」只清半成品，**成品保留**（用户拍板）。
+     *
+     * @return 删掉的文件个数
+     */
+    suspend fun deleteTemps(album: JmAlbumEntity): Int = withContext(Dispatchers.IO) {
+        val folder = album.albumFolderName ?: return@withContext 0
+        JmExportFormat.entries.count { format ->
+            File(dirs.export, "$folder.${format.extension}").delete()
+        }
+    }
+
     private fun start(taskId: Long) {
         if (jobs[taskId]?.isActive == true) return
         onTaskStarted()
