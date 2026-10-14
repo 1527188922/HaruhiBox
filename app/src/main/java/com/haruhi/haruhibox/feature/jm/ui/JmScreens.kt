@@ -360,8 +360,7 @@ fun JmLibraryScreen(
     if (confirmDeleteFiles) {
         ConfirmDialog(
             title = "删除这 ${selection.size} 本的本地文件？",
-            text = "会删除已下载的图片、导出的 zip/pdf（约 ${formatBytes(selectedAlbums.sumOf { it.localSizeBytes })}）。" +
-                "书库记录、收藏与封面都保留。",
+            text = "会删除已下载的图片、导出的 zip/pdf（约 ${formatBytes(selectedAlbums.sumOf { it.localSizeBytes })}）。",
             confirmText = "删除文件",
             onConfirm = {
                 confirmDeleteFiles = false
@@ -375,10 +374,9 @@ fun JmLibraryScreen(
 
     if (confirmRemove) {
         ConfirmDialog(
-            title = "从书库移除这 ${selection.size} 本？",
-            text = "会删除书库记录、章节清单、收藏关联、阅读位置，" +
-                "以及本地图片与导出的 zip/pdf。最近浏览记录会保留（封面也还在）。此操作不可撤销。",
-            confirmText = "移除并删除",
+            title = "从书库移出这 ${selection.size} 本？",
+            text = "移出书库后会删除本地图片、收藏夹、阅读进度。（不会删除已导出的 zip/pdf）",
+            confirmText = "移出并删除",
             onConfirm = {
                 confirmRemove = false
                 onRemoveFromLibrary?.invoke(selection.toList())
@@ -468,6 +466,7 @@ private fun MultiSelectBar(
                             // 门+向外箭头 = "移出"（方向图标要用 AutoMirrored 版，跟随 RTL）
                             icon = Icons.AutoMirrored.Filled.ExitToApp,
                             label = "移出书库",
+                            tint = MaterialTheme.colorScheme.error,
                             onClick = onRemoveFromLibrary,
                             modifier = Modifier.weight(1f),
                         )
@@ -669,7 +668,7 @@ private fun ContinueReadingCardRow(
                 modifier = Modifier.align(Alignment.TopEnd),
             ) {
                 Icon(
-                    imageVector = Icons.filled.Close,
+                    imageVector = Icons.Default.Close,
                     contentDescription = "关闭继续阅读",
                     modifier = Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -756,8 +755,7 @@ fun JmRecentScreen(
     if (showClearDialog) {
         ConfirmDialog(
             title = "清空最近浏览？",
-            text = "只清空浏览记录，书库、收藏夹与本地文件都不受影响；" +
-                "不在书库里的那几本，封面缓存会一起清掉（下次显示重新联网取）。",
+            text = "只清空浏览记录。（不会删除书库和本地文件）",
             confirmText = "清空",
             onConfirm = { showClearDialog = false; onClearAll() },
             onDismiss = { showClearDialog = false },
@@ -767,13 +765,13 @@ fun JmRecentScreen(
     pendingRemove?.let { albumId ->
         ConfirmDialog(
             title = "从最近浏览移除？",
-            text = "只移除这条浏览记录；书库、收藏夹与本地文件都不受影响。" +
-                "若这本已经不在书库，它的封面缓存也会一起清掉。",
+            text = "只移除这条浏览记录，不删除本地文件",
             confirmText = "移除",
             onConfirm = {
                 pendingRemove = null
                 onRemoveAlbum(albumId)
             },
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { pendingRemove = null },
         )
     }
@@ -1915,7 +1913,12 @@ fun JmFavoritesScreen(
                                 }
                                 if (!row.isDefault) {
                                     TextButton(onClick = { renameTarget = row }) { Text("改名") }
-                                    TextButton(onClick = { deleteTarget = row }) { Text("删除") }
+                                    TextButton(
+                                        onClick = { deleteTarget = row },
+                                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                                    ) {
+                                        Text("删除")
+                                    }
                                 }
                             }
                         }
@@ -1949,9 +1952,9 @@ fun JmFavoritesScreen(
     deleteTarget?.let { target ->
         ConfirmDialog(
             title = "删除「${target.name}」？",
-            text = "只会删除这个收藏夹和里面的归类（当前 ${target.albumCount} 本）。" +
-                "漫画仍然留在书库，已下载的图片也不会被删掉。",
+            text = "确认删除当前收藏夹吗，里面有 ${target.albumCount} 本漫画。（不会删除书库和已下载的图片）",
             confirmText = "删除收藏夹",
+            confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onConfirm = { onDelete(target.id); deleteTarget = null },
             onDismiss = { deleteTarget = null },
         )

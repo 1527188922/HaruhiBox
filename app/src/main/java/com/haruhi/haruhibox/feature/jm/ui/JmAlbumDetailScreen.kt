@@ -48,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -266,11 +267,17 @@ fun JmAlbumDetailScreen(
                         )
                         HorizontalDivider()
                         DropdownMenuItem(
-                            text = { Text("删除本地文件") },
+                            text = { Text("删除文件") },
+                            colors = MenuDefaults.itemColors(
+                                textColor = MaterialTheme.colorScheme.error,
+                            ),
                             onClick = { menuExpanded = false; showDeleteFilesDialog = true },
                         )
                         DropdownMenuItem(
-                            text = { Text("从书库移除") },
+                            text = { Text("移出书库") },
+                            colors = MenuDefaults.itemColors(
+                                textColor = MaterialTheme.colorScheme.error,
+                            ),
                             enabled = state.inLibrary,
                             onClick = { menuExpanded = false; showDeleteRecordDialog = true },
                         )
@@ -421,8 +428,7 @@ fun JmAlbumDetailScreen(
     if (showDeleteFilesDialog) {
         ConfirmDialog(
             title = "删除本地文件？",
-            text = "会删除这本漫画在本机的全部图片（约 ${formatBytes(state.localSizeBytes)}）" +
-                "以及已导出的 zip / PDF；书库记录与收藏会保留。",
+            text = "会删除这本漫画所有下载的图片（约 ${formatBytes(state.localSizeBytes)}）和导出的 zip/pdf。",
             confirmText = "删除文件",
             onConfirm = { showDeleteFilesDialog = false; onDeleteAlbumFiles() },
             confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
@@ -431,10 +437,9 @@ fun JmAlbumDetailScreen(
     }
     if (showDeleteRecordDialog) {
         ConfirmDialog(
-            title = "从书库移除？",
-            text = "会删掉书库记录与章节清单，并连同本机图片、已导出的 zip / PDF 一起清除；" +
-                "收藏夹里的关联也会取消。最近浏览记录会保留（封面也还在）。",
-            confirmText = "移除",
+            title = "从书库移出？",
+            text = "移出书库后会删除本地图片、收藏夹、阅读进度。（不会删除已导出的 zip/pdf）。",
+            confirmText = "移出",
             onConfirm = { showDeleteRecordDialog = false; onDeleteAlbumRecord() },
             confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { showDeleteRecordDialog = false },
@@ -445,7 +450,7 @@ fun JmAlbumDetailScreen(
     pendingDeleteExport?.let { name ->
         ConfirmDialog(
             title = "删除这个导出文件？",
-            text = "会从下载目录里删掉「$name」。漫画本身、已下载的图片与其它成品都不受影响。",
+            text = "会从下载目录里删掉「$name」。",
             confirmText = "删除",
             onConfirm = {
                 pendingDeleteExport = null
@@ -934,7 +939,7 @@ private fun AlbumHeader(
                     }
                 }
                 Spacer(Modifier.height(6.dp))
-                // 成点赞 / 观看数
+                // 点赞数 / 观看数
                 AlbumStatRow(likes = album.likes, views = album.totalViews)
                 Spacer(Modifier.height(8.dp))
                 Row(
@@ -1012,7 +1017,7 @@ private fun AlbumHeader(
         parseStringArray(album.tags).takeIf { it.isNotEmpty() }?.let { tags ->
             Spacer(Modifier.height(8.dp))
             Text(
-                text = tags.joinToString(" · "),
+                text = tags.filter { it.isNotBlank() }.joinToString(" · ") { "#${it.trim()}" },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
@@ -1231,7 +1236,10 @@ private fun ChapterRowItem(
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                         DropdownMenuItem(
-                            text = { Text("删除本话文件") },
+                            colors = MenuDefaults.itemColors(
+                                textColor = MaterialTheme.colorScheme.error,
+                            ),
+                            text = { Text("删除图片") },
                             onClick = { menuExpanded = false; confirmDelete = true },
                         )
                     }
@@ -1242,10 +1250,9 @@ private fun ChapterRowItem(
 
     if (confirmDelete) {
         ConfirmDialog(
-            title = "删除「${chapter.title}」的本地文件？",
-            text = "只删除这一话已经下载的图片，章节清单、书库记录与收藏都保留。" +
-                "之后可以重新下载。",
-            confirmText = "删除文件",
+            title = "删除「${chapter.title}」的图片？",
+            text = "删除这一话已经下载的图片。（不删除其他话的图片）",
+            confirmText = "删除图片",
             onConfirm = { confirmDelete = false; onDeleteFiles() },
             confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { confirmDelete = false },
