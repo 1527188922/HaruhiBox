@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -66,6 +67,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -95,6 +97,23 @@ import com.haruhi.haruhibox.ui.theme.WarningOrangeLight
 
 /** 简介收起时显示的行数。 */
 private const val DESCRIPTION_COLLAPSED_LINES = 3
+
+/**
+ * 章节列表一屏最多放多少话。
+ *
+ * 单行本动辄几十上百话，全铺出来会把「导出文件」和简介压到看不见的地方，
+ * 进页面第一眼看到的应该是最前面几话。所以默认只放 [CHAPTER_PAGE_SIZE] 话，
+ * 底部点一次「查看更多章节」再多放 [CHAPTER_PAGE_SIZE] 话。
+ */
+private const val CHAPTER_PAGE_SIZE = 10
+
+/**
+ * 「查看更多章节」那一行在 LazyColumn 里的 key。
+ *
+ * 提成常量是为了让**点击处和布局处用同一个值**：点击时要按这个 key 反查它在列表里的下标，
+ * 字符串写两遍迟早会有一处改漏，那时表现是"点了一下什么都不动"，而且不报错。
+ */
+private const val CHAPTER_LOAD_MORE_KEY = "chapter_load_more"
 
 /**
  * 眼睛图标（观看数）。
@@ -147,6 +166,9 @@ private val EyeIcon: ImageVector = ImageVector.Builder(
  * - 封面区作者下面显示**点赞 / 观看数**（爱心 / 眼睛图标，`likes` / `total_views`），
  *   本地占用体积归到章节区标题（"章节 · 0/1 已下载（7.4 MB）"），同一屏里不重复说两遍；
  * - 章节行显示"已下载 / 部分下载 x/y / 未下载"；
+ * - **章节列表默认折叠成 10 话**，底部点一次「查看更多章节」再多放 10 话，
+ *   放完才出现「共 N 话」的到底线（用户要求）；加载多少、什么时候加载都由用户点，
+ *   不做"滑到底自动追加"——那会让人永远滑不到列表尽头；
  * - 「收藏夹」面板支持加入/移出/移动（用户要求第 6 点）；
  * - 更多菜单承接 ZIP/PDF 导出（P4 接）、删除文件、从书库移除。
  *
@@ -216,6 +238,28 @@ fun JmAlbumDetailScreen(
     var showDownloadSheet by remember { mutableStateOf(false) }
     // 待删除的导出成品文件名（null = 没有待确认的删除）
     var pendingDeleteExport by remember { mutableStateOf<String?>(null) }
+
+    // 章节折叠：当前放出多少话，默认 CHAPTER_PAGE_SIZE（用户要求：默认 10 话，底部点一次多放 10 话）。
+    //
+    // 为什么不拿 `state.chapters` 当 remember 的 key：下载进度的每一次通知
+    // 都会让 ViewModel 重算整个列表（`loadLocalStats`），键一变就把用户已经展开的
+    // 部分重新折回 10 话——正一边下一边看的用户会看到列表自己缩回去。
+    // 这里是纯界面状态，用 rememberSaveable 顺带扛住旋转/重建即可；
+    // 换本子走的是新的导航 entry（新的 ViewModel 与新的 composition），天然从 10 话开始。
+    var visibleChapterCount by rememberSaveable { mutableStateOf(CHAPTER_PAGE_SIZE) }
+
+    // 章节列表的滚动状态：点「查看更多章节」之后要把新放出来的那一段推到眼前（下面解释为什么）。
+    val chapterListState = rememberLazyListState()
+    // 待滚动到的下标（null = 没有待办）。用"先记下标、再等重组完成"两步走，
+    // 而不是在点击回调里直接 animateScrollToItem：那时列表还是旧的，
+    // 下标指向的是「查看更多章节」那一行本身。
+    var pendingChapterScroll by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(pendingChapterScroll) {
+        pendingChapterScroll?.let { index ->
+            chapterListState.animateScrollToItem(index)
+            pendingChapterScroll = null
+        }
+    }
 
     // 一次性提示统一走 MessageEffect：先消费、再交给根部弹（切页不会重放）
     MessageEffect(state.message, onConsume = onConsumeMessage, onShow = onMessage)
@@ -335,6 +379,7 @@ fun JmAlbumDetailScreen(
                     }
                 }
                 else -> LazyColumn(
+                    state = chapterListState,
                     contentPadding = PaddingValues(bottom = 24.dp),
                     modifier = Modifier.fillMaxSize(),
                 ) {
@@ -390,12 +435,45 @@ fun JmAlbumDetailScreen(
                             )
                         }
                     } else {
-                        items(state.chapters, key = { it.chapterId }) { chapter ->
+                        // 折叠：只渲染前 visibleChapterCount 话。take 越界时自动退化成"全部"，
+                        // 所以刷新后章节变少也不会露出空白。
+                        val visibleChapters = state.chapters.take(visibleChapterCount)
+                        items(visibleChapters, key = { it.chapterId }) { chapter ->
                             ChapterRowItem(
                                 chapter = chapter,
                                 onOpen = { onReadChapter(chapter.chapterId) },
                                 onDeleteFiles = { onDeleteChapterFiles(chapter.chapterId) },
                             )
+                        }
+                        if (visibleChapters.size < state.chapters.size) {
+                            // 还有没放出来的：底部给一个"整行可点"的入口，点一次多放 10 话。
+                            // 为什么不做成自动加载（滑到底自己追加）：自动加载会让用户
+                            // 永远滑不到列表尽头，想找底部那块「导出文件」就得一直等它加载；
+                            // 手动点一下，加载多少、什么时候加载都在用户手里。
+                            item(key = CHAPTER_LOAD_MORE_KEY) {
+                                ChapterLoadMoreRow(
+                                    shown = visibleChapters.size,
+                                    total = state.chapters.size,
+                                    onClick = {
+                                        // 先记下这一行现在的位置：追加之后，原来这一行的下标
+                                        // 正好就是**第一话新放出来的章节**。
+                                        pendingChapterScroll = chapterListState.layoutInfo
+                                            .visibleItemsInfo
+                                            .firstOrNull { it.key == CHAPTER_LOAD_MORE_KEY }
+                                            ?.index
+                                        visibleChapterCount = minOf(
+                                            visibleChapterCount + CHAPTER_PAGE_SIZE,
+                                            state.chapters.size,
+                                        )
+                                    },
+                                )
+                            }
+                        } else if (state.chapters.size > CHAPTER_PAGE_SIZE) {
+                            // 全部放完了才说一句"到底了"：短列表本来就没折叠，
+                            // 再多一行只会是把没有信息量的东西摆出来。
+                            item(key = "chapter_list_end") {
+                                ChapterListEndRow(total = state.chapters.size)
+                            }
                         }
                     }
                 }
@@ -1257,6 +1335,90 @@ private fun ChapterRowItem(
             confirmButtonColors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             onDismiss = { confirmDelete = false },
         )
+    }
+}
+
+/**
+ * 章节列表底部的「查看更多章节」（用户要求）。
+ *
+ * 交互取舍：
+ * - **整行可点**，与「导出文件」的折叠头同一个套路：能点的是一整行，不用瞄准小箭头；
+ * - 行内三段式，左到右正好是"能做什么 → 还剩多少 → 往哪个方向"：
+ *   「查看更多章节」+「还有 42 话」+ 向下箭头；
+ * - **不自动加载**：滑到底由用户自己决定要不要继续放。自动加载会让人永远滑不到尽头，
+ *   想找列表下面的东西就只能一直等；
+ * - **点完把新放出来的那一段推到眼前**（调用方负责滚动）：LazyColumn 会锚定第一个可见项，
+ *   插在它后面的 10 话不会自己冒出来——不滚的话用户点了只看见按钮消失，
+ *   拿不到"又放出来 10 话"的反馈；
+ * - 用 `surfaceVariant` 卡片而不是实心按钮：它在页面里是"次级动作"，
+ *   不该比头部的「下载 / 阅读」更抢眼。
+ */
+@Composable
+private fun ChapterLoadMoreRow(
+    shown: Int,
+    total: Int,
+    onClick: () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(vertical = 12.dp),
+        ) {
+            Text(
+                text = "查看更多章节",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(8.dp))
+            // 还剩多少说清楚：用户能预判点几下才到底，不必盲点
+            Text(
+                text = "还有 ${total - shown} 话",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 章节列表彻底到底的一行：两侧细分割线夹一句「共 52 话」。
+ *
+ * 折叠过的列表必须有个"到底了"的信号——否则最后点出来的 10 话看起来和
+ * "还没加载完"没有区别，用户会一直往下拉。
+ */
+@Composable
+private fun ChapterListEndRow(total: Int) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+    ) {
+        HorizontalDivider(modifier = Modifier.weight(1f))
+        Text(
+            text = "共 $total 话",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 10.dp),
+        )
+        HorizontalDivider(modifier = Modifier.weight(1f))
     }
 }
 
