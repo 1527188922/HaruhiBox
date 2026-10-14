@@ -481,7 +481,7 @@ class JmLibraryViewModel(
     // 多选批量操作（用户要求第 1、2 点）
     // ------------------------------------------------------------------
 
-    /** 批量删除本地文件：图片 + 导出成品，**不动记录与封面**。 */
+    /** 批量删除本地文件：图片 + 导出成品 + 导出半成品 + 任务行，**不动记录与封面**。 */
     fun deleteFiles(ids: List<Long>) {
         viewModelScope.launch {
             val albums = albumsByIds(ids)
@@ -1985,8 +1985,9 @@ class JmAlbumDetailViewModel(
     }
 
     /**
-     * 「删除本地文件」：图片 + 导出成品 + 封面缓存，**保留书库记录**（用户要求第 6 点）。
+     * 「删除本地文件」：图片 + 导出成品 + 导出半成品 + 任务行，**保留书库记录与封面**。
      *
+     * 在跑的任务会先被停掉（下载落 `PAUSED`、导出停 Job）再删任务行；
      * 导出成品放在系统下载目录，容易漏删，所以统一交给 [JmAlbumCleaner] 编排。
      */
     fun deleteAlbumFiles() {

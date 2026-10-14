@@ -15,7 +15,7 @@ import timber.log.Timber
  * | `files/library/jm/<本子目录>` | 章节图片 | [JmRepository.deleteAlbumFiles] |
  * | `files/library/export/<目录名>.zip|pdf` | 未发布完的导出**半成品** | [JmExportManager.deleteTemps] |
  * | 系统下载目录 `Download/HaruHiBox` | 导出的 zip / pdf **成品** | [JmExportManager.deleteOutputs]（仅"删除本地文件"） |
- * | `t_download_task` | 这本的下载 / 导出任务行 | [JmAlbumCleaner.removeFromLibrary] 内联清理 |
+ * | `t_download_task` | 这本的下载 / 导出任务行 | [deleteFiles] / [removeFromLibrary] 内联清理 |
  * | Coil 磁盘缓存 `files/covers` | 封面 | [CoverCache.evict] |
  * | 数据库 | 书库成员 / 章节清单 / 收藏关联 / 阅读位置 | [JmRepository.deleteAlbums] |
  *
@@ -24,9 +24,9 @@ import timber.log.Timber
  * （它不做展示，展示来自书库、收藏夹、最近预览三个入口）。
  *
  * 两个入口的差别：
- * - **删除本地文件**：图片 + 导出成品都清，保留书库记录与封面（用户要求第 6 点）；
- * - **从书库移除**：库表成员关系 + 任务行 + 本地图片 + 半成品全清，
- *   **导出成品保留**（用户本轮拍板：已导出到系统下载目录的包不该被顺手删掉），
+ * - **删除本地文件**：图片 + 导出成品 + 任务行 + 半成品都清，保留书库记录与封面；
+ * - **从书库移除**：在上面的基础上多清库表成员关系（`t_jm_library` 等），
+ *   但**导出成品保留**（用户拍板：已导出到系统下载目录的包不该被顺手删掉），
  *   封面按"最近浏览里还有没有这本"决定。
  *
  * ## 封面什么时候才该清（用户第八轮要求第 3 点）
@@ -71,11 +71,17 @@ class JmAlbumCleaner(
     private val coverCache: CoverCache,
 ) {
 
-    /** 只删本地文件：图片 + 导出成品，**保留记录与封面**。 */
+    /**
+     * 只删本地文件：图片 + 导出成品 + 任务行 + 导出半成品，**保留记录与封面**。
+     *
+     * 会先把这本**在跑的任务**停掉（下载落 `PAUSED`、导出停 Job）再删任务行，
+     * 否则任务会继续往刚被删掉的目录里写东西；导出**成品**在系统下载目录，这里一并删。
+     */
     suspend fun deleteFiles(albums: List<JmAlbumEntity>): AlbumCleanup = withContext(Dispatchers.IO) {
         var freed = 0L
         var removedExports = 0
         albums.forEach { album ->
+            stopTasksAndTemps(album)
             freed += runCatching { repo.deleteAlbumFiles(album.albumFolderName) }
                 .onFailure { Timber.tag("jm").w(it, "删除本子目录失败：%s", album.albumFolderName) }
                 .getOrDefault(0L)
@@ -87,7 +93,7 @@ class JmAlbumCleaner(
     /**
      * 从书库移除：**记录 + 本地图片 + 任务行 + 半成品**全清，**导出成品保留**。
      *
-     * 与「删除本地文件」的差别在于**要不要连记录一起删**；而导出**成品保留**是用户拍板：
+     * 与「删除本地文件」的差别在于**要不要连记录一起删**、以及**导出成品保不保留**；
      * 移出书库只是把这本书从书库里摘掉，已经导出到系统下载目录的 zip/pdf 不该被顺手删。
      *
      * 「最近浏览」本身**不动**（用户第八轮要求第 5 点）：移出书库影响的是书库与本地文件，
@@ -97,36 +103,40 @@ class JmAlbumCleaner(
     suspend fun removeFromLibrary(albums: List<JmAlbumEntity>): AlbumCleanup = withContext(Dispatchers.IO) {
         var freed = 0L
         albums.forEach { album ->
-            // 1. 先停掉这本在跑的任务，再从根上删掉任务行（含章节明细）。
-            //    导出任务靠 [JmExportManager.cancel] 停 Job、下载任务靠 markPaused 落库：
-            //    执行器每个安全检查点都读任务状态，状态落库 / 行被删之后协程自会停下，
-            //    不会继续往刚被删掉的目录里写东西。
-            runCatching {
-                tasks.tasksByBizKey(album.id.toString()).forEach { task ->
-                    if (task.type.isExport) exports.cancel(task.id) else tasks.markPaused(task.id)
-                    tasks.delete(task.id)
-                }
-            }.onFailure { Timber.tag("jm").w(it, "清理任务失败：%s", album.id) }
-
-            // 2. 删私有目录里的半成品中转文件；系统目录的成品**保留**。
-            runCatching { exports.deleteTemps(album) }
-                .onFailure { Timber.tag("jm").w(it, "清理导出半成品失败：%s", album.albumFolderName) }
-
-            // 3. 删本地图片目录
+            stopTasksAndTemps(album)
+            // 删本地图片目录
             freed += runCatching { repo.deleteAlbumFiles(album.albumFolderName) }
                 .onFailure { Timber.tag("jm").w(it, "删除本子目录失败：%s", album.albumFolderName) }
                 .getOrDefault(0L)
         }
 
-        // 4. 删书库记录（成员 / 章节清单 / 收藏关联 / 阅读位置）
+        // 删书库记录（成员 / 章节清单 / 收藏关联 / 阅读位置）
         val ids = albums.map { it.id }
         runCatching { repo.deleteAlbums(ids) }
             .onFailure { Timber.tag("jm").w(it, "删除书库记录失败：%s", ids) }
 
-        // 5. 封面：书库与最近浏览里都没有了才清
+        // 封面：书库与最近浏览里都没有了才清
         evictCoversIfUnused(ids)
 
         AlbumCleanup(freed, removedExports = 0, removedRecords = true)
+    }
+
+    /**
+     * 停掉这本在跑的任务、删掉任务行（含章节明细），并清理私有目录里的导出半成品。
+     *
+     * 下载任务用 `DownloadTaskRepository.markPaused` 落库、导出任务用
+     * [JmExportManager.cancel] 停 Job：执行器每个安全检查点都读任务状态，
+     * 状态落库 / 行被删之后协程自会停下，不会继续往刚被删掉的目录里写东西。
+     */
+    private suspend fun stopTasksAndTemps(album: JmAlbumEntity) {
+        runCatching {
+            tasks.tasksByBizKey(album.id.toString()).forEach { task ->
+                if (task.type.isExport) exports.cancel(task.id) else tasks.markPaused(task.id)
+                tasks.delete(task.id)
+            }
+        }.onFailure { Timber.tag("jm").w(it, "清理任务失败：%s", album.id) }
+        runCatching { exports.deleteTemps(album) }
+            .onFailure { Timber.tag("jm").w(it, "清理导出半成品失败：%s", album.albumFolderName) }
     }
 
     /** 清空最近浏览：记录清掉，**不在书库里的**那些封面也一起失效。 */
