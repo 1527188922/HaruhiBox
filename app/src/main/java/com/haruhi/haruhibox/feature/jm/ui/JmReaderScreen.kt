@@ -39,7 +39,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
@@ -72,6 +71,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 
 /**
@@ -82,6 +83,8 @@ import kotlin.math.abs
  * - 单击显隐控件栏；双指缩放、双击放大/还原；缩放后单指拖动看细节，
  *   此时**不带动列表滚动**；
  * - 控件栏：返回、章节名、章节选择、进度、上一话/下一话（未下载的下一话给"下载"出口）；
+ * - **底部进度条可以拖动**（用户要求：拖动进度条跳页，图片跟着走），松手才真正跳，
+ *   两种阅读方式都会跟着跳：纵向连续滚到那一页页首，横向分页直接切到那一页；
  * - 位置自动持久化（本子 + 章节 + 图片 + 页内比例），离开页面立刻落库；
  * - 长图用固定的宽高比占位，图片加载完成前后**布局不跳**；
  * - 缺图显示具体页码与重试，不静默跳过。
@@ -117,6 +120,35 @@ fun JmReaderScreen(
     val background = readerBackgroundColor(state.preferences.background)
     val contentColor = readerContentColor(state.preferences.background)
 
+    // 进度条拖动：拖动过程中只记"手指落在哪一页"给文案用，**松手才真的跳**
+    // （每跨一页就跳一次的话，几十张图会被连续丢弃重建，反而卡）。
+    // 跳转请求挂在 pendingSeek 上，两种阅读方式都盯着它做一次性跳转，做完自己清掉。
+    var pendingSeek by remember { mutableStateOf<PendingSeek?>(null) }
+    var dragSeekIndex by remember { mutableStateOf<Int?>(null) }
+
+    val commitSeek: (Int) -> Unit = { pageIndex ->
+        val target = pageIndex.coerceIn(0, (state.totalPages - 1).coerceAtLeast(0))
+        dragSeekIndex = null
+        // version 递增：连续两次拖到同一页也算两次（第二次是"回到那一页页首"）
+        pendingSeek = PendingSeek((pendingSeek?.version ?: 0) + 1, target)
+        // 跳到没下过的页时，列表只组合可视项；目标页自己会按需联网取回来。
+        // 这里先点一下目标页与相邻页，落地时少等一下网络（与滚动触发的取图是同一套去重逻辑）。
+        (target - SEEK_PREFETCH_RANGE..target + SEEK_PREFETCH_RANGE).forEach { index ->
+            if (index in state.pages.indices) onRequestPage(index)
+        }
+    }
+
+    // 跳转请求的 key 用 version（不用页下标：连拖两次到同一页也要各算一次），
+    // 再顺手从 state 里读目标页的就绪状态。key 里**不放 state.pages**：
+    // 每取回一页它都会变，放进去会让跳转协程在落地前被反复重启。
+    val seekTaskKey = pendingSeek?.version ?: -1
+    val seekTargetPage = state.pages.getOrNull(pendingSeek?.index ?: -1)
+    // "已经有结论"：图到货、或已经判定取失败，都要放行——取不回来的页也要跳过去看到重试按钮，
+    // 否则网络断了的时候跳到一张取不回的页会永远停在原地。等不到结论的兜底见 SEEK_WAIT_FOR_PAGE_MS。
+    val seekTargetReady = seekTargetPage?.let {
+        it.available || it.state == ReaderPage.PageState.Failed
+    } ?: false
+
     // 屏幕常亮与亮度：直接作用在 Activity 窗口上，离开阅读器立刻还原
     ReaderWindowEffect(state.preferences)
 
@@ -144,6 +176,10 @@ fun JmReaderScreen(
                     onToggleControls = onToggleControls,
                     onRequestPage = onRequestPage,
                     onTapRetry = onRetryPage,
+                    seekTaskKey = seekTaskKey,
+                    seekTargetIndex = pendingSeek?.index,
+                    seekTargetReady = seekTargetReady,
+                    onSeekHandled = { pendingSeek = null },
                 )
 
                 else -> VerticalReader(
@@ -152,6 +188,10 @@ fun JmReaderScreen(
                     onToggleControls = onToggleControls,
                     onRequestPage = onRequestPage,
                     onTapRetry = onRetryPage,
+                    seekTaskKey = seekTaskKey,
+                    seekTargetIndex = pendingSeek?.index,
+                    seekTargetReady = seekTargetReady,
+                    onSeekHandled = { pendingSeek = null },
                 )
             }
 
@@ -181,6 +221,10 @@ fun JmReaderScreen(
                     state = state,
                     contentColor = contentColor,
                     background = background,
+                    controlsVisible = state.controlsVisible,
+                    dragSeekIndex = dragSeekIndex,
+                    onSeekDrag = { dragSeekIndex = it },
+                    onSeekCommit = commitSeek,
                     onPreviousChapter = onPreviousChapter,
                     onNextChapter = onNextChapter,
                     onDownloadChapter = onDownloadChapter,
@@ -237,6 +281,24 @@ fun JmReaderScreen(
 // 两种阅读方式
 // ======================================================================
 
+/**
+ * 跳页请求。
+ *
+ * [version] 是"第几次拖动"，[index] 是目标页。带 version 不是多余的：
+ * 数据类的相等性会把它算进去，所以**连续两次拖到同一页**也会各触发一次跳转
+ * （第二次用户可能正是想"回到那一页页首"），而不会因为 index 没变就被 Compose 吞掉。
+ */
+private data class PendingSeek(val version: Int, val index: Int)
+
+/** 拖动进度条时往目标页前后各预取几页（与滚动触发的取图共用同一套去重）。 */
+private const val SEEK_PREFETCH_RANGE = 2
+
+/** 纵向跳页最多重试几帧（约 1 秒）；到不了位就放弃，位置自会由正常滚动回报修正。 */
+private const val SEEK_MAX_FRAMES = 60
+
+/** 拖到一页还没下过的图时，最多等它取回来再跳；等不到也照跳（让用户看到占位/重试）。 */
+private const val SEEK_WAIT_FOR_PAGE_MS = 1_500L
+
 @Composable
 private fun VerticalReader(
     state: ReaderUiState,
@@ -244,6 +306,10 @@ private fun VerticalReader(
     onToggleControls: () -> Unit,
     onRequestPage: (Int) -> Unit,
     onTapRetry: (Int) -> Unit,
+    seekTaskKey: Int,
+    seekTargetIndex: Int?,
+    seekTargetReady: Boolean,
+    onSeekHandled: () -> Unit,
 ) {
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = state.startPage.coerceIn(0, (state.pages.size - 1).coerceAtLeast(0)),
@@ -261,6 +327,35 @@ private fun VerticalReader(
                 listState.scrollToItem(target, (height * state.startOffsetRatio).toInt())
             }
         }
+    }
+
+    // 拖动进度条后的跳转（用户要求：拖进度条，图片跟着走）。
+    // key 是"这一次跳页请求"，**不认 currentPage**——否则滚过去之后自己的
+    // onPositionChanged 又会把它叫醒，来回打架。
+    //
+    // 就绪状态用 rememberUpdatedState 取：它变化时**不能**重跑这个协程（重跑等于重新等一次），
+    // 所以只能让 snapshotFlow 去读那个一直更新的引用。
+    val readyNow by rememberUpdatedState(seekTargetReady)
+    val latestSeekKey by rememberUpdatedState(seekTaskKey)
+    LaunchedEffect(seekTaskKey, state.currentChapter?.chapterId) {
+        val target = seekTargetIndex ?: return@LaunchedEffect
+        // 目标页还没图时先等一下：等它到货再滚，长图占位高度不会先把位置算错。
+        // 最多等 [SEEK_WAIT_FOR_PAGE_MS]，等不到也照样跳（那一页会显示占位/重试），不能让用户卡住。
+        withTimeoutOrNull(SEEK_WAIT_FOR_PAGE_MS) {
+            snapshotFlow { readyNow }.first { it }
+        }
+        // 等的过程中用户又拖了一次：交给新的那次，别在这儿多滚一下
+        if (latestSeekKey != seekTaskKey) return@LaunchedEffect
+        // 目标页落进可视窗口之后才收工：中间那几帧布局还在跑，滚动会被"拉回"上一页。
+        // 每帧重新请求一次，避免滚动被 `LazyColumn` 的其它测量顺带吃掉；
+        // 60 帧还没到位就不管了（正常最多两三帧），不能让协程永远转下去。
+        var frames = 0
+        while (listState.layoutInfo.visibleItemsInfo.none { it.index == target } && frames < SEEK_MAX_FRAMES) {
+            listState.requestScrollToItem(target)
+            androidx.compose.runtime.withFrameNanos { }
+            frames++
+        }
+        onSeekHandled()
     }
 
     // 当前页与页内比例：用 snapshotFlow 主动观察，而不是在 composition 里读 layoutInfo
@@ -302,11 +397,30 @@ private fun HorizontalReader(
     onToggleControls: () -> Unit,
     onRequestPage: (Int) -> Unit,
     onTapRetry: (Int) -> Unit,
+    seekTaskKey: Int,
+    seekTargetIndex: Int?,
+    seekTargetReady: Boolean,
+    onSeekHandled: () -> Unit,
 ) {
     val pagerState = rememberPagerState(
         initialPage = state.startPage.coerceIn(0, (state.pages.size - 1).coerceAtLeast(0)),
         pageCount = { state.pages.size },
     )
+
+    // 横向分页：切一页就到位，图没到货也让 Pager 先显示占位（所以只等一小会儿）。
+    // 同纵向：就绪状态走 rememberUpdatedState，变化时不能重启这个协程。
+    val readyNow by rememberUpdatedState(seekTargetReady)
+    val latestSeekKey by rememberUpdatedState(seekTaskKey)
+    LaunchedEffect(seekTaskKey, state.currentChapter?.chapterId) {
+        val target = seekTargetIndex ?: return@LaunchedEffect
+        withTimeoutOrNull(SEEK_WAIT_FOR_PAGE_MS) {
+            snapshotFlow { readyNow }.first { it }
+        }
+        // 等的过程中用户又拖了一次：交给新的那次
+        if (latestSeekKey != seekTaskKey) return@LaunchedEffect
+        pagerState.scrollToPage(target)
+        onSeekHandled()
+    }
 
     val currentOnPositionChanged by rememberUpdatedState(onPositionChanged)
     LaunchedEffect(pagerState, state.currentChapter?.chapterId) {
@@ -550,7 +664,8 @@ private fun ReaderTopBar(
  * 阅读器的底部控件（用户要求第 3 点）。
  *
  * 三层信息：
- * 1. **进度条**：当前页 / 总页数，滑动时实时跟着走；
+ * 1. **进度条（可拖动）**：当前页 / 总页数；拖动时实时显示"松手跳到第 N 页"，
+ *    **松手才真的跳**——两种阅读方式都会跟着滚/切（用户要求：拖进度条图片跟着走）；
  * 2. 章节名与位置（"第 3 话 · 12/34 页"）；
  * 3. 操作：上一话 / **下载本话** / **收藏** / 下一话。
  *
@@ -562,6 +677,10 @@ private fun ReaderBottomBar(
     state: ReaderUiState,
     contentColor: androidx.compose.ui.graphics.Color,
     background: androidx.compose.ui.graphics.Color,
+    controlsVisible: Boolean,
+    dragSeekIndex: Int?,
+    onSeekDrag: (Int?) -> Unit,
+    onSeekCommit: (Int) -> Unit,
     onPreviousChapter: () -> Unit,
     onNextChapter: () -> Unit,
     onDownloadChapter: () -> Unit,
@@ -573,20 +692,41 @@ private fun ReaderBottomBar(
             .background(background.copy(alpha = 0.92f))
             .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
-        // 顶部放一条细进度条：翻页时进度一眼可见
-        LinearProgressIndicator(
-            progress = {
-                if (state.totalPages <= 0) {
-                    0f
-                } else {
-                    (state.currentPage + 1).toFloat() / state.totalPages.toFloat()
+        // 进度条：值取"当前页在整话里的位置"，第 1 页在最左、最后一页在最右，
+        // 与下面的"12/34 页"永远对得上。拖动时先只改本地状态，松手才提交跳转。
+        //
+        // 这里必须自己存一份拖动中的值：`Slider(value = ...)` 是**受控**的，
+        // 外部值不动，滑块就不会动（跟 Jetpack Compose 的 Slider 语义一致）。
+        var dragProgress by remember(state.currentChapter?.chapterId) { mutableStateOf<Float?>(null) }
+        val progress = dragProgress ?: state.seekProgress
+        Slider(
+            value = progress,
+            onValueChange = { ratio ->
+                if (controlsVisible) {
+                    dragProgress = ratio
+                    onSeekDrag(state.pageIndexAt(ratio))
                 }
             },
+            onValueChangeFinished = {
+                onSeekDrag(null)
+                onSeekCommit(state.pageIndexAt(progress))
+                // 松手后交回给真实位置：跳转成功时它就已经是新页了，不会弹回去
+                dragProgress = null
+            },
+            valueRange = 0f..1f,
+            // 每一页一档，滑块只会停在整页上，不会出现"第 12.4 页"
+            steps = (state.totalPages - 2).coerceAtLeast(0),
+            enabled = state.totalPages > 1,
+            colors = androidx.compose.material3.SliderDefaults.colors(
+                thumbColor = contentColor,
+                activeTrackColor = contentColor,
+                inactiveTrackColor = contentColor.copy(alpha = 0.25f),
+                disabledThumbColor = contentColor.copy(alpha = 0.4f),
+                disabledActiveTrackColor = contentColor.copy(alpha = 0.25f),
+                disabledInactiveTrackColor = contentColor.copy(alpha = 0.15f),
+            ),
             modifier = Modifier.fillMaxWidth(),
-            color = contentColor,
-            trackColor = contentColor.copy(alpha = 0.25f),
         )
-        Spacer(Modifier.height(4.dp))
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -601,14 +741,14 @@ private fun ReaderBottomBar(
                 modifier = Modifier.weight(1f),
             )
             Text(
-                text = when {
+                text = dragSeekIndex?.let { "松手跳到第 ${it + 1} 页" } ?: when {
                     state.pendingCount > 0 -> "加载中 ${state.pendingCount}"
                     state.failedCount > 0 -> "有 ${state.failedCount} 页失败"
                     state.cachedCount >= state.totalPages && state.totalPages > 0 -> "已缓存"
                     else -> ""
                 },
                 style = MaterialTheme.typography.labelSmall,
-                color = contentColor.copy(alpha = 0.7f),
+                color = contentColor.copy(alpha = if (dragSeekIndex != null) 0.95f else 0.7f),
             )
         }
         Spacer(Modifier.height(2.dp))

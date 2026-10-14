@@ -2,7 +2,7 @@
 
 > 计划原文：`docs/android-app-plan.md`（= `2026-10-05-android-jm-bilibili-app.md`）
 > 跨功能硬约束：`docs/CONVENTIONS.md`（封面加载规范等）
-> 最后更新：2026-10-12
+> 最后更新：2026-10-14
 
 ## 目录结构决策
 
@@ -78,6 +78,7 @@ app/src/main/java/com/haruhi/haruhibox/
 | 任务页（进行中 / 已完成、暂停恢复取消重试、清空历史、角标） | ✅ 代码 | `feature/jm/ui/JmTaskScreen.kt` + `JmTaskViewModel.kt` |
 | 阅读器（纵向连续 / 横向分页 / 右到左） | ✅ 代码 | `feature/jm/ui/JmReaderScreen.kt` |
 | 单击显隐控件、双指缩放、双击放大还原、放大后拖动 | ✅ 代码 | `PageZoomState` + 自写手势（不用 `transformable`，见下） |
+| **进度条可拖动跳页**（松手才跳，纵向滚到那页 / 横向切到那页） | ✅ 代码 | `ReaderBottomBar` 的 `Slider` + `ReaderUiState.seekProgress` / `pageIndexAt`，测试 4 个用例 |
 | 章节选择、上一话/下一话、缺图页与重试 | ✅ 代码 | 阅读器控件栏 |
 | 阅读位置持久化（本子+章节+图片+页内比例，去抖 400ms） | ✅ | `JmReadingRepository`，测试 7 个用例 |
 | 书库「继续阅读」卡片 + 详情页主按钮三态 | ✅ 代码 | `ContinueReadingCard`、`PrimaryAction` |
@@ -519,6 +520,20 @@ app/src/main/java/com/haruhi/haruhibox/
 > 顺带说明：`existsLocal` 这个名字在搜索结果里表达的其实是"**在不在书库**"（`existingIds` 查的是书库成员表），
 > 所以移出之后必须刷成 false，否则按钮会一直停在「已入库」。
 
+### 第二十八轮反馈：阅读器进度条可拖动（2026-10-14）
+
+| # | 反馈 | 落实方式 | 验证 |
+|---|---|---|---|
+| Z1 | 漫画观看页 `JmReaderScreen` 要支持**进度条拖动**，图片跟着走 | 底栏原来那条只读的 `LinearProgressIndicator` 换成 Material3 `Slider`（两条阅读方式共用），并新增 `ReaderUiState.seekProgress` / `pageIndexAt` 两个纯函数把"页"和"滑块比例"互转：<br>① 比例按**页下标**算——第 1 页在最左（0f）、最后一页在最右（1f），这样首尾都精确对得上，不会"拖到最左却不是第 1 页"，也不会"已经是最后一页但没满格"；<br>② `steps = 页数 - 2`，滑块**只停在整页上**，不会出现"第 12.4 页"；<br>③ **松手才跳**（`onValueChangeFinished`）：拖动过程中只更新一句"松手跳到第 N 页"的提示——每跨一页就真跳一次的话，几十张图会被连续丢弃重建，反而卡；<br>④ 拖动中的值存在 `dragProgress` 里：`Slider(value = …)` 是**受控**的，外部值不动滑块就不会动；<br>⑤ 跳转是**两种方式各做一次**：纵向用 `LazyListState.requestScrollToItem`（每帧重发一次、最多 60 帧，避免被 `LazyColumn` 的测量顺带吃掉；到位后才收工，页面才不会"拉回上一页"），横向用 `PagerState.scrollToPage`；<br>⑥ 跳页请求用 `PendingSeek(version, index)` 表示，**只认它、不认 `currentPage`**——否则跳过去之后自己的 `onPositionChanged` 又把它叫醒，来回打架；就绪状态走 `rememberUpdatedState` + `snapshotFlow`（放进 key 会让协程在落地前反复重启）；<br>⑦ 目标页还没图时**最多等 1.5 秒**再跳（长图占位高度不跳，但等不到也照跳，不让用户卡住）；取失败的页也照样跳过去，好让那一页显示"第 N 页没取回来 + 重试"；顺带预取目标页前后各 2 页 | 新增 4 个纯逻辑用例（首尾比例与页签一致 / 比例↔页下标往返、出轨道也不越界 / 没有页与只剩一页时不崩不除零）；本轮 `JmReaderAndTaskLogicTest` 26 个用例全绿，`assembleDebug` 通过 |
+
+> **为什么不是拖动过程中实时跳**：`HorizontalPager` / `LazyColumn` 每换一页都要重组、丢掉上一页的
+> 图片解码与 Coil 请求，一次拖动跨 20 页就是连着丢 20 次；而且纵向连续里"滚动"本身是动画，
+> 拖动中反复打断会来回抖。松手跳一次，代价只有"手指一松的那一下"。
+>
+> **顺带说明**：`JmAlbumCleanerTest` 里有 3 个用例在本轮之前就是红的（`tasks.findById(taskId)!!`
+> 空指针、`removedExports` 期望 2 实得 0），与本轮无关——已用 `git stash` 在**未改动的 HEAD** 上复现，
+> 修它属于另一件事（删除编排与导出成品的清理）。
+
 **Y2 的视觉补丁（同一轮追加要求）**：
 
 | # | 反馈 | 落实方式 |
@@ -765,7 +780,7 @@ $env:ANDROID_SERIAL = "emulator-5554"   # 接了多台设备时指定目标
 | 测试类 | 用例数 | 覆盖内容 |
 |---|---|---|
 | `feature.jm.data.JmRepositoryTest` | 24 | 入库字段一致性 / 收藏保留 / 章节来源优先级（含单话本子兜底与标题归一化）/ 标签 OR / 删除语义 |
-| `feature.jm.ui.JmReaderAndTaskLogicTest` | 23 | 任务状态与进度文案 / 下载面板默认勾选与"已在队列" / **底栏切换方向** / 阅读器进度条与"待取 vs 失败" / 阅读偏好编解码 |
+| `feature.jm.ui.JmReaderAndTaskLogicTest` | 26 | 任务状态与进度文案 / 下载面板默认勾选与"已在队列" / **底栏切换方向** / 阅读器进度条与"待取 vs 失败" / **可拖动进度条的比例换算（首尾、往返、无页与单页）** / 阅读偏好编解码 |
 | `feature.jm.data.JmRecentAndFavoriteTest` | 19 | 最近浏览倒序 / 浏览时间语义 / 点详情不入库 / **骨架行不算本地数据** / 收藏夹数量与封面来源 Flow |
 | `core.jm.JmCryptoGoldenTest` | 14 | 签名 / AES-256 解密 / 块数，与参考实现逐值一致 |
 | `core.storage.FileNamingGoldenTest` | 14 | 文件名清洗 / 本子目录名 / 章节与图片排序 |

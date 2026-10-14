@@ -177,6 +177,62 @@ class JmReaderAndTaskLogicTest {
         assertThat(state.totalPages).isEqualTo(4)
     }
 
+    /**
+     * 进度条可以拖动（用户要求：拖进度条跳页，图片跟着走）。
+     *
+     * 比例按**页下标**算：第 1 页在最左（0f）、最后一页在最右（1f）。
+     * 这样首尾都精确对得上——不会"拖到最左却不是第 1 页"，也不会"已经是最后一页但没满格"。
+     */
+    @Test
+    fun `progress bar position matches the page label at both ends`() {
+        val pages = listOf(true, true, true, true)
+        val first = readerState(chapterIndex = 0, chapterCount = 1, pages = pages).copy(currentPage = 0)
+        assertThat(first.seekProgress).isWithin(0.0001f).of(0f)
+        assertThat(first.pageLabel).isEqualTo("1/4 页")
+
+        val last = readerState(chapterIndex = 0, chapterCount = 1, pages = pages).copy(currentPage = 3)
+        assertThat(last.seekProgress).isWithin(0.0001f).of(1f)
+        assertThat(last.pageLabel).isEqualTo("4/4 页")
+
+        val middle = readerState(chapterIndex = 0, chapterCount = 1, pages = pages).copy(currentPage = 2)
+        assertThat(middle.seekProgress).isWithin(0.0001f).of(2f / 3f)
+    }
+
+    /** 拖到哪儿就跳到哪儿：比例换算回页下标，两端都不能越界。 */
+    @Test
+    fun `dragging the progress bar maps back to a page index`() {
+        val state = readerState(chapterIndex = 0, chapterCount = 1, pages = List(10) { true })
+        assertThat(state.pageIndexAt(0f)).isEqualTo(0)
+        // 10 页时每页占 1/9：0.5 落在第 4 页与第 5 页正中间，就近取整
+        assertThat(state.pageIndexAt(0.5f)).isEqualTo(4)
+        // 滑块每一页一档，落到档位上必须是整页
+        (0..9).forEach { index ->
+            val ratio = index / 9f
+            assertThat(state.pageIndexAt(ratio)).isEqualTo(index)
+            assertThat(state.copy(currentPage = index).seekProgress).isWithin(0.0001f).of(ratio)
+        }
+        // 手指滑出轨道也不允许算出界外的页
+        assertThat(state.pageIndexAt(-0.2f)).isEqualTo(0)
+        assertThat(state.pageIndexAt(1.4f)).isEqualTo(9)
+    }
+
+    /**
+     * 页数不合法（图片清单还没回来、或只剩一页）时进度条不能崩，也不能除零。
+     * 只有一页时进度条是关掉的，位置固定在最左、跳到第 1 页。
+     */
+    @Test
+    fun `progress bar math is safe without a page list`() {
+        val empty = ReaderUiState()
+        assertThat(empty.totalPages).isEqualTo(0)
+        assertThat(empty.seekProgress).isEqualTo(0f)
+        assertThat(empty.pageIndexAt(0.7f)).isEqualTo(0)
+
+        val single = readerState(chapterIndex = 0, chapterCount = 1, pages = listOf(true)).copy(currentPage = 7)
+        assertThat(single.currentPageIndex).isEqualTo(0)
+        assertThat(single.seekProgress).isEqualTo(0f)
+        assertThat(single.pageIndexAt(1f)).isEqualTo(0)
+    }
+
     @Test
     fun `page label is safe before the manifest is loaded`() {
         assertThat(ReaderUiState().pageLabel).isEqualTo("0/0 页")

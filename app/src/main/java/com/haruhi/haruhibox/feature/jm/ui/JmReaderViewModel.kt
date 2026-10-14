@@ -80,7 +80,7 @@ data class ReaderUiState(
     val controlsVisible: Boolean = true,
     val showChapterPicker: Boolean = false,
     val showSettings: Boolean = false,
-    /** 当前停在第几页（0 起），底部进度条用。 */
+    /** 当前停在第几页（0 起），底部进度条用。拖动进度条时界面不直接改它——跳转成功后才更新。 */
     val currentPage: Int = 0,
     /** 本子是否已收藏（阅读器里的收藏按钮）。 */
     val collected: Boolean = false,
@@ -110,6 +110,26 @@ data class ReaderUiState(
     /** 底部进度条文案："12/34 页"。 */
     val pageLabel: String
         get() = if (pages.isEmpty()) "0/0 页" else "${(currentPage + 1).coerceIn(1, pages.size)}/${pages.size} 页"
+
+    /**
+     * 当前页在整话里的位置（0f～1f），给可拖动的进度条用。
+     *
+     * 按**页下标**算：第 1 页在最左（0f），最后一页在最右（1f）。这样首尾都能精确对上，
+     * 滑块位置与"12/34 页"永远一致，也不会出现"拖到最左却不是第 1 页"。
+     */
+    val seekProgress: Float
+        get() = if (totalPages <= 1) 0f else currentPageIndex.toFloat() / (totalPages - 1).toFloat()
+
+    /** 当前停在第几页（0 起），并夹在有效范围内；没有页时是 0。 */
+    val currentPageIndex: Int
+        get() = currentPage.coerceIn(0, (totalPages - 1).coerceAtLeast(0))
+
+    /** 把进度条上的比例换算回页下标（四舍五入，越界夹住）。进度条拖动结束时用。 */
+    fun pageIndexAt(progress: Float): Int = if (totalPages <= 1) {
+        0
+    } else {
+        kotlin.math.round(progress * (totalPages - 1)).toInt().coerceIn(0, totalPages - 1)
+    }
 }
 
 /**
