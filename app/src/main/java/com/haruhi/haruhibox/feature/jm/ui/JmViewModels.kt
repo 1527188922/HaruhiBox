@@ -24,6 +24,7 @@ import com.haruhi.haruhibox.feature.jm.data.JmRepository
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchItem
 import com.haruhi.haruhibox.feature.jm.data.OnlineSearchResult
 import com.haruhi.haruhibox.feature.jm.data.ReadingPosition
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -1296,14 +1297,6 @@ data class AlbumDetailUiState(
      * 这时为 false，界面不显示「打开文件夹」。
      */
     val canOpenFolder: Boolean = false,
-
-    /**
-     * 「从书库移除」已经**删干净**了，页面可以退出了。
-     *
-     * 删除是异步的（图片目录 + 下载目录里的成品 + 封面缓存 + 五张表），
-     * 点完立刻返回会把还在跑的协程一起取消，所以由这个标志通知上层再 pop。
-     */
-    val removedFromLibrary: Boolean = false,
 ) {
     /**
      * 下载面板的默认勾选：**没下完、也不在队列里**的章节。
@@ -1390,6 +1383,13 @@ class JmAlbumDetailViewModel(
     private val secrets: SecretStore,
     private val cleaner: JmAlbumCleaner,
     private val reading: JmReadingRepository,
+    /**
+     * 应用级协程作用域（`AppContainer.appScope`）。
+     *
+     * 只给「移出书库」这种**必须活过本页**的删除用：移出书库不再自动返回上一页，
+     * 用户完全可能删到一半就自己按返回，挂在 `viewModelScope` 上会随导航 entry 一起取消。
+     */
+    private val appScope: CoroutineScope,
     private val albumId: Long,
 ) : ViewModel() {
 
@@ -2010,19 +2010,40 @@ class JmAlbumDetailViewModel(
      * 与「删除本地文件」的差别只在于**要不要连记录一起删**。
      * **最近浏览记录保留**（用户要求第 5 点：移出书库不影响"刚看过什么"），
      * 所以移除后"最近"页仍然能看到这本、点进去还能再次加入书库。
+     *
+     * 移完之后**页面留在原地**（用户要求：退不退由用户自己按返回键决定）：
+     * 这里只把 `inLibrary` 翻成 false、报一句提示，不通知上层做任何跳转——
+     * 界面随即变成"未入库 + 已下载 0 话"，用户可以再点「未入库」加回来。
+     *
+     * ## 为什么删除跑在 [appScope] 而不是 `viewModelScope`（用户要求）
+     *
+     * 一本本子要删**六处**痕迹：图片目录、导出半成品、任务行、封面缓存、五张表……
+     * 上千张图删起来不是一瞬间的事。以前"删完自动返回上一页"顺带掩盖了取消问题；
+     * 现在返回由用户自己按，他完全可能删到一半就退出去 —— 那时导航 entry 被销毁、
+     * `viewModelScope` 连同还在跑的删除一起取消，结果是**删了一半**：
+     * 目录空了但书库记录还在（或者反过来），下次进来看到一本"下载过但一话都没有"的僵尸本。
+     *
+     * `appScope` 是应用级作用域（下载、导出也挂在它上面，见 `AppContainer.appScope`），
+     * 进程活着就一定把删除跑完，与页面在不在无关。协程里照旧写 `_state`：
+     * 页面还在就顺手把提示和本地统计刷新掉；页面已经退出的话没人观察 `_state`，写进去也无害。
      */
     fun removeFromLibrary() {
-        viewModelScope.launch {
-            val album = _state.value.album ?: return@launch
+        val album = _state.value.album ?: return
+        // 不在书库里就不再走一遍（按钮与菜单项也会跟着 inLibrary 一起失效，
+        // 这里只是兜住"确认框还开着时状态被别处改掉"这种情况）
+        if (!_state.value.inLibrary) return
+        // 先让按钮翻成「未入库」：删除要跑一会儿，别让用户对着「已入库」干等。
+        // 提示语等真删完再报，免得"已删除"说出口时其实还没删完。
+        _state.update { it.copy(inLibrary = false) }
+        appScope.launch {
             runCatching { cleaner.removeFromLibrary(listOf(album)) }
-            refreshLocalStats()
+                .onFailure { Timber.tag("jm").w(it, "移出书库失败：%s", album.id) }
             _state.update {
-                it.copy(
-                    inLibrary = false,
-                    removedFromLibrary = true,
-                    message = "已从书库移除，本地文件已删除（最近浏览记录保留）",
-                )
+                it.copy(message = "已从书库移除，本地文件已删除（最近浏览记录保留）")
             }
+            // 文件都删了，本页的"已下载 x/y 话"和占用体积必须跟着归零。
+            // loadLocalStats 自己会切 IO、只读写 _state，不碰 viewModelScope，所以在这里调用是安全的。
+            loadLocalStats()
         }
     }
 }

@@ -28,6 +28,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -167,19 +168,25 @@ private val EyeIcon: ImageVector = ImageVector.Builder(
  * 关键交互：
  * - **本地优先**：先展示本地（书库或最近浏览）的章节，联网刷新只作为增强；
  *   刷新失败不阻断本地阅读；
- * - **点详情不等于加入书库**（用户要求第 2 点）：未入库时显示「加入书库」按钮；
+ * - **点详情不等于加入书库**（用户要求第 2 点）：入库与否由封面下方那颗按钮负责——
+ *   未入库写「未入库」、点了入库；已入库写「已入库」（带 ✓，主色调），
+ *   再点一次是**移出书库**，且必须过二次确认（它会连本地图片、收藏夹、阅读进度一起删）；
  * - 封面区作者下面显示**点赞 / 观看数**（爱心 / 眼睛图标，`likes` / `total_views`），
  *   本地占用体积归到章节区标题（"章节 · 0/1 已下载（7.4 MB）"），同一屏里不重复说两遍；
+ * - 封面右侧只放"书名 / JM 号 / 作者 / 点赞观看"，**不放任何按钮**：
+ *   右栏最高 148dp（3 行书名 + 2 行作者），永远矮于 150dp 的封面，
+ *   不会出现"按钮掉到封面底边以下"的破图（用户本轮反馈）；
  * - 章节行显示"已下载 / 部分下载 x/y / 未下载"；
  * - **章节每 10 话一组**，点组头展开/收起，默认只展开第一组（用户要求）；
  *   总话数不超过 10 话时不分组、直接平铺——只有一个分组时组头只会白占一行；
  * - 「收藏夹」面板支持加入/移出/移动（用户要求第 6 点）；
- * - 更多菜单承接 ZIP/PDF 导出（P4 接）、删除文件、从书库移除。
+ * - 更多菜单承接下载面板、ZIP/PDF 导出（P4 接）、删除文件、从书库移除。
  *
  * ## 下载入口只有一个（用户要求第 3 点）
  *
- * 头部只有一颗「下载」按钮，点开面板选章节；面板里**已经在下载队列中的章节**
- * 用次要颜色标出来并且点不动，避免重复提交。章节行与章节区标题上都不再放下拉/按钮。
+ * 下载入口是更多菜单里的第一项「下载漫画」，点开面板选章节；面板里**已经在下载队列中的章节**
+ * 用次要颜色标出来并且点不动，避免重复提交。章节行与章节区标题上都不再放下拉/按钮
+ * （用户本轮要求：原先占着封面下方那颗「下载」按钮的位置让给入库按钮）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -292,6 +299,14 @@ fun JmAlbumDetailScreen(
                         Icon(Icons.Default.MoreVert, contentDescription = "更多")
                     }
                     DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                        // 下载入口搬到菜单里（用户本轮要求）：占位让给封面下方那颗"入库"按钮。
+                        // 仍然只有这一个入口，面板里**已经在下载队列中的章节**用次要颜色标出来
+                        // 并且点不动，避免重复提交。
+                        DropdownMenuItem(
+                            text = { Text("下载漫画") },
+                            enabled = state.chapters.isNotEmpty(),
+                            onClick = { menuExpanded = false; showDownloadSheet = true },
+                        )
                         DropdownMenuItem(
                             text = { Text("导出 ZIP") },
                             enabled = state.chapters.isNotEmpty(),
@@ -310,14 +325,14 @@ fun JmAlbumDetailScreen(
                             ),
                             onClick = { menuExpanded = false; showDeleteFilesDialog = true },
                         )
-                        DropdownMenuItem(
-                            text = { Text("移出书库") },
-                            colors = MenuDefaults.itemColors(
-                                textColor = MaterialTheme.colorScheme.error,
-                            ),
-                            enabled = state.inLibrary,
-                            onClick = { menuExpanded = false; showDeleteRecordDialog = true },
-                        )
+//                        DropdownMenuItem(
+//                            text = { Text("移出书库") },
+//                            colors = MenuDefaults.itemColors(
+//                                textColor = MaterialTheme.colorScheme.error,
+//                            ),
+//                            enabled = state.inLibrary,
+//                            onClick = { menuExpanded = false; showDeleteRecordDialog = true },
+//                        )
                     }
                 },
             )
@@ -379,10 +394,12 @@ fun JmAlbumDetailScreen(
                         AlbumHeader(
                             state = state,
                             onAddToLibrary = onAddToLibrary,
+                            // 已入库时那颗按钮是"移出书库"：走和菜单里同一段逻辑、
+                            // 同一个二次确认框（会删本地图片，不能点一下就执行）
+                            onRemoveFromLibrary = { showDeleteRecordDialog = true },
                             onOpenFavoriteSheet = { showFavoriteSheet = true },
                             onToggleDescription = onToggleDescription,
                             onRead = onReadFromStart,
-                            onDownload = { showDownloadSheet = true },
                             onSearchAuthor = onSearchAuthor,
                         )
                     }
@@ -941,10 +958,11 @@ fun formatStatCount(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty
 private fun AlbumHeader(
     state: AlbumDetailUiState,
     onAddToLibrary: () -> Unit,
+    /** 已入库时点那颗按钮 = 移出书库：只负责弹二次确认，真正执行由上层 [JmAlbumDetailScreen]。 */
+    onRemoveFromLibrary: () -> Unit,
     onOpenFavoriteSheet: () -> Unit,
     onToggleDescription: () -> Unit,
     onRead: () -> Unit,
-    onDownload: () -> Unit,
     /** 点作者：**直接打开搜索结果页**，进页面就按作者名搜（用户要求）。 */
     onSearchAuthor: (String) -> Unit = {},
 ) {
@@ -1018,36 +1036,21 @@ private fun AlbumHeader(
                 Spacer(Modifier.height(6.dp))
                 // 点赞数 / 观看数
                 AlbumStatRow(likes = album.likes, views = album.totalViews)
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (!state.inLibrary) {
-                        TextButton(onClick = onAddToLibrary) { Text("加入书库") }
-                    } else {
-                        Text(
-                            text = "已在书库",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                    Text(
-                        text = if (state.favoriteIds.isEmpty()) {
-                            "未收藏"
-                        } else {
-                            "已加入 ${state.favoriteIds.size} 个收藏夹"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                // 右栏到这里为止：书名(≤3 行 72dp) + 4 + JM 号(16) + 2 + 作者(≤2 行 32)
+                // + 6 + 统计(16) = 148dp，永远矮于 150dp 的封面，底下不会再多出东西。
+                //
+                // 这里原来还挂着一行「加入书库 / 已在书库 + 未收藏」：那颗 TextButton 触发
+                // 最小可点尺寸后占 48dp，3 行书名时整颗掉到封面底边以下（用户反馈）。
+                // 现在入库动作搬到了下面按钮行（未入库 / 已入库 + ✓），收藏状态由旁边的
+                // 「收藏 / 已收藏」按钮自己表达，这一行就没有存在的必要了。
             }
         }
 
         // 三颗按钮**另起一行、占满整宽**（用户第十一轮要求第 2 点）。
-        // 挤在封面右边的窄栏里时，"继续阅读 / 下载 / 已收藏"在 360dp 屏上放不下会掉行：
+        // 挤在封面右边的窄栏里时，"继续阅读 / 未入库 / 已收藏"在 360dp 屏上放不下会掉行：
         // 主按钮吃掉剩余宽度（weight），两颗次要按钮自己定宽，标签再长也不会换行。
+        // 两颗次要按钮的文案都控制在 3 个字以内（未入库/已入库、收藏/已收藏），
+        // 状态翻转时宽度只差一颗 ✓ 图标，主按钮吃掉这点差量，不会有人换行。
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1067,10 +1070,32 @@ private fun AlbumHeader(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            // 即使所有章节都已在队列里也保持可点：面板要能把"已在下载队列"
-            // 这个状态显示给用户，按钮变灰反而让人不知道为什么。
-            OutlinedButton(onClick = onDownload, enabled = state.chapters.isNotEmpty()) {
-                Text("下载")
+            // 入库 / 已入库（用户本轮要求）：占的是原来那颗「下载」按钮的位置
+            //（下载入口搬进了更多菜单的「下载漫画」）。
+            //
+            // 一颗按钮表达两种状态，靠文案 + 图标说清楚，**不做实心底**（用户要求）：
+            // - 未入库：描边按钮「未入库」，点一下入库；
+            // - 已入库：同一个描边按钮，主色调文字 + ✓ + 「已入库」，点一下是**移出书库**，
+            //   而且是"危险动作"——它会连本地图片、收藏夹、阅读进度一起删，
+            //   所以先弹二次确认（onRemoveFromLibrary），确认后才真的执行。
+            OutlinedButton(
+                onClick = { if (state.inLibrary) onRemoveFromLibrary() else onAddToLibrary() },
+                // 显式写主色调：描边按钮的默认内容色就是 primary，这里写出来是为了让
+                // "已入库 = 主色调"这条约定有据可查，将来主题调整也不会被悄悄改掉
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.primary,
+                ),
+            ) {
+                if (state.inLibrary) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        // 只是给"已入库"再加一层视觉确认，文字已经说清楚了，读屏不必念
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(if (state.inLibrary) "已入库" else "未入库")
             }
             // 「收藏」直接打开收藏夹面板选夹（用户要求第 5 点：不再单独放「收藏夹」按钮）
             OutlinedButton(onClick = onOpenFavoriteSheet) {
@@ -1263,7 +1288,7 @@ fun chapterSectionTitle(total: Int, downloaded: Int, localSizeBytes: Long): Stri
  * 章节行。
  *
  * 整行**只做一件事：进阅读器**。行尾菜单只留"删除本话文件"——
- * 下载入口统一收到头部那颗按钮里（用户要求第 3 点：同一个动作不要有四个入口）。
+ * 下载入口统一收到更多菜单的「下载漫画」里（用户要求第 3 点：同一个动作不要有四个入口）。
  */
 @Composable
 private fun ChapterRowItem(

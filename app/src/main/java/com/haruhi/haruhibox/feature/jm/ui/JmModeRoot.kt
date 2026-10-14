@@ -485,14 +485,13 @@ fun JmModeRoot(
                     val state by vm.state.collectAsStateWithLifecycle()
                     // 从任务页/阅读器回来时重算章节状态（刚下完的章节要立刻显示"已下载"）
                     OnResumeEffect { vm.refreshLocalStats() }
-                    // 移除要删图片、导出成品、封面缓存和五张表，是异步的；
-                    // 立刻 pop 会把 ViewModel 的协程一起取消（删一半就没了），所以等它做完再退。
-                    // 还要等提示语被消费掉（state.message 变回 null），否则用户什么都看不到。
-                    LaunchedEffect(state.removedFromLibrary, state.message) {
-                        if (state.removedFromLibrary && state.message == null) {
-                            navController.popBackStack()
-                        }
-                    }
+                    // 「移出书库」**不再自动退回上一页**（用户要求：退不退由用户自己按返回键决定）。
+                    //
+                    // 移除成功后停留在这页是有意义的：本子本身还在（最近浏览记录保留），
+                    // 页面就地变成"未入库 + 已下载 0 话"的样子，用户可以再点「未入库」加回来，
+                    // 也可以自己返回。删除本身仍跑在这个导航 entry 的 viewModelScope 里，
+                    // 所以移除途中用户自己退出的话，那次删除会和 ViewModel 一起被取消
+                    // ——这一点由用户掌握，不再由界面替他决定跳转。
                     JmAlbumDetailScreen(
                         state = state,
                         onBack = { navController.popBackStack() },
@@ -561,7 +560,8 @@ fun JmModeRoot(
                         // 提示交给根 Scaffold 弹，否则会被收藏夹底部面板挡住（用户反馈）；
                         // 页面内部的 MessageEffect 会先把消息消费掉，所以切页不会重放
                         onMessage = showMessage,
-                        // 页面在 state.removedFromLibrary 变 true 后自己退出（见上面的 LaunchedEffect）
+                        // 移除成功后**不自动返回**（用户要求）：页面就地变成"未入库"，
+                        // 什么时候离开由用户自己按返回键决定
                         onDeleteAlbumRecord = vm::removeFromLibrary,
                         onConsumeMessage = vm::consumeMessage,
                     )
@@ -768,6 +768,9 @@ class JmViewModelFactory(
                 secrets = container.secrets,
                 cleaner = container.jmAlbumCleaner,
                 reading = container.jmReading,
+                // 移出书库的删除挂在应用级作用域上：页面退出不该把它取消掉
+                //（详情页不再自动返回，用户可能删到一半就自己退）
+                appScope = container.appScope,
                 albumId = albumId ?: error("详情页必须传 albumId"),
             ) as T
 
